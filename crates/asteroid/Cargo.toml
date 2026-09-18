@@ -10,6 +10,7 @@ name = "asteroid"
 path = "src/main.rs"
 
 [dependencies]
+asteroid-settings = { path = "../asteroid-settings" }
 asteroid-workspace = { path = "../asteroid-workspace" }
 gpui-kit = { workspace = true }
 anyhow = { workspace = true }

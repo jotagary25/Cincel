@@ -6,12 +6,34 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+asteroid-editor = { path = "../asteroid-editor" }
+asteroid-project = { path = "../asteroid-project" }
+asteroid-settings = { path = "../asteroid-settings" }
+asteroid-syntax = { path = "../asteroid-syntax" }
+asteroid-text = { path = "../asteroid-text" }
+# The same GPUI gpui-kit re-exports, named directly so the `test-support`
+# feature can reach it (a feature cannot refer to a dev-dependency).
+gpui = { workspace = true }
 gpui-kit = { workspace = true }
 anyhow = { workspace = true }
+async-channel = { workspace = true }
 dirs = { workspace = true }
+parking_lot = { workspace = true }
+rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+gpui_platform = { workspace = true }
+tempfile = { workspace = true }
+
+[features]
+# Enables gpui's test harness (`cargo test -p asteroid-workspace --features test-support`).
+# It is off by default because it also turns on gpui leak detection, which
+# aborts the real application on exit (see `docs/etapas/etapa-0.md`, finding 7).
+test-support = ["gpui/test-support", "asteroid-editor/test-support"]
 
 [lints]
 workspace = true

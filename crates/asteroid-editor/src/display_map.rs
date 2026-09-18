@@ -195,9 +195,114 @@ impl DiffTransformMap {
     }
 }
 
-/// `DiffTransformMap` + the buffer row count: the full display space of E0.
-/// `WrapMap` and `BlockMap` are not implemented yet (no soft wrap in E0; the
-/// accept/reject pill is painted by the element instead of being a block).
+/// The text of one display row, with its tabs expanded for painting.
+///
+/// Columns in a [`DisplayPoint`] are byte offsets into the **source** text of
+/// the row (so they map straight onto buffer offsets). Painting needs the
+/// expanded text, because GPUI's `shape_line` gives a tab whatever advance the
+/// font happens to define. A tab always becomes `tab_size` spaces — not the
+/// next tab stop — so the two coordinate spaces stay a simple offset table.
+#[derive(Clone, Debug, Default)]
+pub struct RowText {
+    source: String,
+    /// Expanded text, `None` when the row has no tabs (the common case).
+    expanded: Option<String>,
+    /// `source_to_display[i]` = display byte of source byte `i`, len + 1 long.
+    source_to_display: Vec<u32>,
+}
+
+impl RowText {
+    /// Expands the tabs of `source`.
+    pub fn expand(source: String, tab_size: u32) -> Self {
+        if !source.contains('\t') {
+            return Self {
+                source,
+                expanded: None,
+                source_to_display: Vec::new(),
+            };
+        }
+        let tab = " ".repeat(tab_size.max(1) as usize);
+        let mut expanded = String::with_capacity(source.len());
+        let mut map = vec![0u32; source.len() + 1];
+        for (byte, ch) in source.char_indices() {
+            map[byte] = expanded.len() as u32;
+            if ch == '\t' {
+                expanded.push_str(&tab);
+            } else {
+                expanded.push(ch);
+            }
+            // Interior bytes of a multi-byte char point at the same place.
+            for offset in 1..ch.len_utf8() {
+                map[byte + offset] = map[byte];
+            }
+        }
+        map[source.len()] = expanded.len() as u32;
+        Self {
+            source,
+            expanded: Some(expanded),
+            source_to_display: map,
+        }
+    }
+
+    /// The row as it is stored in the buffer (or in the hunk's base text).
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The row as it is painted.
+    pub fn text(&self) -> &str {
+        self.expanded.as_deref().unwrap_or(&self.source)
+    }
+
+    /// Byte length of the source text.
+    pub fn len(&self) -> u32 {
+        self.source.len() as u32
+    }
+
+    /// Whether the row is empty.
+    pub fn is_empty(&self) -> bool {
+        self.source.is_empty()
+    }
+
+    /// Whether any tab was expanded.
+    pub fn has_tabs(&self) -> bool {
+        self.expanded.is_some()
+    }
+
+    /// Display byte of a source byte.
+    pub fn to_display(&self, source_byte: u32) -> u32 {
+        if self.expanded.is_none() {
+            return source_byte.min(self.len());
+        }
+        let ix = (source_byte as usize).min(self.source.len());
+        self.source_to_display[ix]
+    }
+
+    /// Source byte of a display byte (the start of the character it lands in).
+    pub fn to_source(&self, display_byte: u32) -> u32 {
+        if self.expanded.is_none() {
+            return display_byte.min(self.len());
+        }
+        match self.source_to_display.binary_search(&display_byte) {
+            Ok(ix) => ix as u32,
+            Err(ix) => (ix as u32).saturating_sub(1),
+        }
+    }
+
+    /// Clamps a source byte offset onto a `char` boundary inside the row.
+    pub fn clip(&self, source_byte: u32) -> u32 {
+        let mut byte = (source_byte as usize).min(self.source.len());
+        while byte > 0 && !self.source.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        byte as u32
+    }
+}
+
+/// `DiffTransformMap` + the buffer row count: the display-row space.
+/// Soft wrap lives in [`crate::WrapMap`], on top of this one; `BlockMap` is not
+/// implemented yet (the accept/reject pill is painted by the element instead of
+/// being a block).
 #[derive(Clone, Debug, Default)]
 pub struct DisplayMap {
     buffer_rows: u32,
@@ -441,5 +546,36 @@ mod tests {
         assert_eq!(map.display_row_count(), 1);
         assert_eq!(map.clip_row(50), 0);
         roundtrip(&map);
+    }
+
+    #[test]
+    fn row_text_without_tabs_is_the_identity() {
+        let row = RowText::expand("let x = 1;".to_string(), 4);
+        assert!(!row.has_tabs());
+        assert_eq!(row.text(), "let x = 1;");
+        assert_eq!(row.to_display(4), 4);
+        assert_eq!(row.to_source(4), 4);
+        assert_eq!(row.to_display(999), row.len());
+    }
+
+    #[test]
+    fn row_text_expands_tabs_and_maps_both_ways() {
+        let row = RowText::expand("\tlet x\t= 1;".to_string(), 4);
+        assert!(row.has_tabs());
+        assert_eq!(row.text(), "    let x    = 1;");
+        // source byte 1 ("l") sits at display byte 4.
+        assert_eq!(row.to_display(1), 4);
+        assert_eq!(row.to_source(4), 1);
+        // The whole row maps to the whole expanded row.
+        assert_eq!(row.to_display(row.len()), row.text().len() as u32);
+    }
+
+    #[test]
+    fn row_text_clips_to_char_boundaries() {
+        let row = RowText::expand("año".to_string(), 4);
+        // "ñ" starts at byte 1 and is 2 bytes long.
+        assert_eq!(row.clip(2), 1);
+        assert_eq!(row.clip(3), 3);
+        assert_eq!(row.clip(100), 4);
     }
 }

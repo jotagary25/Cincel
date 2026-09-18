@@ -46,6 +46,16 @@ tokio-util = { version = "0.7", features = ["compat"] }
 rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 
+# proyecto y ajustes (agregados por asteroid-project/asteroid-settings, E1-B)
+jsonc-parser = { version = "0.33", features = ["serde"] }
+globset = "0.4"
+
+# editor (agregado por asteroid-editor, E1-C): búsqueda con regex opcional
+regex = "1"
+
+# workspace (agregado por asteroid-workspace, E1-D): diálogo de carpeta por portal xdg
+rfd = "0.17"
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 [workspace.lints.clippy]
