@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/asteroid-editor/asteroid-editor"
+rust-version = "1.90"
+
+[workspace.dependencies]
+# UI (fijadas al par que exige gpui-kit 0.6.1)
+gpui = { package = "gpui-pre", version = "=0.3.5" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-kit = "=0.6.1"
+# agentes
+agent-client-protocol = "2.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+async-channel = "2"
+futures = "0.3"
+# texto y sintaxis
+ropey = "1.6"
+tree-sitter = "0.27"
+tree-sitter-highlight = "0.27"
+imara-diff = "0.2"
+similar = "3"
+# proyecto
+notify = "8"
+notify-debouncer-full = "0.5"
+ignore = "0.4"
+# utilidades
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+sha2 = "0.10"
+dirs = "6"
+
+# ACP (agregado por asteroid-acp, E0-b)
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+rustix = { version = "1", features = ["process"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3

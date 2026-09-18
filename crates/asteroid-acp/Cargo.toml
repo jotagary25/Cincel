@@ -1,0 +1,41 @@
+[package]
+name = "asteroid-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# `tests/fake_agent/` is a helper binary, not an integration test.
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+# Test helper: a real ACP agent over stdio. Built as a bin so integration tests
+# can find it through CARGO_BIN_EXE_asteroid-acp-fake-agent.
+[[bin]]
+name = "asteroid-acp-fake-agent"
+path = "tests/fake_agent/main.rs"
+
+[dependencies]
+agent-client-protocol.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+tokio-util.workspace = true
+async-channel.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+ureq.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
