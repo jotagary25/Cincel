@@ -29,6 +29,11 @@ thiserror.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 ureq.workspace = true
+sha2.workspace = true
+globset.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

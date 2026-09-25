@@ -67,6 +67,36 @@ pub struct WorkspaceLayout {
     /// Index of the active tab in `tabs`.
     #[serde(default)]
     pub active: Option<usize>,
+    /// The chat's autonomy mode, one of `review_after` / `ask_before` /
+    /// `always_apply` (`01-producto.md` §F5, `docs/etapas/etapa-2.md`).
+    #[serde(default = "default_autonomy_id")]
+    pub autonomy: String,
+}
+
+fn default_autonomy_id() -> String {
+    autonomy_to_id(asteroid_acp::AutonomyMode::default()).to_string()
+}
+
+/// The stable id an [`asteroid_acp::AutonomyMode`] is stored under.
+#[must_use]
+pub fn autonomy_to_id(mode: asteroid_acp::AutonomyMode) -> &'static str {
+    match mode {
+        asteroid_acp::AutonomyMode::ReviewAfter => "review_after",
+        asteroid_acp::AutonomyMode::AskBefore => "ask_before",
+        asteroid_acp::AutonomyMode::AlwaysApply => "always_apply",
+    }
+}
+
+/// The [`asteroid_acp::AutonomyMode`] of a stored id, defaulting to
+/// [`asteroid_acp::AutonomyMode::ReviewAfter`] for anything unrecognised
+/// (an older layout file, a hand edit).
+#[must_use]
+pub fn autonomy_from_id(id: &str) -> asteroid_acp::AutonomyMode {
+    match id {
+        "ask_before" => asteroid_acp::AutonomyMode::AskBefore,
+        "always_apply" => asteroid_acp::AutonomyMode::AlwaysApply,
+        _ => asteroid_acp::AutonomyMode::ReviewAfter,
+    }
 }
 
 impl Default for WorkspaceLayout {
@@ -77,6 +107,7 @@ impl Default for WorkspaceLayout {
             tree: DockLayout::new(crate::workspace::TREE_WIDTH),
             tabs: Vec::new(),
             active: None,
+            autonomy: default_autonomy_id(),
         }
     }
 }
@@ -192,6 +223,7 @@ mod tests {
                 },
             ],
             active: Some(1),
+            autonomy: "ask_before".to_string(),
         }
     }
 

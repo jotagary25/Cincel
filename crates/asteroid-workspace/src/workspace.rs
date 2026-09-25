@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use asteroid_chat::ChatPanel;
 use asteroid_project::Recents;
 use asteroid_settings::{SettingsEvent, SettingsWatcher};
 use asteroid_text::LineEnding;
@@ -25,9 +26,12 @@ use gpui_kit::prelude::*;
 use gpui_kit::{FontWeight, SharedString, WindowKind, WindowOptions, div, px};
 
 use crate::actions;
+use crate::agents::Agents;
 use crate::center::CenterPanel;
-use crate::layout::{DockLayout as DockLayoutState, WorkspaceLayout};
-use crate::panels::ChatPanel;
+use crate::layout::{
+    DockLayout as DockLayoutState, WorkspaceLayout, autonomy_from_id, autonomy_to_id,
+};
+use crate::panels::ChatDock;
 use crate::project::{self, Project, ProjectOptions};
 use crate::theme::ThemeColors;
 use crate::toast::{self, Toasts};
@@ -64,6 +68,13 @@ pub enum WorkspaceEvent {
         /// Whether the tab is pinned rather than a preview.
         pin: bool,
     },
+    /// The file tree's "Mencionar en el chat" context-menu item was used:
+    /// stage `path` as an `@` chip (the fallback for a tree drag source,
+    /// which `gpui-kit`'s tree does not have, see `docs/etapas/etapa-2.md`).
+    MentionFile {
+        /// Absolute path.
+        path: PathBuf,
+    },
 }
 
 /// Everything the binary hands over when it opens the window.
@@ -89,6 +100,11 @@ pub struct Workspace {
     /// Kept alive: the skin owns the dock's presentation settings.
     _skin: Rc<DockSkin>,
     chat: Entity<ChatPanel>,
+    /// Kept alive: adapts `chat` to `gpui-kit`'s dock (`crate::panels`).
+    _chat_dock: Entity<ChatDock>,
+    /// Agent lifecycle: registry, the active `AgentConnection`, and the ACP
+    /// event/command glue (`crate::agents`).
+    agents: Entity<Agents>,
     center: Entity<CenterPanel>,
     files: Entity<FilesPanel>,
     toasts: Entity<Toasts>,
@@ -112,11 +128,22 @@ impl Workspace {
         let (dock_area, skin) =
             DockSkin::dock_area(DOCK_AREA_ID, Some(DOCK_AREA_VERSION), window, cx);
 
-        let chat = ChatPanel::new(cx);
+        let chat_theme = crate::theme::chat_theme(cx);
+        let chat_settings = crate::theme::chat_settings(cx);
+        let chat = cx.new(|cx| ChatPanel::new(chat_theme, chat_settings, window, cx));
+        let chat_dock = ChatDock::new(chat.clone(), cx);
         let center = CenterPanel::new(cx);
         let files = FilesPanel::new(cx);
         let toasts = cx.new(|_| Toasts::new());
         toast::set_global(&toasts, cx);
+
+        // `Ctrl+Shift+A`/`Ctrl+L` and the chat's own bindings need a real
+        // window; `watch_files` doubles as "may this window use real OS
+        // threads", the same signal `ProjectOptions::inert` gives every other
+        // background piece (`docs/etapas/etapa-2.md`).
+        let agents_background = options.project_options.watch_files;
+        let agents =
+            cx.new(|cx| Agents::new(chat.clone(), center.clone(), agents_background, window, cx));
 
         dock_area.update(cx, |area, cx| {
             area.set_center(
@@ -131,7 +158,7 @@ impl Workspace {
             for (placement, panel, width) in [
                 (
                     DockPlacement::Left,
-                    panel_handle(chat.clone()),
+                    panel_handle(chat_dock.clone()),
                     px(CHAT_WIDTH),
                 ),
                 (
@@ -152,7 +179,8 @@ impl Workspace {
         });
 
         let mut subscriptions = Vec::new();
-        // The tree asks for files; the tab area opens them.
+        // The tree asks for files; the tab area opens them. A "Mencionar en
+        // el chat" click stages the same path as an `@` chip.
         subscriptions.push(cx.subscribe_in(
             &files,
             window,
@@ -163,12 +191,24 @@ impl Workspace {
                     this.center
                         .update(cx, |center, cx| center.open_file(&path, pin, window, cx));
                 }
+                WorkspaceEvent::MentionFile { path } => {
+                    let path = path.clone();
+                    this.chat
+                        .update(cx, |chat, cx| chat.insert_mention(path, window, cx));
+                }
             },
         ));
 
-        // The status bar reads the active tab, so the workspace repaints
-        // whenever the tab area changes (cursor, dirty dot, tab switch).
+        // Everything `asteroid_chat::ChatPanel` emits reaches `Agents`, which
+        // subscribes to the panel itself (`crate::agents`): the ACP worker,
+        // the project's buffers, the conversation store and the desktop all
+        // hang off that one handler.
+
+        // The status bar reads the active tab and the chat's agent/status, so
+        // the workspace repaints whenever either changes (cursor, dirty dot,
+        // tab switch, streaming, permission cards, …).
         subscriptions.push(cx.observe(&center, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.observe(&chat, |_, _, cx| cx.notify()));
 
         // `files.autosave = "on_focus_change"`: leaving the window is a focus
         // change (`docs/specs/modulos/settings.md`).
@@ -194,6 +234,12 @@ impl Workspace {
                             workspace
                                 .center
                                 .update(cx, |center, cx| center.refresh_editor_style(cx));
+                            let chat_theme = crate::theme::chat_theme(cx);
+                            let chat_settings = crate::theme::chat_settings(cx);
+                            workspace.chat.update(cx, |chat, cx| {
+                                chat.set_theme(chat_theme, cx);
+                                chat.set_settings(chat_settings, cx);
+                            });
                             for issue in &reloaded.issues {
                                 toast::warn(issue.to_string(), cx);
                             }
@@ -222,6 +268,9 @@ impl Workspace {
             move |workspace: &mut Self, cx: &mut Context<Self>| {
                 save_window_state(&last_bounds);
                 workspace.save_layout(cx);
+                workspace
+                    .agents
+                    .update(cx, |agents, cx| agents.save_conversation_now(cx));
                 async {}
             }
         })
@@ -248,6 +297,8 @@ impl Workspace {
             dock_area,
             _skin: skin,
             chat,
+            _chat_dock: chat_dock,
+            agents,
             center,
             files,
             toasts,
@@ -301,11 +352,22 @@ impl Workspace {
         self.project = Some(project.clone());
         self.files
             .update(cx, |files, cx| files.set_project(Some(project.clone()), cx));
-        self.center
-            .update(cx, |center, cx| center.set_project(Some(project), cx));
+        self.center.update(cx, |center, cx| {
+            center.set_project(Some(project.clone()), cx)
+        });
+        self.agents.update(cx, |agents, cx| {
+            agents.set_project(Some(project), window, cx)
+        });
         self.recents = Recents::load();
 
         let layout = WorkspaceLayout::load(&root).unwrap_or_default();
+        // The autonomy the session was left in for this project
+        // (`01-producto.md` §F5); `set_autonomy` emits `ChatEvent::AutonomyChanged`,
+        // which reaches `Agents` through the subscription above and rebuilds
+        // its policy to match.
+        self.chat.update(cx, |chat, cx| {
+            chat.set_autonomy(autonomy_from_id(&layout.autonomy), cx);
+        });
         self.apply_layout(&layout, window, cx);
         window.set_window_title(&format!(
             "{} — Asteroid",
@@ -324,6 +386,17 @@ impl Workspace {
     /// The tab area.
     pub fn center(&self) -> &Entity<CenterPanel> {
         &self.center
+    }
+
+    /// The chat panel: agent selector, transcript, composer.
+    pub fn chat(&self) -> &Entity<ChatPanel> {
+        &self.chat
+    }
+
+    /// The agent lifecycle controller: the active `AgentConnection`, if any,
+    /// and the ACP event/command glue.
+    pub fn agents(&self) -> &Entity<Agents> {
+        &self.agents
     }
 
     /// The file tree panel.
@@ -393,6 +466,7 @@ impl Workspace {
             },
             tabs,
             active,
+            autonomy: autonomy_to_id(self.chat.read(cx).autonomy()).to_string(),
         };
         if let Err(error) = layout.save(&root) {
             tracing::warn!(%error, "no se pudo guardar el layout del proyecto");
@@ -534,8 +608,9 @@ impl Workspace {
                 area.toggle_dock(DockPlacement::Left, window, cx);
             }
         });
-        let handle = self.chat.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
+        // `Ctrl+L` focuses the composer itself, not just the panel.
+        self.chat
+            .update(cx, |chat, cx| chat.focus_input(window, cx));
     }
 
     fn on_close_tab(&mut self, _: &actions::CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -711,6 +786,13 @@ impl Workspace {
         let (line, column) = tab.map(|tab| tab.cursor_line_column()).unwrap_or((1, 1));
         let read_only = tab.is_some_and(|tab| tab.read_only);
         let zoom = (crate::settings::ui_scale(cx) * 100.).round() as i32;
+        let chat = self.chat.read(cx);
+        let agent_status = match chat.active_agent() {
+            Some(agent) => {
+                SharedString::from(format!("{} · {}", agent.name, chat.status().label()))
+            }
+            None => SharedString::from("Sin agente"),
+        };
 
         StatusBar::new()
             .h(px(STATUS_BAR_HEIGHT))
@@ -733,7 +815,18 @@ impl Workspace {
                 h_flex()
                     .gap_3()
                     .text_color(theme.text_muted)
-                    .child(SharedString::from("Sin agente"))
+                    // Mirrors the chat's own header pill; clicking it moves
+                    // the keyboard straight to the composer.
+                    .child(
+                        div()
+                            .id("status-agent")
+                            .cursor_pointer()
+                            .child(agent_status)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.chat
+                                    .update(cx, |chat, cx| chat.focus_input(window, cx));
+                            })),
+                    )
                     // Clicking the pending counter opens the review panel
                     // (`02-visual.md` §1); the panel itself is stage 3.
                     .child(

@@ -1,41 +1,47 @@
 //! The chat dock panel.
 //!
-//! The chat itself is `asteroid-chat`, in stage 2; what lives here is the
-//! panel shell that holds it, so the dock and `Ctrl+Shift+A` work today. The
-//! file tree is [`crate::tree_panel`] and the tab area is [`crate::center`].
+//! `asteroid-chat` owns the whole chat experience (transcript, composer,
+//! popovers, permission cards); this module only adapts it to `gpui-kit`'s
+//! dock, which needs its own [`gpui_kit::component::dock::Panel`] /
+//! [`gpui_kit::component::dock::BasePanel`] impls. Rust's orphan rule forbids
+//! implementing a foreign trait (`Panel`) for a foreign type
+//! (`asteroid_chat::ChatPanel`), so [`ChatDock`] wraps it instead of
+//! reimplementing it: it renders the whole wrapped entity as its single
+//! child and forwards the focus handle to it, so `Ctrl+L`
+//! (`workspace::focus_chat`) can still move the keyboard straight to the
+//! composer via [`asteroid_chat::ChatPanel::focus_input`].
 
+use asteroid_chat::ChatPanel;
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
-use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::prelude::*;
-use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Window, div,
-};
+use gpui_kit::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Window};
 
-use crate::theme::ThemeColors;
-
-/// The chat panel, on the left. Empty until stage 2.
-pub struct ChatPanel {
-    focus_handle: FocusHandle,
+/// Adapts [`asteroid_chat::ChatPanel`] to the dock on the left.
+pub struct ChatDock {
+    chat: Entity<ChatPanel>,
 }
 
-impl ChatPanel {
-    /// Builds the panel entity.
-    pub fn new(cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| Self {
-            focus_handle: cx.focus_handle(),
-        })
+impl ChatDock {
+    /// Wraps an already-built chat panel entity.
+    pub fn new(chat: Entity<ChatPanel>, cx: &mut App) -> Entity<Self> {
+        cx.new(|_| Self { chat })
+    }
+
+    /// The wrapped chat panel.
+    pub fn chat(&self) -> &Entity<ChatPanel> {
+        &self.chat
     }
 }
 
-impl EventEmitter<PanelEvent> for ChatPanel {}
+impl EventEmitter<PanelEvent> for ChatDock {}
 
-impl Focusable for ChatPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+impl Focusable for ChatDock {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.chat.read(cx).focus_handle(cx)
     }
 }
 
-impl BasePanel for ChatPanel {
+impl BasePanel for ChatDock {
     fn panel_name(&self) -> &'static str {
         "ChatPanel"
     }
@@ -47,26 +53,18 @@ impl BasePanel for ChatPanel {
     }
 }
 
-impl Panel for ChatPanel {
+impl Panel for ChatDock {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         SharedString::from("Chat")
     }
+
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
 }
 
-impl Render for ChatPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ThemeColors::global(cx).clone();
-        v_flex()
-            .id("chat-panel")
-            .key_context("Chat")
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .p_3()
-            .bg(theme.bg_app)
-            .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("El chat con el agente vive acá."),
-            )
+impl Render for ChatDock {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.chat.clone()
     }
 }

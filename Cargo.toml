@@ -56,6 +56,11 @@ regex = "1"
 # workspace (agregado por asteroid-workspace, E1-D): diálogo de carpeta por portal xdg
 rfd = "0.17"
 
+# acp: distribuciones binary/uvx (agregado por asteroid-acp, E2)
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 [workspace.lints.clippy]

@@ -1296,3 +1296,158 @@ fn horizontal_scrolling_only_exists_without_soft_wrap(cx: &mut TestAppContext) {
         "turning soft wrap on resets the horizontal scroll"
     );
 }
+
+/// Highlight spans of one buffer row, in row-local byte offsets, so they can be
+/// compared across an edit that moved every offset after it.
+fn row_spans(
+    view: &Entity<EditorView>,
+    cx: &mut VisualTestContext,
+    row: u32,
+) -> Vec<(std::ops::Range<usize>, asteroid_syntax::HighlightId)> {
+    cx.update(|_window, cx| {
+        view.update(cx, |view, _cx| {
+            let start = view.snapshot_line_start(row);
+            let end = start + view.display_row_source(row).len();
+            view.highlights(start..end)
+                .iter()
+                .filter(|(span, _)| span.end > start && span.start < end)
+                .map(|(span, id)| {
+                    (
+                        span.start.max(start) - start..span.end.min(end) - start,
+                        *id,
+                    )
+                })
+                .collect()
+        })
+    })
+}
+
+#[gpui::test]
+fn typing_never_paints_a_frame_without_the_highlights_it_already_had(cx: &mut TestAppContext) {
+    // The bug this guards: every keystroke moved the tree-sitter state to the
+    // background executor, `highlights()` came back empty while it was away and
+    // the whole viewport was painted in the plain text colour for a frame or
+    // two — every character in the editor blinking on each keystroke.
+    const TEXT: &str = "\
+// una nota
+fn main() {
+    let alpha = 1;
+    let beta = 2;
+    let gamma = alpha + beta;
+}
+";
+    // The comment on row 0 is where the character is typed.
+    const EDITED_ROW: u32 = 0;
+    let rows = TEXT.lines().count() as u32;
+
+    let (view, handle, mut visual) =
+        open_with(cx, TEXT, vec![], EditorSettings::default(), Some("rust"));
+    visual.run_until_parked();
+
+    let before: Vec<_> = (0..rows)
+        .map(|row| row_spans(&view, &mut visual, row))
+        .collect();
+    assert!(
+        before
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| *row as u32 != EDITED_ROW)
+            .all(|(_, spans)| !spans.is_empty()),
+        "every row must start out highlighted, got {before:?}"
+    );
+
+    // One painted frame with the probe on: the baseline every later frame is
+    // compared against.
+    visual.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.set_render_probe(true);
+            cx.notify();
+        })
+    });
+    visual.run_until_parked();
+    let baseline = visual
+        .update(|_window, cx| view.update(cx, |view, _cx| view.take_render_frames()))
+        .pop()
+        .expect("the probe must have recorded the frame before the keystroke");
+    assert!(
+        baseline.rows.iter().any(|row| row.highlight_spans > 0),
+        "the baseline frame must have painted highlights"
+    );
+
+    // Type at the end of the comment.
+    set_cursor(
+        &view,
+        &mut visual,
+        DisplayPoint::new(EDITED_ROW, TEXT.lines().next().unwrap().len() as u32),
+    );
+    cx.simulate_keystrokes(handle, "s");
+    visual.run_until_parked();
+
+    let frames =
+        visual.update(|_window, cx| view.update(cx, |view, _cx| view.take_render_frames()));
+    assert!(
+        !frames.is_empty(),
+        "the keystroke must have painted at least one frame"
+    );
+
+    // (1) No frame in between dropped the highlights of a row outside the edit,
+    // and (2) none of those rows was shaped again.
+    for (ix, frame) in frames.iter().enumerate() {
+        for painted in &frame.rows {
+            if painted.display_row == EDITED_ROW {
+                continue;
+            }
+            let expected = baseline
+                .row(painted.display_row)
+                .expect("the baseline painted the same rows")
+                .highlight_spans;
+            assert_eq!(
+                painted.highlight_spans, expected,
+                "frame {ix} painted row {} with {} spans instead of {expected}",
+                painted.display_row, painted.highlight_spans
+            );
+            assert!(
+                !painted.reshaped,
+                "frame {ix} re-shaped row {}, which the keystroke did not change",
+                painted.display_row
+            );
+        }
+    }
+
+    // And the spans themselves are the ones the row had before the keystroke.
+    let after: Vec<_> = (0..rows)
+        .map(|row| row_spans(&view, &mut visual, row))
+        .collect();
+    for row in 0..rows {
+        if row == EDITED_ROW {
+            continue;
+        }
+        assert_eq!(
+            after[row as usize], before[row as usize],
+            "row {row} lost or changed its highlight spans"
+        );
+    }
+}
+
+#[gpui::test]
+fn one_keystroke_reparses_without_leaving_the_ui_thread(cx: &mut TestAppContext) {
+    let (view, handle, mut visual) = open_with(
+        cx,
+        "fn main() {\n    let alpha = 1;\n}\n",
+        vec![],
+        EditorSettings::default(),
+        Some("rust"),
+    );
+    visual.run_until_parked();
+    let version = visual.update(|_window, cx| view.read(cx).highlight_version());
+
+    set_cursor(&view, &mut visual, DisplayPoint::new(1, 18));
+    cx.simulate_keystrokes(handle, "s");
+    // No `run_until_parked`: an incremental reparse of one character fits in
+    // `SYNC_PARSE_BUDGET`, so the highlights are already current here and the
+    // frame that paints the character paints it with its final colours.
+    assert!(
+        visual.update(|_window, cx| view.read(cx).highlight_version()) > version,
+        "the keystroke must have been reparsed on the UI thread"
+    );
+}

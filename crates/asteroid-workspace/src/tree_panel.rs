@@ -256,6 +256,25 @@ impl FilesPanel {
         };
         copy(&relative.to_string_lossy(), cx);
     }
+
+    /// "Mencionar en el chat": the context-menu stand-in for dragging a file
+    /// from the tree onto the chat composer (`docs/etapas/etapa-2.md`,
+    /// `gpui-kit`'s tree has no drag source to hook a cross-panel drop onto).
+    fn on_mention_in_chat(
+        &mut self,
+        _: &crate::actions::MentionInChat,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((project, relative)) = self.project.clone().zip(self.target(cx)) else {
+            return;
+        };
+        let absolute = project.read(cx).absolute(&relative);
+        if absolute.is_dir() {
+            return;
+        }
+        cx.emit(WorkspaceEvent::MentionFile { path: absolute });
+    }
 }
 
 /// Puts `text` on the clipboard and says so.
@@ -413,6 +432,10 @@ impl Render for FilesPanel {
                             "Copiar ruta relativa",
                             Box::new(crate::actions::CopyRelativePath),
                         )
+                        .menu(
+                            "Mencionar en el chat",
+                            Box::new(crate::actions::MentionInChat),
+                        )
                     }
                 })
                 .size_full()
@@ -436,6 +459,7 @@ impl Render for FilesPanel {
             .on_action(cx.listener(Self::on_reveal_in_folder))
             .on_action(cx.listener(Self::on_copy_path))
             .on_action(cx.listener(Self::on_copy_relative_path))
+            .on_action(cx.listener(Self::on_mention_in_chat))
             .size_full()
             .bg(theme.bg_app)
             .child(body)

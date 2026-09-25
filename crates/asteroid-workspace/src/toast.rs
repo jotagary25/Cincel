@@ -17,6 +17,9 @@ use crate::theme::ThemeColors;
 /// How long a toast stays on screen.
 pub const TOAST_DURATION: Duration = Duration::from_secs(4);
 
+/// How long an undo offer stays on screen (`docs/etapas/etapa-2.md`).
+pub const UNDO_DURATION: Duration = Duration::from_secs(5);
+
 /// The tone of a toast, which picks its accent color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
@@ -124,10 +127,36 @@ impl Toasts {
         key: Option<&'static str>,
         cx: &mut Context<Self>,
     ) {
+        self.queue(message, kind, actions, key, None, cx);
+    }
+
+    /// Queues `message` with buttons **and** a timer: the buttons are an offer
+    /// (undo), not a question, so the toast still goes away by itself.
+    pub fn push_timed(
+        &mut self,
+        message: impl Into<SharedString>,
+        kind: ToastKind,
+        actions: Vec<(SharedString, ToastAction)>,
+        timeout: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue(message, kind, actions, None, Some(timeout), cx);
+    }
+
+    fn queue(
+        &mut self,
+        message: impl Into<SharedString>,
+        kind: ToastKind,
+        actions: Vec<(SharedString, ToastAction)>,
+        key: Option<&'static str>,
+        timeout: Option<Duration>,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_id;
         self.next_id += 1;
         let message = message.into();
-        let waits_for_an_answer = !actions.is_empty();
+        let waits_for_an_answer = !actions.is_empty() && timeout.is_none();
+        let timeout = timeout.unwrap_or(TOAST_DURATION);
         tracing::info!(%message, ?kind, "aviso");
         // A keyed message takes the place of the one already on screen, and
         // the new timer below replaces its timer.
@@ -147,7 +176,7 @@ impl Toasts {
             return;
         }
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_DURATION).await;
+            cx.background_executor().timer(timeout).await;
             let _ = this.update(cx, |this, cx| this.dismiss(id, cx));
         })
         .detach();
@@ -318,6 +347,28 @@ pub fn ask<const N: usize>(
         .collect();
     toasts.update(cx, |toasts, cx| {
         toasts.push_with_actions(message, ToastKind::Warning, actions, None, cx)
+    });
+}
+
+/// Posts a "hecho, ¿lo deshago?" with a single "Deshacer" button and a timer.
+///
+/// Unlike [`ask`] this one is not a question: the action already happened, so
+/// the toast expires by itself after [`UNDO_DURATION`] and the button is the
+/// way back (`docs/etapas/etapa-2.md` § correcciones, borrar conversaciones).
+pub fn undo(message: impl Into<SharedString>, action: impl Fn(&mut App) + 'static, cx: &mut App) {
+    let Some(toasts) = cx
+        .try_global::<ToastHandle>()
+        .and_then(|handle| handle.0.upgrade())
+    else {
+        tracing::debug!("todavía no hay cola de avisos");
+        return;
+    };
+    let actions = vec![(
+        SharedString::from("Deshacer"),
+        Box::new(action) as ToastAction,
+    )];
+    toasts.update(cx, |toasts, cx| {
+        toasts.push_timed(message, ToastKind::Info, actions, UNDO_DURATION, cx);
     });
 }
 

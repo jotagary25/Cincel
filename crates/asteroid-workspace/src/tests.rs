@@ -867,16 +867,84 @@ fn the_keymap_binds_every_workspace_command(cx: &mut TestAppContext) {
         let config = Config::default();
         crate::keymap::convert(&config.keymap, cx)
     });
-    // Every `workspace::*` command of the default keymap resolves to an
-    // action; the `editor::*` and `chat::*` ones are skipped until their
-    // crates register them.
+    // Every `workspace::*` and `chat::*` command of the default keymap
+    // resolves to an action (`editor::*` since Etapa 1, `chat::*` since
+    // Etapa 2's `asteroid_chat::default_key_bindings` merge in
+    // `crate::keymap::built_in_bindings`).
     assert!(
         conversion
             .skipped
             .iter()
-            .all(|(_, command, _)| !command.starts_with("workspace::")),
+            .all(|(_, command, _)| !command.starts_with("workspace::")
+                && !command.starts_with("chat::")),
         "{:?}",
         conversion.skipped
     );
     assert!(!conversion.bindings.is_empty());
+}
+
+#[gpui::test]
+fn ctrl_l_focuses_the_chat_composer(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+
+    // Move the keyboard elsewhere first, so the assertion is meaningful.
+    let files = workspace.read_with(cx, |workspace, _| workspace.files().clone());
+    files.update(cx, |files, cx| {
+        files.open_for_test(Path::new("Cargo.toml"), true, cx)
+    });
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("ctrl-l");
+    cx.run_until_parked();
+
+    // Typing now must land in the composer, not in whatever had the keyboard
+    // before: proof `Ctrl+L` moved the focus all the way to the input, not
+    // just to the panel.
+    cx.simulate_input("hola");
+    cx.run_until_parked();
+    let chat = workspace.read_with(cx, |workspace, _| workspace.chat().clone());
+    let text = chat.read_with(cx, |chat, cx| chat.input_text(cx));
+    assert_eq!(text, "hola");
+
+    let dock_open = workspace.read_with(cx, |workspace, cx| {
+        workspace.is_dock_open(DockPlacement::Left, cx)
+    });
+    assert!(
+        dock_open,
+        "Ctrl+L debería abrir el dock del chat si estaba colapsado"
+    );
+}
+
+#[gpui::test]
+fn mentioning_a_file_from_the_tree_writes_the_token_in_the_draft(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+
+    let files = workspace.read_with(cx, |workspace, _| workspace.files().clone());
+    files.update(cx, |files, cx| {
+        files.open_for_test(Path::new("src/main.rs"), true, cx)
+    });
+    cx.run_until_parked();
+    files.update(cx, |_files, cx| {
+        cx.emit(WorkspaceEvent::MentionFile {
+            path: dir.path().join("src/main.rs"),
+        });
+    });
+    cx.run_until_parked();
+
+    let chat = workspace.read_with(cx, |workspace, _| workspace.chat().clone());
+    let (mentions, text) = chat.read_with(cx, |chat, cx| {
+        (
+            chat.mentions()
+                .iter()
+                .map(|mention| mention.path.clone())
+                .collect::<Vec<_>>(),
+            chat.input_text(cx),
+        )
+    });
+    assert_eq!(mentions, vec![dir.path().join("src/main.rs")]);
+    assert_eq!(text, "@main.rs ", "la mención se escribe en el texto");
 }

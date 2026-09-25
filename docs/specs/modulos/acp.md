@@ -15,7 +15,18 @@ Cliente ACP: descubrir, lanzar y hablar con agentes. Sin GPUI. Corre en un hilo 
 - **Modo de autonomía** (`01-producto.md §F5`): `Revisar después` responde automáticamente la opción `allow_once` a permisos cuyo tool call es `kind: edit|read|search|think`, salvo rutas sensibles; `Pedir antes` reenvía todo a la UI; `Aplicar siempre` responde `allow_once` a todo salvo rutas sensibles. Las opciones `reject_*` nunca se autoseleccionan. Los tool calls `execute` siempre se preguntan salvo en `Aplicar siempre`.
 
 ## Criterios de aceptación
-- [ ] Test de integración con un agente falso (binario en `tests/fake_agent`) que: negocia, crea sesión, hace streaming de texto, emite un tool call con `diff`, pide permiso, llama `fs/read_text_file` y `fs/write_text_file`, y termina. Se verifica la secuencia de `AgentEvent`.
-- [ ] Un `stdout` con una línea no-JSON no rompe la conexión.
-- [ ] Matar el proceso del agente produce `Exited` y la UI puede relanzarlo.
-- [ ] Ejemplo `cargo run -p asteroid-acp --example chat -- --agent claude-acp "di hola"` imprime la respuesta usando la sesión del CLI del sistema.
+- [x] Test de integración con un agente falso (binario en `tests/fake_agent`) que: negocia, crea sesión, hace streaming de texto, emite un tool call con `diff`, pide permiso, llama `fs/read_text_file` y `fs/write_text_file`, y termina. Se verifica la secuencia de `AgentEvent`.
+- [x] Un `stdout` con una línea no-JSON no rompe la conexión.
+- [x] Matar el proceso del agente produce `Exited` y la UI puede relanzarlo.
+- [ ] Ejemplo `cargo run -p asteroid-acp --example chat -- --agent claude-acp "di hola"` imprime la respuesta usando la sesión del CLI del sistema. (Sigue sin correrse contra el agente real en esta etapa; el ejemplo compila y quedó actualizado a la API de E2, pero E2 solo verifica contra el agente falso — ver `docs/etapas/`.)
+
+## Desviaciones (Etapa 2)
+
+Gaps que quedaron abiertos o resueltos de forma distinta a la letra de este documento:
+
+- **`AuthMethodView::kind` no distingue `Url`**: el esquema ACP v1 (`agent-client-protocol` 2.1 / schema 1.7) solo modela `AuthMethod::Terminal` (el cliente corre el agente en una terminal) y `AuthMethod::Agent` (el agente resuelve todo vía `authenticate`); no hay un discriminador de protocolo para "es un flujo de URL/OAuth". `AuthMethodView` expone `Terminal { command, args }` (con el string de shell listo para copiar) y `Other` para todo lo demás — un método `Agent` que en la práctica es OAuth queda como `Other`, indistinguible de cualquier otro método manejado por el agente.
+- **`agentFileChangeReport` vía `_meta`**: el shape exacto (`_meta.jetbrains.air.*`) surge de la documentación del adaptador `codex-acp` (no hay spec formal del namespace `jetbrains.air` en `agentclientprotocol.com`); se negocia con `{"jetbrains":{"air":{"capabilities":{"agentFileChangeReport":{"version":1}}}}}` en `initialize` (ambos lados) y `{"jetbrains":{"air":{"agentFileChangeReportRequest":{"version":1,"requestId":...}}}}` en `session/prompt`. El agente falso de test implementa este contrato; no se probó contra `claude-agent-acp`/`codex-acp` reales en esta etapa (E2 no corre agentes reales).
+- **`elicitation`**: el SDK 2.1 sí tiene soporte estable (`CreateElicitationRequest`/`CreateElicitationResponse`, modos `form` y `url`), a diferencia de lo que suponía el hallazgo de E0. Implementado completo: capacidad anunciada en `initialize`, evento `AgentEvent::Elicitation { id, session_id, request, reply }`, y cancelación de elicitations pendientes de una sesión junto con los permisos al hacer `Cancel`.
+- **`session/load` y `session/resume`**: implementados ambos (el documento solo pedía `session/load`); comparten el mismo evento de finalización `AgentEvent::SessionCreated` que `session/new` en vez de eventos separados, para no triplicar la superficie pública.
+- **`line > total` en `fs/read_text_file`**: sigue sin validarse en `asteroid-acp` (documentado ya en la sección "Handlers" de este archivo); lo resuelve la UI con `BufferStore`, como estaba previsto.
+- **`node`/`uvx` no verificados con node/uv rotos**: `ensure_node_available`/`ensure_uv_available` se probaron contra binarios reales presentes en la máquina de referencia; no hay un test que simule `node` ausente o `< 22` (requeriría manipular `PATH` en el proceso de test, frágil en `cargo test` paralelo) — el camino de error se revisó por lectura de código.

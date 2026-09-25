@@ -2,11 +2,17 @@
 //!
 //! ```bash
 //! cargo run -p asteroid-acp --example chat -- \
-//!     --agent claude-acp [--cwd DIR] "Respondé solo con la palabra: hola"
+//!     --agent claude-acp [--cwd DIR] [--mention archivo.rs] \
+//!     [--cancel-after SEGUNDOS] "Respondé solo con la palabra: hola"
+//!
+//! # Solo `initialize`: imprime `agentCapabilities` y sale (no gasta tokens).
+//! cargo run -p asteroid-acp --example chat -- --agent claude-acp --capabilities-only
 //! ```
 //!
 //! Sirve `fs/read_text_file` y `fs/write_text_file` directamente contra el
 //! disco: eso es cosa del ejemplo, en Asteroid lo resuelve el `BufferStore`.
+//! `project_root` de la sandbox es el mismo `--cwd` (o el directorio temporal
+//! cuando no se pasa).
 //!
 //! Códigos de salida: `0` turno terminado, `2` error de uso o del agente,
 //! `3` hace falta autenticarse.
@@ -18,31 +24,43 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use asteroid_acp::acp::schema::v1::{
-    AuthMethod, ContentBlock, SessionUpdate, StopReason, TextContent, ToolCallContent, ToolKind,
+    AuthMethod, ContentBlock, CreateElicitationResponse, ElicitationAction, SessionUpdate,
+    StopReason, ToolCallContent, ToolKind,
 };
 use asteroid_acp::connection::tool_call_paths;
 use asteroid_acp::{
-    AgentCommand, AgentConnection, AgentEvent, AutoAnswer, Autonomy, LaunchSpec, PermissionOutcome,
-    pick_allow_option, pick_reject_option,
+    AgentCommand, AgentConnection, AgentEvent, AuthMethodKind, AuthMethodView, AutoAnswer,
+    Autonomy, AutonomyMode, LaunchSpec, PermissionOutcome, PromptBlock, pick_allow_option,
+    pick_reject_option,
 };
 
 const USAGE: &str = "\
 uso: chat --agent <id> [--cwd DIR] [--autonomy revisar-despues|pedir-antes|aplicar-siempre]
-          [--timeout SEGUNDOS] \"texto del prompt\"";
+          [--timeout SEGUNDOS] [--mention ARCHIVO]... [--cancel-after SEGUNDOS]
+          \"texto del prompt\"
+     chat --agent <id> --capabilities-only";
 
 struct Args {
     agent: String,
     cwd: Option<PathBuf>,
-    autonomy: Autonomy,
+    autonomy: AutonomyMode,
     timeout: Duration,
+    mentions: Vec<PathBuf>,
+    cancel_after: Option<Duration>,
+    /// Negotiate `initialize`, print what the agent announced and exit
+    /// without creating a session or sending a prompt.
+    capabilities_only: bool,
     prompt: String,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut agent = None;
     let mut cwd = None;
-    let mut autonomy = Autonomy::ReviewAfter;
+    let mut autonomy = AutonomyMode::ReviewAfter;
     let mut timeout = Duration::from_secs(600);
+    let mut mentions = Vec::new();
+    let mut cancel_after = None;
+    let mut capabilities_only = false;
     let mut prompt = None;
 
     let mut args = std::env::args().skip(1);
@@ -53,9 +71,9 @@ fn parse_args() -> Result<Args, String> {
             "--autonomy" => {
                 let value = args.next().ok_or("falta el valor de --autonomy")?;
                 autonomy = match value.as_str() {
-                    "revisar-despues" | "review-after" => Autonomy::ReviewAfter,
-                    "pedir-antes" | "ask-before" => Autonomy::AskBefore,
-                    "aplicar-siempre" | "always-apply" => Autonomy::AlwaysApply,
+                    "revisar-despues" | "review-after" => AutonomyMode::ReviewAfter,
+                    "pedir-antes" | "ask-before" => AutonomyMode::AskBefore,
+                    "aplicar-siempre" | "always-apply" => AutonomyMode::AlwaysApply,
                     other => return Err(format!("modo de autonomía desconocido: {other}")),
                 };
             }
@@ -64,6 +82,18 @@ fn parse_args() -> Result<Args, String> {
                 let secs: u64 = value.parse().map_err(|_| "--timeout debe ser un número")?;
                 timeout = Duration::from_secs(secs);
             }
+            "--mention" => {
+                let value = args.next().ok_or("falta el valor de --mention")?;
+                mentions.push(PathBuf::from(value));
+            }
+            "--cancel-after" => {
+                let value = args.next().ok_or("falta el valor de --cancel-after")?;
+                let secs: u64 = value
+                    .parse()
+                    .map_err(|_| "--cancel-after debe ser un número")?;
+                cancel_after = Some(Duration::from_secs(secs));
+            }
+            "--capabilities-only" | "--print-capabilities" => capabilities_only = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other if other.starts_with("--") => return Err(format!("opción desconocida: {other}")),
             other => prompt = Some(other.to_string()),
@@ -75,7 +105,15 @@ fn parse_args() -> Result<Args, String> {
         cwd,
         autonomy,
         timeout,
-        prompt: prompt.ok_or("falta el texto del prompt")?,
+        mentions,
+        cancel_after,
+        capabilities_only,
+        // `--capabilities-only` no manda nada, así que no necesita texto.
+        prompt: match prompt {
+            Some(prompt) => prompt,
+            None if capabilities_only => String::new(),
+            None => return Err("falta el texto del prompt".to_string()),
+        },
     })
 }
 
@@ -135,9 +173,23 @@ async fn run(args: Args) -> Result<ExitCode, String> {
     println!("cwd:       {}", cwd.display());
     println!("autonomía: {}", args.autonomy.label());
     println!("registro:  {:?}", registry.source());
+    if !args.mentions.is_empty() {
+        println!(
+            "menciones: {}",
+            args.mentions
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if let Some(cancel_after) = args.cancel_after {
+        println!("cancela en: {cancel_after:?}");
+    }
     println!("---");
 
-    let mut connection = AgentConnection::start();
+    // `project_root` de la sandbox = `cwd` de la sesión en este ejemplo.
+    let mut connection = AgentConnection::start(cwd.clone());
     connection
         .send(AgentCommand::Spawn {
             launch: launch.clone(),
@@ -146,11 +198,23 @@ async fn run(args: Args) -> Result<ExitCode, String> {
         .await
         .map_err(|error| error.to_string())?;
 
+    if args.capabilities_only {
+        let outcome =
+            tokio::time::timeout(args.timeout, print_capabilities(&connection, &launch)).await;
+        connection.shutdown();
+        return match outcome {
+            Ok(result) => result,
+            Err(_) => Err(format!("initialize excedió {:?}", args.timeout)),
+        };
+    }
+
     let session = Session {
-        autonomy: args.autonomy,
+        autonomy: Autonomy::new(args.autonomy),
         cwd: cwd.clone(),
         launch,
         prompt: args.prompt.clone(),
+        mentions: args.mentions.clone(),
+        cancel_after: args.cancel_after,
         tool_titles: HashMap::new(),
     };
 
@@ -164,11 +228,57 @@ async fn run(args: Args) -> Result<ExitCode, String> {
     }
 }
 
+/// Espera el `Connected` de `initialize`, imprime lo que anunció el agente y
+/// vuelve. No crea sesión ni manda prompt: solo negocia el protocolo, así que
+/// no consume tokens del modelo.
+async fn print_capabilities(
+    connection: &AgentConnection,
+    launch: &LaunchSpec,
+) -> Result<ExitCode, String> {
+    loop {
+        match connection.recv().await.map_err(|error| error.to_string())? {
+            AgentEvent::Connected {
+                agent_info,
+                auth_methods,
+                capabilities,
+            } => {
+                match agent_info {
+                    Some(info) => println!("conectado: {} {}", info.name, info.version),
+                    None => println!("conectado: (el agente no informó nombre)"),
+                }
+                println!("loadSession:            {}", capabilities.load_session);
+                println!(
+                    "sessionCapabilities.resume:  {}",
+                    capabilities.session_capabilities.resume.is_some()
+                );
+                println!(
+                    "sessionCapabilities.list:    {}",
+                    capabilities.session_capabilities.list.is_some()
+                );
+                println!("agentCapabilities: {capabilities:?}");
+                print_auth_methods(&auth_methods, launch);
+                return Ok(ExitCode::SUCCESS);
+            }
+            AgentEvent::AuthRequired { methods } => {
+                print_auth_methods(&methods, launch);
+                return Ok(ExitCode::from(3));
+            }
+            AgentEvent::Exited { code, stderr_tail } => {
+                return Err(format!("el agente se cerró ({code:?}): {stderr_tail}"));
+            }
+            AgentEvent::Error { message, .. } => return Err(message),
+            _ => {}
+        }
+    }
+}
+
 struct Session {
     autonomy: Autonomy,
     cwd: PathBuf,
     launch: LaunchSpec,
     prompt: String,
+    mentions: Vec<PathBuf>,
+    cancel_after: Option<Duration>,
     tool_titles: HashMap<String, String>,
 }
 
@@ -196,6 +306,7 @@ async fn event_loop(
                 connection
                     .send(AgentCommand::NewSession {
                         cwd: session.cwd.clone(),
+                        mcp_servers: Vec::new(),
                     })
                     .await
                     .map_err(|error| error.to_string())?;
@@ -229,15 +340,29 @@ async fn event_loop(
                 println!("---");
                 if !prompt_sent {
                     prompt_sent = true;
+                    let mut blocks = vec![PromptBlock::Text(session.prompt.clone())];
+                    blocks.extend(
+                        session
+                            .mentions
+                            .iter()
+                            .map(|path| PromptBlock::mention(path)),
+                    );
                     connection
                         .send(AgentCommand::Prompt {
-                            session_id,
-                            blocks: vec![ContentBlock::Text(TextContent::new(
-                                session.prompt.clone(),
-                            ))],
+                            session_id: session_id.clone(),
+                            blocks,
+                            feedback: None,
                         })
                         .await
                         .map_err(|error| error.to_string())?;
+                    if let Some(cancel_after) = session.cancel_after {
+                        let commands = connection.commands().clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(cancel_after).await;
+                            eprintln!("[chat] cancelando el turno tras {cancel_after:?}");
+                            let _ = commands.send(AgentCommand::Cancel { session_id }).await;
+                        });
+                    }
                 }
             }
             AgentEvent::Update { update, .. } => {
@@ -310,11 +435,51 @@ async fn event_loop(
                 return Ok(ExitCode::SUCCESS);
             }
             AgentEvent::Stderr(line) => eprintln!("[agente] {line}"),
-            AgentEvent::Exited { code } => {
+            AgentEvent::Exited { code, stderr_tail } => {
                 end_stream(&mut streaming);
-                return Err(format!("el agente terminó (código {code:?})"));
+                let tail = if stderr_tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n--- stderr ---\n{stderr_tail}")
+                };
+                return Err(format!("el agente terminó (código {code:?}){tail}"));
             }
-            AgentEvent::Error(message) => return Err(message),
+            AgentEvent::Error {
+                message,
+                stderr_tail,
+            } => {
+                if stderr_tail.is_empty() {
+                    return Err(message);
+                }
+                return Err(format!("{message}\n--- stderr ---\n{stderr_tail}"));
+            }
+            AgentEvent::ToolCallsCancelled { ids, .. } => {
+                end_stream(&mut streaming);
+                println!(
+                    "[cancelado] {} tool call(s): {}",
+                    ids.len(),
+                    ids.iter()
+                        .map(|id| id.0.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            AgentEvent::FileChangeReport { report, .. } => {
+                end_stream(&mut streaming);
+                println!(
+                    "[archivos] {} ruta(s), completo={}",
+                    report.paths.len(),
+                    report.declared_complete
+                );
+            }
+            AgentEvent::Elicitation { request, reply, .. } => {
+                end_stream(&mut streaming);
+                println!(
+                    "[elicitation] {} → declinado automáticamente (sin UI interactiva)",
+                    request.message
+                );
+                reply.respond(CreateElicitationResponse::new(ElicitationAction::Decline));
+            }
             other => eprintln!("[evento no manejado] {other:?}"),
         }
     }
@@ -513,19 +678,15 @@ fn print_auth_methods(methods: &[AuthMethod], launch: &LaunchSpec) {
     }
     println!("métodos de auth:");
     for method in methods {
-        match method {
-            AuthMethod::Terminal(terminal) => {
-                let mut command = launch.to_shell_string();
-                for arg in &terminal.args {
-                    command.push(' ');
-                    command.push_str(arg);
-                }
-                println!("  - {} ({}) → {command}", terminal.name, terminal.id.0);
+        let view = AuthMethodView::describe(method, launch);
+        match &view.kind {
+            AuthMethodKind::Terminal { .. } => {
+                let command = view.shell_command().unwrap_or_default();
+                println!("  - {} ({}) → {command}", view.name, view.id);
             }
-            AuthMethod::Agent(agent) => {
-                println!("  - {} ({}) → session/authenticate", agent.name, agent.id.0);
+            AuthMethodKind::Other => {
+                println!("  - {} ({}) → session/authenticate", view.name, view.id);
             }
-            other => println!("  - {other:?}"),
         }
     }
 }

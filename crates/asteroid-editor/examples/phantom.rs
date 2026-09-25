@@ -8,7 +8,14 @@
 //! cargo run -p asteroid-editor --example phantom -- --file src/main.rs
 //! cargo run -p asteroid-editor --example phantom -- --smoke-test
 //! cargo run -p asteroid-editor --example phantom -- --rows 50000 --soft-wrap --smoke-test
+//! cargo run -p asteroid-editor --example phantom -- --type-test
 //! ```
+//!
+//! `--type-test` types into the real window for ~3 s with the render probe on
+//! and reports what the frames actually painted: how many rows were shaped
+//! again, and how many lost highlights they had on the previous frame. The
+//! second number must be 0 — a row that goes from coloured to uncoloured and
+//! back is exactly the flicker of every keystroke.
 //!
 //! `Ctrl+S` prints "save requested" on stdout: the real save belongs to the
 //! workspace, the editor only emits the event.
@@ -38,8 +45,14 @@ actions!(
 /// The file shown by default.
 const SAMPLE: &str = include_str!("sample.rs");
 
+/// What `--type-test` types, one character per frame. Plain letters at the end
+/// of the first comment: an edit whose parse stays valid, so any row that loses
+/// its colours lost them to the flicker and not to a real re-highlight.
+const TYPED: &[&str] = &["a", "b", "c", "d", " "];
+
 struct Args {
     smoke_test: bool,
+    type_test: bool,
     rows: Option<usize>,
     file: Option<String>,
     soft_wrap: bool,
@@ -49,6 +62,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut args = Args {
         smoke_test: false,
+        type_test: false,
         rows: None,
         file: None,
         soft_wrap: false,
@@ -58,6 +72,7 @@ fn parse_args() -> Args {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--smoke-test" => args.smoke_test = true,
+            "--type-test" => args.type_test = true,
             "--soft-wrap" => args.soft_wrap = true,
             "--show-whitespace" => args.show_whitespace = true,
             "--rows" => args.rows = iter.next().and_then(|value| value.parse().ok()),
@@ -147,6 +162,7 @@ fn main() {
     let args = parse_args();
     let (text, hunks, path) = document(&args);
     let smoke_test = args.smoke_test;
+    let type_test = args.type_test;
     let mut settings = EditorSettings {
         soft_wrap: args.soft_wrap,
         show_whitespace: args.show_whitespace,
@@ -212,6 +228,77 @@ fn main() {
                 }
             })
             .expect("no se pudo enfocar el editor");
+
+        if type_test {
+            // Type into the real window and let the render probe say what the
+            // frames painted.
+            window
+                .update(cx, |view, _window, cx| {
+                    view.set_render_probe(true);
+                    // End of the first line, inside the comment.
+                    view.set_cursor(asteroid_text::Point::new(0, u32::MAX), cx);
+                })
+                .ok();
+            cx.spawn(async move |cx| {
+                for step in 0..180 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    let typed = window.update(cx, |view, _window, cx| {
+                        view.insert_text(TYPED[step % TYPED.len()], cx);
+                    });
+                    if typed.is_err() {
+                        break;
+                    }
+                }
+                window
+                    .update(cx, |view, _window, _cx| {
+                        let stats = view.frame_stats();
+                        let frames = view.render_frames();
+                        let painted: usize =
+                            frames.iter().map(|frame| frame.rows.len()).sum();
+                        let reshaped: usize = frames
+                            .iter()
+                            .map(|frame| {
+                                frame.rows.iter().filter(|row| row.reshaped).count()
+                            })
+                            .sum();
+                        // A row that had colours on one frame and none on the
+                        // next: the flash, counted.
+                        let mut lost = 0usize;
+                        for pair in frames.windows(2) {
+                            for row in &pair[1].rows {
+                                let had = pair[0]
+                                    .row(row.display_row)
+                                    .is_some_and(|before| before.highlight_spans > 0);
+                                if had && row.highlight_spans == 0 {
+                                    lost += 1;
+                                }
+                            }
+                        }
+                        println!(
+                            "frames: {} · p50 {:.2} ms · p95 {:.2} ms · max {:.2} ms",
+                            stats.count,
+                            stats.p50_us as f64 / 1000.,
+                            stats.p95_us as f64 / 1000.,
+                            stats.max_us as f64 / 1000.,
+                        );
+                        println!(
+                            "probe: {} frames · {painted} filas pintadas · {reshaped} re-shaped · {lost} filas perdieron sus colores",
+                            frames.len(),
+                        );
+                    })
+                    .ok();
+                window
+                    .update(cx, |_view, window, _cx| window.remove_window())
+                    .ok();
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        }
 
         if smoke_test {
             // Scroll for ~3 s so the frame statistics have something to say,

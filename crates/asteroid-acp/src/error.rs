@@ -54,6 +54,64 @@ pub enum AcpError {
     /// The worker thread is gone.
     #[error("la conexión con el agente está cerrada")]
     Closed,
+
+    /// `node` is missing or too old for an `npx` distribution.
+    #[error("node no disponible para `npx`: {found}")]
+    NodeMissing {
+        /// Human-readable description of what was found instead (or nothing).
+        found: String,
+    },
+
+    /// `uv`/`uvx` is missing for a `uvx` distribution.
+    #[error("no se encontró `uvx` en el PATH")]
+    UvMissing,
+
+    /// The `binary` distribution for this agent was not installed yet.
+    #[error("el agente `{id}` (`{kind}`) no está instalado; llamá a `AgentRegistry::install`")]
+    NotInstalled {
+        /// Agent id.
+        id: String,
+        /// Distribution kind, always `"binary"` today.
+        kind: String,
+    },
+
+    /// The platform has no prebuilt binary for this agent.
+    #[error("el agente `{id}` no publica un binario para `{platform}`")]
+    NoBinaryForPlatform {
+        /// Agent id.
+        id: String,
+        /// `current_platform_key()` value that had no match.
+        platform: String,
+    },
+
+    /// The downloaded archive did not match its expected sha256.
+    #[error("sha256 inválido para `{url}`: esperado {expected}, obtenido {actual}")]
+    ChecksumMismatch {
+        /// Archive URL.
+        url: String,
+        /// Expected digest, lowercase hex.
+        expected: String,
+        /// Digest actually computed, lowercase hex.
+        actual: String,
+    },
+
+    /// The download was refused by the caller (`InstallPlan` confirmation).
+    #[error("instalación cancelada por el usuario")]
+    InstallDeclined,
+
+    /// The archive could not be extracted (unknown format or corrupt data).
+    #[error("no se pudo extraer el archivo `{url}`: {message}")]
+    ExtractFailed {
+        /// Archive URL.
+        url: String,
+        /// Description of the failure.
+        message: String,
+    },
+
+    /// A path used by `fs/read_text_file` or `fs/write_text_file` is outside
+    /// the project root, or the request parameters are otherwise invalid.
+    #[error("parámetros inválidos: {0}")]
+    InvalidParams(String),
 }
 
 impl From<agent_client_protocol::Error> for AcpError {

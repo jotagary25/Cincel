@@ -239,8 +239,14 @@ fn modal_bindings() -> Vec<KeyBinding> {
 ///   exists once the code editor is on screen (stage 2), so until then the
 ///   same action is bound on the workspace itself. Both resolve to
 ///   `workspace::close_tab`, so stage 2 changes nothing.
+/// - the chat's own defaults (`asteroid_chat::default_key_bindings`, context
+///   `Chat`/`Chat && permission`): merged here rather than through
+///   `asteroid_chat::init` so a keymap reload's `cx.clear_key_bindings()`
+///   (`install`, below) does not wipe them — the same reasoning that keeps
+///   the editor's defaults in this list instead of a one-shot `init` call.
 fn built_in_bindings() -> Vec<KeyBinding> {
     let mut bindings = asteroid_editor::default_key_bindings();
+    bindings.extend(asteroid_chat::default_key_bindings());
     bindings.extend([
         KeyBinding::new(
             "enter",

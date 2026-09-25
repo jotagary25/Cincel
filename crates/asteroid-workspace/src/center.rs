@@ -132,6 +132,10 @@ pub struct Tab {
     pub deleted: bool,
     /// Whether the buffer refuses edits (a file that is not UTF-8).
     pub read_only: bool,
+    /// Whether an agent wrote to this file during the open session. Shown as
+    /// a "◆" suffix on the tab title; a real per-hunk indicator is Etapa 3
+    /// (`docs/etapas/etapa-2.md`).
+    pub agent_touched: bool,
     /// The buffer behind the tab, shared with the store.
     pub buffer: BufferHandle,
     /// The language the registry detected, or `None` for plain text.
@@ -153,10 +157,13 @@ impl Tab {
         self.content.editor()
     }
 
-    /// The title as the tab bar shows it, marked when the file is gone.
+    /// The title as the tab bar shows it, marked when the file is gone or an
+    /// agent touched it this session.
     pub fn display_title(&self) -> SharedString {
         if self.deleted {
             SharedString::from(format!("{} (eliminado)", self.title))
+        } else if self.agent_touched {
+            SharedString::from(format!("{} ◆", self.title))
         } else {
             self.title.clone()
         }
@@ -359,6 +366,7 @@ impl CenterPanel {
             symbol: None,
             deleted: false,
             read_only,
+            agent_touched: false,
             buffer,
             language,
             content,
@@ -587,6 +595,71 @@ impl CenterPanel {
             }
         }
         cx.notify();
+    }
+
+    /// Whether `path` is open and clean (no unsaved user changes), which is
+    /// the "reload from disk if clean" gate `asteroid-workspace/agents.rs`
+    /// needs before touching a buffer on the agent's behalf.
+    pub fn is_open_and_clean(&self, path: &Path, cx: &App) -> bool {
+        self.tab_for(path)
+            .is_some_and(|tab| !tab.read_only && !tab.editor().read(cx).is_dirty())
+    }
+
+    /// Marks `path`'s tab as agent-written without touching its buffer: the
+    /// content already landed through `BufferStore::apply_agent_write`, which
+    /// mutates the shared buffer in place, so the editor only needs the same
+    /// "something external changed" nudge the disk-reload path gives it.
+    ///
+    /// Does nothing when `path` has no open tab (E2 opens no new tabs on the
+    /// agent's behalf, `docs/etapas/etapa-2.md`).
+    pub fn note_agent_write(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.path == path) else {
+            return;
+        };
+        self.tabs[index].deleted = false;
+        self.tabs[index].agent_touched = true;
+        let editor = self.tabs[index].editor().clone();
+        editor.update(cx, |editor, cx| editor.buffer_changed(cx));
+        cx.notify();
+    }
+
+    /// Reloads `path`'s open buffer from disk after an agent tool call
+    /// finished editing it outside `fs/write_text_file` (a shell command, its
+    /// own file API, …), and marks the tab. Skips dirty buffers: E3 owns the
+    /// "buffer sucio" dialog this needs (`docs/specs/modulos/workspace.md`).
+    ///
+    /// Returns whether the buffer was reloaded (or reported deleted/in
+    /// conflict): callers use it to decide whether a git refresh is worth it.
+    pub fn reload_after_agent_edit(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        let Some(project) = self.project.clone() else {
+            return false;
+        };
+        if !self.is_open_and_clean(path, cx) {
+            return false;
+        }
+        let outcome = project.update(cx, |project, _| {
+            project.buffers_mut().reload_from_disk(path)
+        });
+        let handled = matches!(
+            outcome,
+            ReloadOutcome::Reloaded | ReloadOutcome::Conflict | ReloadOutcome::Deleted
+        );
+        if handled {
+            self.apply_buffer_changes(
+                &[BufferChange {
+                    path: path.to_path_buf(),
+                    outcome,
+                }],
+                cx,
+            );
+        }
+        if outcome == ReloadOutcome::Reloaded
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.path == path)
+        {
+            tab.agent_touched = true;
+        }
+        cx.notify();
+        handled
     }
 
     /// The toast that lets the user decide who wins a conflict.

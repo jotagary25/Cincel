@@ -292,6 +292,65 @@ pub fn editor_settings(cx: &App) -> asteroid_editor::EditorSettings {
     }
 }
 
+/// Projects the Asteroid theme onto the chat panel's own theme type.
+///
+/// Every field `asteroid_chat::ChatTheme` declares has a direct counterpart
+/// here; the 12 syntax captures keep `asteroid_syntax::HighlightId`'s order,
+/// which is how the chat's fenced code blocks index them (same convention as
+/// [`From<&ThemeColors> for asteroid_editor::EditorTheme`]).
+impl From<&ThemeColors> for asteroid_chat::ChatTheme {
+    fn from(theme: &ThemeColors) -> Self {
+        asteroid_chat::ChatTheme {
+            bg_app: theme.bg_app,
+            bg_surface: theme.bg_surface,
+            bg_elevated: theme.bg_elevated,
+            border: theme.border,
+            border_focus: theme.border_focus,
+            text: theme.text,
+            text_muted: theme.text_muted,
+            text_accent: theme.text_accent,
+            selection: theme.selection,
+            diff_added: theme.diff_added_bg,
+            diff_deleted: theme.diff_deleted_bg,
+            status_error: theme.status_error,
+            status_warning: theme.status_warning,
+            status_ok: theme.status_ok,
+            syntax: [
+                theme.syntax.keyword,
+                theme.syntax.function,
+                theme.syntax.type_,
+                theme.syntax.string,
+                theme.syntax.number,
+                theme.syntax.comment,
+                theme.syntax.variable,
+                theme.syntax.property,
+                theme.syntax.operator,
+                theme.syntax.punctuation,
+                theme.syntax.constant,
+                theme.syntax.attribute,
+            ],
+        }
+    }
+}
+
+/// The theme the chat panel should be using right now.
+pub fn chat_theme(cx: &App) -> asteroid_chat::ChatTheme {
+    asteroid_chat::ChatTheme::from(ThemeColors::global(cx))
+}
+
+/// Projects the user's settings onto the chat panel's own settings.
+///
+/// `asteroid-settings` has no `chat` section yet (`docs/etapas/etapa-2.md`,
+/// wishes): none of `asteroid_chat::ChatSettings`'s fields
+/// (`input_min_rows`/`max_rows`, `diff_preview_lines`, `collapse_thoughts`,
+/// `max_entries`) have a `settings.json` counterpart, so this always returns
+/// the chat crate's own defaults. It is still wired into the hot-reload path
+/// (`workspace::on_settings_reloaded`) so a future `settings.chat` needs no
+/// new plumbing, only a body here.
+pub fn chat_settings(_cx: &App) -> asteroid_chat::ChatSettings {
+    asteroid_chat::ChatSettings::default()
+}
+
 /// The WCAG AA contrast floor for normal text.
 pub const MIN_CONTRAST: f32 = 4.5;
 

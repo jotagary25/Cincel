@@ -1,8 +1,10 @@
 //! `EditorElement`: the GPUI element that lays out and paints the editor.
 //!
-//! Only the wrap rows inside the viewport (± one row) are shaped and painted;
-//! the shaped lines are cached in the view and dropped whenever the cache epoch
-//! — buffer version, highlight version, wrap width, tab size — changes.
+//! Only the wrap rows inside the viewport (± one row) are shaped and painted.
+//! The shaped lines live in a content-addressed cache in the view (see
+//! `EditorView::shaped_line`): a row is shaped again only when its painted text
+//! or one of its colours actually changed, so a keystroke reshapes the row it
+//! landed on and nothing else.
 
 use std::ops::Range;
 use std::time::Instant;
@@ -21,7 +23,7 @@ use crate::theme::{
     self, CURRENT_LINE_ALPHA, DIFF_BG_ALPHA, EditorTheme, PHANTOM_TEXT_ALPHA, SEARCH_CURRENT_ALPHA,
     SEARCH_MATCH_ALPHA,
 };
-use crate::view::{EditorView, LayoutSnapshot, LineCacheKey};
+use crate::view::{EditorView, LayoutSnapshot, RowRender};
 use crate::wrap_map::WrapRow;
 
 /// Left padding of the gutter, before the diff bar.
@@ -142,12 +144,9 @@ fn text_run(len: usize, font: &gpui::Font, color: Hsla) -> TextRun {
     }
 }
 
-fn shape_runs(text: String, runs: &[TextRun], font_size: Pixels, window: &Window) -> ShapedLine {
-    window
-        .text_system()
-        .shape_line(SharedString::from(text), font_size, runs, None)
-}
-
+/// Shapes a one-colour line straight through the text system, for the handful
+/// of strings that are not worth a cache entry (the digit the gutter is
+/// measured with, the pill labels).
 fn shape(
     text: String,
     font: &gpui::Font,
@@ -161,7 +160,27 @@ fn shape(
     } else {
         std::slice::from_ref(&run)
     };
-    shape_runs(text, runs, font_size, window)
+    window
+        .text_system()
+        .shape_line(SharedString::from(text), font_size, runs, None)
+}
+
+/// Shapes a one-colour line through the view's cache.
+fn shape_cached(
+    view: &mut EditorView,
+    text: &str,
+    font: &gpui::Font,
+    font_size: Pixels,
+    color: Hsla,
+    window: &Window,
+) -> (ShapedLine, bool) {
+    let run = text_run(text.len(), font, color);
+    let runs: &[TextRun] = if run.len == 0 {
+        &[]
+    } else {
+        std::slice::from_ref(&run)
+    };
+    view.shaped_line(text, runs, font_size, window)
 }
 
 /// Builds the per-highlight runs of one painted segment.
@@ -169,6 +188,9 @@ fn shape(
 /// `spans` are buffer byte ranges; `base` is the buffer offset of byte 0 of the
 /// row, `range` the source byte range of the segment, and the run lengths come
 /// out in bytes of the *painted* (tab expanded) text.
+///
+/// Returns the runs and how many spans landed on the segment — the number the
+/// render probe reports as `highlight_spans`.
 #[allow(clippy::too_many_arguments)]
 fn runs_for_segment(
     spans: &[(Range<usize>, HighlightId)],
@@ -179,13 +201,14 @@ fn runs_for_segment(
     default: Hsla,
     theme: &EditorTheme,
     opacity: f32,
-) -> Vec<TextRun> {
+) -> (Vec<TextRun>, usize) {
     let start_display = row_text.to_display(range.start);
     let end_display = row_text.to_display(range.end);
     let total = (end_display - start_display) as usize;
     if total == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
+    let mut used = 0usize;
     let mut runs: Vec<TextRun> = Vec::new();
     let push = |len: usize, color: Hsla, runs: &mut Vec<TextRun>| {
         if len == 0 {
@@ -217,6 +240,7 @@ fn runs_for_segment(
         color.a = opacity;
         push((to - from.max(cursor)) as usize, color, &mut runs);
         cursor = to;
+        used += 1;
     }
     push(
         (end_display.saturating_sub(cursor)) as usize,
@@ -229,7 +253,7 @@ fn runs_for_segment(
     if covered < total {
         push(total - covered, default, &mut runs);
     }
-    runs
+    (runs, used)
 }
 
 /// The whitespace overlay of a segment: `·` for a space, `→` for a tab, a blank
@@ -318,16 +342,6 @@ impl Element for EditorElement {
             let wrap_columns = view.soft_wrap().then(|| {
                 ((f32::from(text_width) / f32::from(char_width).max(1.)).floor() as u32).max(1)
             });
-            let epoch = (
-                view.text_version(),
-                view.highlight_version(),
-                wrap_columns.unwrap_or(0),
-                tab_size,
-            );
-            if view.cache_epoch != epoch {
-                view.cache_epoch = epoch;
-                view.line_cache.clear();
-            }
             // The wrap map has its own epoch: an edit that stayed inside one
             // row already updated it, so only a real change (the viewport
             // width, the tab size, a row added or removed) rebuilds it.
@@ -390,6 +404,8 @@ impl Element for EditorElement {
             let scroll_left = px(view.scroll_left);
 
             let mut rows = Vec::with_capacity((last_row - first_row) as usize);
+            let probe = view.render_probe();
+            let mut probe_rows = Vec::new();
             let mut selections = Vec::new();
             let mut matches = Vec::new();
             let mut current_line = Vec::new();
@@ -412,19 +428,21 @@ impl Element for EditorElement {
                     px(0.)
                 };
 
-                let (base, default_color, opacity, row_spans) = match cell {
-                    DisplayCell::Buffer(buffer_row) => (
-                        view.snapshot_line_start(buffer_row),
-                        text_color,
-                        1.,
-                        spans.clone(),
-                    ),
-                    DisplayCell::Phantom { hunk_ix, line_ix } => (
-                        0,
-                        phantom_color,
-                        PHANTOM_TEXT_ALPHA,
-                        view.phantom_highlights(hunk_ix, line_ix),
-                    ),
+                let (base, default_color, opacity) = match cell {
+                    DisplayCell::Buffer(buffer_row) => {
+                        (view.snapshot_line_start(buffer_row), text_color, 1.)
+                    }
+                    DisplayCell::Phantom { .. } => (0, phantom_color, PHANTOM_TEXT_ALPHA),
+                };
+                // The visible spans are queried once per frame and borrowed
+                // here; only a phantom row owns its own (tiny) vector.
+                let phantom_spans;
+                let row_spans: &[(Range<usize>, HighlightId)] = match cell {
+                    DisplayCell::Buffer(_) => &spans,
+                    DisplayCell::Phantom { hunk_ix, line_ix } => {
+                        phantom_spans = view.phantom_highlights(hunk_ix, line_ix);
+                        &phantom_spans
+                    }
                 };
 
                 let start_display = row_text.to_display(range.start) as usize;
@@ -434,25 +452,25 @@ impl Element for EditorElement {
                     [start_display.min(painted.len())..end_display.min(painted.len())]
                     .to_string();
 
-                let key = LineCacheKey::Row(display_row, segment);
-                let line = match view.line_cache.get(&key) {
-                    Some(line) => line.clone(),
-                    None => {
-                        let runs = runs_for_segment(
-                            &row_spans,
-                            base,
-                            &range,
-                            &row_text,
-                            &font,
-                            default_color,
-                            &theme,
-                            opacity,
-                        );
-                        let line = shape_runs(segment_text.clone(), &runs, font_size, window);
-                        view.line_cache.insert(key, line.clone());
-                        line
-                    }
-                };
+                let (runs, used_spans) = runs_for_segment(
+                    row_spans,
+                    base,
+                    &range,
+                    &row_text,
+                    &font,
+                    default_color,
+                    &theme,
+                    opacity,
+                );
+                let (line, reshaped) = view.shaped_line(&segment_text, &runs, font_size, window);
+                if probe {
+                    probe_rows.push(RowRender {
+                        display_row,
+                        segment,
+                        highlight_spans: used_spans,
+                        reshaped,
+                    });
+                }
                 widest = widest.max(line.width() + indent_x);
 
                 let whitespace = if show_whitespace {
@@ -460,21 +478,15 @@ impl Element for EditorElement {
                     let slice = &source[(range.start as usize).min(source.len())
                         ..(range.end as usize).min(source.len())];
                     whitespace_overlay(slice, tab_size).map(|overlay| {
-                        let key = LineCacheKey::Whitespace(display_row, segment);
-                        match view.line_cache.get(&key) {
-                            Some(line) => line.clone(),
-                            None => {
-                                let line = shape(
-                                    overlay,
-                                    &font,
-                                    font_size,
-                                    theme::alpha(theme.text_muted, 0.6),
-                                    window,
-                                );
-                                view.line_cache.insert(key, line.clone());
-                                line
-                            }
-                        }
+                        shape_cached(
+                            view,
+                            &overlay,
+                            &font,
+                            font_size,
+                            theme::alpha(theme.text_muted, 0.6),
+                            window,
+                        )
+                        .0
                     })
                 } else {
                     None
@@ -483,32 +495,22 @@ impl Element for EditorElement {
                 // The line number only shows on the first segment of a row.
                 let number = match cell {
                     DisplayCell::Buffer(buffer_row) if segment == 0 => {
-                        let current = display_row == cursor_display_row;
-                        let key = LineCacheKey::Number(buffer_row);
-                        if current {
-                            Some(shape(
-                                (buffer_row + 1).to_string(),
+                        let color = if display_row == cursor_display_row {
+                            text_color
+                        } else {
+                            muted_color
+                        };
+                        Some(
+                            shape_cached(
+                                view,
+                                &(buffer_row + 1).to_string(),
                                 &font,
                                 font_size,
-                                text_color,
+                                color,
                                 window,
-                            ))
-                        } else {
-                            Some(match view.line_cache.get(&key) {
-                                Some(line) => line.clone(),
-                                None => {
-                                    let line = shape(
-                                        (buffer_row + 1).to_string(),
-                                        &font,
-                                        font_size,
-                                        muted_color,
-                                        window,
-                                    );
-                                    view.line_cache.insert(key, line.clone());
-                                    line
-                                }
-                            })
-                        }
+                            )
+                            .0,
+                        )
                     }
                     // Phantom rows carry no line number (02-visual §5).
                     _ => None,
@@ -727,6 +729,7 @@ impl Element for EditorElement {
                     .collect(),
                 visible_row_count,
             });
+            view.end_frame(probe_rows);
 
             EditorPrepaint {
                 hitbox: hitbox.clone(),

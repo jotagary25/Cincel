@@ -21,7 +21,9 @@
 //! Spanish, like the rest of Asteroid.
 
 pub mod actions;
+pub mod agents;
 pub mod center;
+pub mod conversations;
 pub mod keymap;
 pub mod layout;
 pub mod panels;
@@ -36,8 +38,11 @@ pub mod workspace;
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
 
+pub use agents::Agents;
 pub use center::{CenterPanel, Tab, TabContent};
+pub use conversations::{ConversationStore, IndexEntry};
 pub use layout::WorkspaceLayout;
+pub use panels::ChatDock;
 pub use project::{Project, ProjectEvent};
 pub use settings::AppSettings;
 pub use theme::{SyntaxColors, ThemeColors, Typography};

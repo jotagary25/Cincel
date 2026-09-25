@@ -2,18 +2,22 @@
 //! pipeline, the selection, the scroll state and the search bar, and that
 //! implements `EntityInputHandler` (IME and dead keys).
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use asteroid_syntax::{CancelFlag, HighlightId, Language, LanguageRegistry, SyntaxState};
-use asteroid_text::{Buffer, BufferSnapshot, EditSource, Point};
+use asteroid_syntax::{
+    CancelFlag, HighlightId, Language, LanguageRegistry, ParseOutcome, SyntaxState,
+};
+use asteroid_text::{Buffer, BufferEvent, BufferSnapshot, EditSource, Point};
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, ShapedLine, SharedString,
-    Styled, Task, UTF16Selection, Window, div, px,
+    Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render, ShapedLine, SharedString,
+    Styled, Task, TextRun, UTF16Selection, Window, div, px,
 };
 
 use crate::actions::*;
@@ -34,6 +38,25 @@ pub const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 pub const SCROLLBAR_HOLD: Duration = Duration::from_millis(1000);
 /// How long the scrollbar takes to fade out afterwards.
 pub const SCROLLBAR_FADE: Duration = Duration::from_millis(200);
+
+/// How long a reparse may hold the UI thread before it is handed over to the
+/// background executor.
+///
+/// A one-letter incremental reparse measures 0.6 ms median on a 5 000 line
+/// Rust file (`docs/etapas/etapa-1.md`), so typing finishes inside this budget
+/// and the frame that paints the keystroke already has the new colours: there
+/// is no intermediate frame to flicker. Anything slower — a cold parse, a huge
+/// file, a paste that rewrites the document — gives up and goes to the
+/// background, where the highlights carried across the edit keep the text
+/// coloured meanwhile.
+pub const SYNC_PARSE_BUDGET: Duration = Duration::from_millis(2);
+
+/// Shaped lines kept alive beyond the viewport before the cache is trimmed.
+const LINE_CACHE_MAX: usize = 1024;
+/// Frames a cached line may go unused before a trim drops it.
+const LINE_CACHE_KEEP: u64 = 4;
+/// Painted frames the render probe remembers.
+const RENDER_FRAME_HISTORY: usize = 64;
 
 /// Highlight spans of one row or byte range, as `SyntaxState` returns them.
 pub type HighlightSpans = Vec<(Range<usize>, HighlightId)>;
@@ -108,17 +131,54 @@ impl EditorStyle {
     }
 }
 
-/// Key of the shaped-line cache. The epoch (buffer version, highlight version,
-/// wrap width) is kept apart in [`EditorView::cache_epoch`]: when it changes the
-/// whole cache is dropped, so the key only needs to identify the row.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum LineCacheKey {
-    /// A wrapped segment of a display row.
-    Row(DisplayRow, u32),
-    /// The whitespace overlay of a segment.
-    Whitespace(DisplayRow, u32),
-    /// A gutter line number.
-    Number(u32),
+/// An entry of the shaped-line cache.
+///
+/// The cache is **content addressed**: the key is a hash of the exact inputs of
+/// the shaper — the painted text, the font size and the `(len, colour)` of
+/// every run — instead of the row number. A row whose text and colours did not
+/// change therefore keeps its `ShapedLine` across an edit, even when the edit
+/// pushed it up or down the document, and a row is re-shaped only when what it
+/// paints really changed. `text` and `runs` are kept so a hash collision is
+/// caught instead of painting the wrong line.
+pub(crate) struct CachedLine {
+    line: ShapedLine,
+    text: SharedString,
+    runs: Vec<(usize, Hsla)>,
+    used_frame: u64,
+}
+
+/// What one painted wrap row used, recorded only while the render probe is on.
+///
+/// See [`EditorView::set_render_probe`]. It exists so a test can assert that no
+/// frame ever painted a row that had highlights without them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowRender {
+    /// The display row painted.
+    pub display_row: DisplayRow,
+    /// Soft-wrap segment of that row.
+    pub segment: u32,
+    /// Highlight spans that fell on this segment.
+    pub highlight_spans: usize,
+    /// Whether the line had to be shaped again for this frame.
+    pub reshaped: bool,
+}
+
+/// One painted frame, as the render probe saw it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FrameRender {
+    /// Buffer version this frame painted.
+    pub text_version: u64,
+    /// Highlight version this frame painted.
+    pub highlight_version: u64,
+    /// One entry per painted wrap row, in paint order.
+    pub rows: Vec<RowRender>,
+}
+
+impl FrameRender {
+    /// The row this frame painted for `display_row`, first segment first.
+    pub fn row(&self, display_row: DisplayRow) -> Option<&RowRender> {
+        self.rows.iter().find(|row| row.display_row == display_row)
+    }
 }
 
 /// What the element measured on the last frame, so mouse events and the IME can
@@ -163,6 +223,21 @@ pub struct FrameStats {
     pub max_us: u64,
 }
 
+/// The last highlights known to be good, carried across edits.
+///
+/// While a reparse is in flight the tree-sitter state is *moved* to the
+/// background executor, so there is nothing to query: without this the editor
+/// would paint a frame of plain, uncoloured text and colour it again when the
+/// parse lands — the flicker of every keystroke. Instead the previous spans are
+/// shifted by the byte delta of each edit (spans after the edit move, the ones
+/// the edit cut through are clipped) and used until the real result arrives, at
+/// which point they are replaced in one go.
+struct HighlightCarry {
+    /// Buffer byte range the spans cover.
+    range: Range<usize>,
+    spans: Vec<(Range<usize>, HighlightId)>,
+}
+
 /// Tree-sitter state plus the bookkeeping needed to reparse in the background.
 struct SyntaxHost {
     /// `None` while the state is on the background executor.
@@ -173,12 +248,14 @@ struct SyntaxHost {
     stale: bool,
     /// Raised to cancel the running parse.
     cancel: CancelFlag,
-    /// Bumped every time a parse lands; part of the shaped-line cache epoch.
+    /// Bumped every time a parse lands.
     version: u64,
     /// Highlights of the last queried range.
     spans: Vec<(Range<usize>, HighlightId)>,
     /// `(buffer version, highlight version, range)` the spans were built for.
     spans_key: (u64, u64, usize, usize),
+    /// Spans to paint with while the state is away; see [`HighlightCarry`].
+    carry: Option<HighlightCarry>,
 }
 
 impl SyntaxHost {
@@ -191,8 +268,66 @@ impl SyntaxHost {
             version: 0,
             spans: Vec::new(),
             spans_key: (u64::MAX, u64::MAX, 0, 0),
+            carry: None,
         }
     }
+
+    /// Forgets the carried spans: their byte offsets no longer mean anything
+    /// (the whole text was replaced, or the language changed).
+    fn drop_carry(&mut self) {
+        self.carry = None;
+        self.spans_key = (u64::MAX, u64::MAX, 0, 0);
+    }
+}
+
+/// The carried spans that fall inside `range`, clipped to it.
+fn carried_spans(
+    carry: Option<&HighlightCarry>,
+    range: &Range<usize>,
+) -> Vec<(Range<usize>, HighlightId)> {
+    let Some(carry) = carry else {
+        return Vec::new();
+    };
+    carry
+        .spans
+        .iter()
+        .filter(|(span, _)| span.end > range.start && span.start < range.end)
+        .map(|(span, id)| (span.start.max(range.start)..span.end.min(range.end), *id))
+        .collect()
+}
+
+/// Moves `spans` from the coordinates before an edit to the ones after it.
+///
+/// `start` is where the replacement begins, `old_len` the bytes it replaced and
+/// `new_len` the bytes it wrote. Spans before the edit are untouched, spans
+/// after it slide by the delta and a span the edit cuts through is clipped at
+/// the edit (dropped when nothing is left of it), which is what "the edited row
+/// keeps its spans clipped" means in byte space.
+fn shift_spans(
+    spans: &mut Vec<(Range<usize>, HighlightId)>,
+    start: usize,
+    old_len: usize,
+    new_len: usize,
+) {
+    let old_end = start + old_len;
+    // Only ever applied to offsets at or past `old_end`, so it cannot underflow.
+    let slide = |offset: usize| (offset + new_len).saturating_sub(old_len);
+    spans.retain_mut(|(range, _)| {
+        if range.end <= start {
+            return true;
+        }
+        if range.start >= old_end {
+            range.start = slide(range.start);
+            range.end = slide(range.end);
+            return true;
+        }
+        // The edit cuts through this span: keep the part before it, if any.
+        if range.start < start {
+            range.end = start;
+            return true;
+        }
+        false
+    });
 }
 
 /// The editor entity.
@@ -240,11 +375,16 @@ pub struct EditorView {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) marked_range: Option<Range<usize>>,
     pub(crate) layout: Option<LayoutSnapshot>,
-    pub(crate) line_cache: HashMap<LineCacheKey, ShapedLine>,
-    pub(crate) cache_epoch: (u64, u64, u32, u32),
+    /// Content-addressed shaped lines; see [`CachedLine`].
+    line_cache: HashMap<u64, CachedLine>,
+    /// Painted frames so far, the age stamp of the cache entries.
+    frame_counter: u64,
+    /// Whether [`RowRender`]s are collected; off by default.
+    render_probe: bool,
+    render_frames: VecDeque<FrameRender>,
     /// `(text version, wrap columns, tab size, display rows)` the wrap map was
-    /// built for. Kept apart from `cache_epoch` so a single-row edit can update
-    /// one row instead of rebuilding the whole map.
+    /// built for. Kept apart from the line cache so a single-row edit can
+    /// update one row instead of rebuilding the whole map.
     pub(crate) wrap_epoch: (u64, u32, u32, u32),
     pub(crate) blink_visible: bool,
     last_input: Instant,
@@ -324,7 +464,9 @@ impl EditorView {
             marked_range: None,
             layout: None,
             line_cache: HashMap::new(),
-            cache_epoch: (u64::MAX, u64::MAX, u32::MAX, 0),
+            frame_counter: 0,
+            render_probe: false,
+            render_frames: VecDeque::new(),
             wrap_epoch: (u64::MAX, u32::MAX, 0, 0),
             blink_visible: true,
             last_input: Instant::now(),
@@ -388,8 +530,10 @@ impl EditorView {
             self.style = EditorStyle::from_settings(&self.settings, cx);
         }
         self.soft_wrap_override = None;
+        // The font itself is not part of the cache key, so a font change is the
+        // one thing the content-addressed cache cannot notice by itself.
         self.line_cache.clear();
-        self.cache_epoch.2 = u32::MAX;
+        self.wrap_epoch = (u64::MAX, u32::MAX, 0, 0);
         cx.notify();
     }
 
@@ -574,7 +718,11 @@ impl EditorView {
         cx.notify();
     }
 
-    fn apply_syntax_events(&mut self, events: &[asteroid_text::BufferEvent]) {
+    fn apply_syntax_events(&mut self, events: &[BufferEvent]) {
+        // The colours the editor is already painting move with the text, so the
+        // frame that shows the keystroke keeps them even if the reparse has to
+        // go to the background.
+        self.carry_highlights_through(events);
         let Some(state) = self.syntax.state.as_mut() else {
             self.syntax.stale = true;
             return;
@@ -587,7 +735,47 @@ impl EditorView {
             state.apply_event(&events[0], self.snapshot.clone());
         } else {
             state.reset(self.snapshot.clone());
+            self.syntax.drop_carry();
         }
+    }
+
+    /// Shifts the carried highlight spans by the delta of every edit, so they
+    /// still describe the text after it.
+    fn carry_highlights_through(&mut self, events: &[BufferEvent]) {
+        let Some(carry) = self.syntax.carry.as_mut() else {
+            return;
+        };
+        for event in events {
+            let BufferEvent::Edited {
+                old_ranges,
+                new_ranges,
+                ..
+            } = event;
+            for (old, new) in old_ranges.iter().zip(new_ranges.iter()) {
+                // `new.start` is where the replacement begins in the text the
+                // spans are already in (the previous edits of this event have
+                // been applied to them), so no accumulator is needed.
+                let start = new.start;
+                let old_len = old.end - old.start;
+                let new_len = new.end - new.start;
+                shift_spans(&mut carry.spans, start, old_len, new_len);
+                let old_end = start + old_len;
+                if carry.range.start >= old_end {
+                    carry.range.start = (carry.range.start + new_len).saturating_sub(old_len);
+                }
+                if carry.range.end >= old_end {
+                    carry.range.end = (carry.range.end + new_len).saturating_sub(old_len);
+                }
+            }
+        }
+        // Never let the carried range claim more text than there is.
+        let len = self.snapshot.len();
+        carry.range.start = carry.range.start.min(len);
+        carry.range.end = carry.range.end.min(len);
+        // The bytes the edit wrote have no colours of their own yet: the
+        // clipped spans leave them in the plain text colour until the reparse
+        // lands, which is one word at the cursor rather than the whole file.
+        self.syntax.spans_key = (u64::MAX, u64::MAX, 0, 0);
     }
 
     fn update_dirty(&mut self, cx: &mut Context<Self>) {
@@ -600,9 +788,10 @@ impl EditorView {
         }
     }
 
+    /// Drops what an edit invalidated. The shaped lines are **not** touched:
+    /// the cache is keyed by content, so the rows the edit did not change keep
+    /// their `ShapedLine` and are never shaped again.
     fn invalidate_layout(&mut self) {
-        self.line_cache.clear();
-        self.cache_epoch = (u64::MAX, u64::MAX, u32::MAX, 0);
         self.wrap_epoch = (u64::MAX, u32::MAX, 0, 0);
     }
 }
@@ -610,11 +799,23 @@ impl EditorView {
 // -- syntax highlighting ----------------------------------------------------
 
 impl EditorView {
-    /// Starts (or restarts) a background parse.
+    /// Brings the highlights up to date with the buffer.
+    ///
+    /// The parse is tried **on the UI thread first**, with a
+    /// [`SYNC_PARSE_BUDGET`] deadline. An incremental reparse of one keystroke
+    /// is far below it, so the common case finishes here and the very frame
+    /// that paints the new character already paints it with its final colours —
+    /// there is no intermediate frame at all. Only a parse that blows the
+    /// budget (a cold file, a paste that rewrites the document) is handed to
+    /// the background executor, and there the carried highlights cover the gap.
     fn request_reparse(&mut self, cx: &mut Context<Self>) {
         if self.syntax.parsing {
             // Let the running parse give up; its completion restarts.
             self.syntax.cancel.cancel();
+            return;
+        }
+        if self.reparse_now() {
+            cx.notify();
             return;
         }
         let Some(mut state) = self.syntax.state.take() else {
@@ -650,7 +851,6 @@ impl EditorView {
                     }
                     this.request_reparse(cx);
                 }
-                this.line_cache.clear();
                 cx.notify();
             })
             .ok();
@@ -658,12 +858,43 @@ impl EditorView {
         .detach();
     }
 
-    /// Version of the highlights, part of the shaped-line cache key.
-    pub(crate) fn highlight_version(&self) -> u64 {
+    /// Tries to finish the parse here and now, within [`SYNC_PARSE_BUDGET`].
+    ///
+    /// Returns `true` when the tree is up to date afterwards (so nothing needs
+    /// to go to the background) and `false` when the caller must spawn.
+    fn reparse_now(&mut self) -> bool {
+        let Some(state) = self.syntax.state.as_mut() else {
+            return false;
+        };
+        match state.reparse_within(&CancelFlag::new(), SYNC_PARSE_BUDGET) {
+            // Already current: nothing to do and nothing to bump.
+            ParseOutcome::Unchanged => true,
+            ParseOutcome::Parsed { .. } => {
+                self.syntax.version += 1;
+                self.syntax.stale = false;
+                true
+            }
+            // No grammar: a background parse would not do better.
+            ParseOutcome::NoGrammar => true,
+            // Out of budget. The edits stay applied to the tree, so the
+            // background parse resumes from where this one stopped.
+            ParseOutcome::Cancelled => false,
+        }
+    }
+
+    /// Version of the highlights. It moves only when a parse lands, so a host
+    /// (or a test) can tell a frame painted with new colours from one that
+    /// reused the ones it already had.
+    pub fn highlight_version(&self) -> u64 {
         self.syntax.version
     }
 
     /// Highlight spans covering a byte range of the buffer, memoised per frame.
+    ///
+    /// This never comes back empty for text that was coloured a frame ago: when
+    /// the tree is away on the background executor (or behind the buffer), the
+    /// spans carried across the edit are used instead, clipped to `range`. The
+    /// swap to the real result happens in one go, when the parse lands.
     pub(crate) fn highlights(&mut self, range: Range<usize>) -> &[(Range<usize>, HighlightId)] {
         let key = (
             self.snapshot.version(),
@@ -672,12 +903,37 @@ impl EditorView {
             range.end,
         );
         if self.syntax.spans_key != key {
-            self.syntax.spans = self
+            let version = self.snapshot.version();
+            let current = self
                 .syntax
                 .state
                 .as_ref()
-                .map(|state| state.highlights(range))
-                .unwrap_or_default();
+                .is_some_and(|state| state.parsed_version() == Some(version));
+            // Querying the tree is right when it matches the buffer, and the
+            // least bad option when the carried spans do not reach this far
+            // (the user scrolled into unpainted text while a parse runs).
+            let covered = self.syntax.carry.as_ref().is_some_and(|carry| {
+                carry.range.start <= range.start && carry.range.end >= range.end
+            });
+            let fresh = (current || !covered)
+                .then(|| {
+                    self.syntax
+                        .state
+                        .as_ref()
+                        .map(|state| state.highlights(range.clone()))
+                })
+                .flatten();
+            self.syntax.spans = match fresh {
+                Some(spans) if current => {
+                    self.syntax.carry = Some(HighlightCarry {
+                        range: range.clone(),
+                        spans: spans.clone(),
+                    });
+                    spans
+                }
+                Some(spans) => spans,
+                None => carried_spans(self.syntax.carry.as_ref(), &range),
+            };
             self.syntax.spans_key = key;
         }
         &self.syntax.spans
@@ -729,6 +985,104 @@ impl EditorView {
             line_start = line_end + 1;
         }
         per_line
+    }
+}
+
+// -- shaped-line cache and render probe -------------------------------------
+
+impl EditorView {
+    /// Shapes one painted line, reusing the cached `ShapedLine` when the text,
+    /// the font size and every run are exactly the ones it was shaped from.
+    ///
+    /// Returns `(line, reshaped)`: `reshaped` is `true` only when the shaper
+    /// actually ran, which is what "a row that did not change is never shaped
+    /// again" means in practice — a keystroke reshapes the edited row and
+    /// nothing else, whatever moved in the rest of the document.
+    pub(crate) fn shaped_line(
+        &mut self,
+        text: &str,
+        runs: &[TextRun],
+        font_size: Pixels,
+        window: &Window,
+    ) -> (ShapedLine, bool) {
+        let signature: Vec<(usize, Hsla)> = runs.iter().map(|run| (run.len, run.color)).collect();
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        f32::from(font_size).to_bits().hash(&mut hasher);
+        signature.hash(&mut hasher);
+        let key = hasher.finish();
+
+        let frame = self.frame_counter;
+        if let Some(cached) = self.line_cache.get_mut(&key)
+            && cached.text.as_ref() == text
+            && cached.runs == signature
+        {
+            cached.used_frame = frame;
+            return (cached.line.clone(), false);
+        }
+
+        let text: SharedString = text.to_string().into();
+        let line = window
+            .text_system()
+            .shape_line(text.clone(), font_size, runs, None);
+        self.line_cache.insert(
+            key,
+            CachedLine {
+                line: line.clone(),
+                text,
+                runs: signature,
+                used_frame: frame,
+            },
+        );
+        (line, true)
+    }
+
+    /// Closes a painted frame: ages the shaped-line cache and, when the render
+    /// probe is on, records what the frame painted.
+    pub(crate) fn end_frame(&mut self, rows: Vec<RowRender>) {
+        if self.render_probe {
+            if self.render_frames.len() >= RENDER_FRAME_HISTORY {
+                self.render_frames.pop_front();
+            }
+            self.render_frames.push_back(FrameRender {
+                text_version: self.snapshot.version(),
+                highlight_version: self.syntax.version,
+                rows,
+            });
+        }
+        self.frame_counter += 1;
+        if self.line_cache.len() > LINE_CACHE_MAX {
+            let frame = self.frame_counter;
+            self.line_cache
+                .retain(|_, cached| cached.used_frame + LINE_CACHE_KEEP >= frame);
+        }
+    }
+
+    /// Whether the render probe is collecting frames.
+    pub fn render_probe(&self) -> bool {
+        self.render_probe
+    }
+
+    /// Turns the render probe on or off. Off by default: while it is on the
+    /// view keeps a [`FrameRender`] for each of the last 64 painted frames,
+    /// which is what a test inspects to prove that no frame dropped the
+    /// highlights of a row.
+    pub fn set_render_probe(&mut self, on: bool) {
+        self.render_probe = on;
+        if !on {
+            self.render_frames.clear();
+        }
+    }
+
+    /// The frames recorded since the probe was turned on (or since the last
+    /// [`EditorView::take_render_frames`]), oldest first.
+    pub fn render_frames(&self) -> Vec<FrameRender> {
+        self.render_frames.iter().cloned().collect()
+    }
+
+    /// Same, and forgets them.
+    pub fn take_render_frames(&mut self) -> Vec<FrameRender> {
+        self.render_frames.drain(..).collect()
     }
 }
 
@@ -817,7 +1171,7 @@ impl EditorView {
     }
 
     /// Version of the text the view is showing.
-    pub(crate) fn text_version(&self) -> u64 {
+    pub fn text_version(&self) -> u64 {
         self.snapshot.version()
     }
 
@@ -1637,12 +1991,14 @@ impl EditorView {
         };
         self.snapshot = self.buffer.lock().snapshot();
         // Undo/redo can touch several places at once, so the tree is re-seeded
-        // instead of trying to derive the intermediate snapshots.
+        // instead of trying to derive the intermediate snapshots. The carried
+        // spans go with it: their offsets no longer mean anything.
         if let Some(state) = self.syntax.state.as_mut() {
             state.reset(self.snapshot.clone());
         } else {
             self.syntax.stale = true;
         }
+        self.syntax.drop_carry();
         self.request_reparse(cx);
         self.rebuild_display_map();
         self.invalidate_layout();
@@ -1860,6 +2216,7 @@ impl EditorView {
         } else {
             self.syntax.stale = true;
         }
+        self.syntax.drop_carry();
         self.request_reparse(cx);
         let delta = hunk.deleted_text.len() as i64 - (added.end - added.start) as i64;
         let shift = |row: u32| -> u32 { (row as i64 + delta).max(0) as u32 };
@@ -1930,6 +2287,7 @@ impl EditorView {
         if let Some(state) = self.syntax.state.as_mut() {
             state.reset(self.snapshot.clone());
         }
+        self.syntax.drop_carry();
         self.request_reparse(cx);
         for hunk in &mut self.hunks {
             if hunk.insert_before_buffer_row > at {
@@ -2589,6 +2947,62 @@ pub fn editor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spans(ranges: &[(usize, usize)]) -> Vec<(Range<usize>, HighlightId)> {
+        ranges
+            .iter()
+            .map(|(start, end)| (*start..*end, HighlightId::Keyword))
+            .collect()
+    }
+
+    fn ranges(spans: &[(Range<usize>, HighlightId)]) -> Vec<(usize, usize)> {
+        spans
+            .iter()
+            .map(|(range, _)| (range.start, range.end))
+            .collect()
+    }
+
+    #[test]
+    fn an_insertion_slides_the_spans_after_it() {
+        // "fn" 0..2, "main" 3..7, "let" 12..15; a character typed at 8.
+        let mut carried = spans(&[(0, 2), (3, 7), (12, 15)]);
+        shift_spans(&mut carried, 8, 0, 1);
+        assert_eq!(ranges(&carried), vec![(0, 2), (3, 7), (13, 16)]);
+    }
+
+    #[test]
+    fn a_span_the_edit_cuts_through_keeps_its_head() {
+        let mut carried = spans(&[(0, 2), (3, 7)]);
+        // Typed in the middle of "main".
+        shift_spans(&mut carried, 5, 0, 1);
+        assert_eq!(ranges(&carried), vec![(0, 2), (3, 5)]);
+    }
+
+    #[test]
+    fn a_span_the_edit_swallows_is_dropped() {
+        let mut carried = spans(&[(0, 2), (3, 7), (9, 11)]);
+        // The whole of "main" plus a space is replaced by one character.
+        shift_spans(&mut carried, 3, 5, 1);
+        assert_eq!(ranges(&carried), vec![(0, 2), (5, 7)]);
+    }
+
+    #[test]
+    fn a_deletion_pulls_the_spans_back() {
+        let mut carried = spans(&[(0, 2), (10, 14)]);
+        shift_spans(&mut carried, 3, 4, 0);
+        assert_eq!(ranges(&carried), vec![(0, 2), (6, 10)]);
+    }
+
+    #[test]
+    fn carried_spans_are_clipped_to_the_range_asked_for() {
+        let carry = HighlightCarry {
+            range: 0..20,
+            spans: spans(&[(0, 4), (8, 12), (16, 20)]),
+        };
+        let clipped = carried_spans(Some(&carry), &(2..10));
+        assert_eq!(ranges(&clipped), vec![(2, 4), (8, 10)]);
+        assert!(carried_spans(None, &(0..10)).is_empty());
+    }
 
     #[test]
     fn word_boundaries_walk_by_class() {

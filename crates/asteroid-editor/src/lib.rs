@@ -68,15 +68,21 @@
 //! [`DiffTransformMap`] splices the deleted lines of a review hunk in as
 //! read-only *phantom rows* (still shaped, selectable, copyable); [`WrapMap`]
 //! turns every display row into one or more *wrap rows*. The element shapes
-//! only the wrap rows in the viewport and caches them by
-//! `(buffer version, highlight version, row, wrap width)`.
+//! only the wrap rows in the viewport and caches the shaped lines by their
+//! *content* (painted text, font size, run colours), so a row that did not
+//! change is never shaped again — not even when an edit moved it up or down.
 //!
 //! # Threading
 //!
 //! Tree-sitter parsing follows `03-arquitectura.md` §3: `SyntaxState::apply_event`
-//! runs on the UI thread for every buffer event, and the expensive `reparse`
-//! runs on `cx.background_executor()` with a `CancelFlag` that a newer edit
-//! raises. Highlights are queried for the visible byte range only.
+//! runs on the UI thread for every buffer event, and the reparse is then tried
+//! on the UI thread with a [`view::SYNC_PARSE_BUDGET`] deadline — one keystroke
+//! is far below it, so the frame that paints the character already has its
+//! final colours. Only a parse that blows the budget goes to
+//! `cx.background_executor()` with a `CancelFlag` that a newer edit raises, and
+//! while it runs the highlights of the previous frame are carried over, shifted
+//! by the edit, so no frame is ever painted with uncoloured text. Highlights
+//! are queried for the visible byte range only.
 //!
 //! # Not implemented yet (E1 workstream C scope)
 //!
@@ -130,5 +136,5 @@ pub use search::{SearchState, find_matches};
 pub use settings::{EditorSettings, Indentation, SharedBuffer, detect_indentation, shared};
 pub use symbol::{definition_kinds, symbol_at};
 pub use theme::EditorTheme;
-pub use view::{EditorEvent, EditorStyle, EditorView, FrameStats, editor};
+pub use view::{EditorEvent, EditorStyle, EditorView, FrameRender, FrameStats, RowRender, editor};
 pub use wrap_map::{WrapMap, WrapRow, WrapSource, WrappedRow};

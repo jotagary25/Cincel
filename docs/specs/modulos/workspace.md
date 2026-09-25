@@ -24,3 +24,25 @@
 - [ ] Cerrar y reabrir restaura pestañas, tamaños de paneles y posición del scroll de cada pestaña.
 - [ ] `Alt+J` recorre todos los hunks pendientes de todos los archivos abriendo pestañas según haga falta, con wrap.
 - [ ] Editar `settings.json` cambia el tamaño de fuente sin reiniciar.
+
+## Desviaciones (Etapa 2, integración del chat)
+
+- **"Mencionar en el chat" en vez de arrastrar**: `gpui-kit` 0.6.1 no expone
+  una fuente de arrastre en su árbol virtualizado (`tree()`/`TreeItem`), a
+  diferencia de las pestañas del centro, que arrastran con primitivas `div`
+  crudas (`on_drag`/`drag_over`/`on_drop`). El menú contextual del árbol
+  ganó el ítem "Mencionar en el chat" (`workspace::mention_in_chat`), que
+  hace exactamente lo que haría soltar el archivo: inserta el chip vía
+  `ChatPanel::insert_mention`.
+- **El indicador de actividad del agente en una pestaña es un sufijo "◆"**
+  fijo en el título (`Tab::agent_touched`, `CenterPanel::note_agent_write`/
+  `reload_after_agent_edit`), no el indicador de revisión `+N −M` que describe
+  este documento — ese llega con `asteroid-review` en la Etapa 3.
+- **`ChatSettings` no tiene sección propia en `settings.json`**: ninguno de
+  sus campos (filas del input, líneas de contexto del diff, …) tiene
+  contraparte en `asteroid_settings::Settings` todavía, así que
+  `theme::chat_settings` siempre proyecta los valores por defecto del crate;
+  el cableado de recarga en caliente ya está listo para cuando esa sección
+  se agregue.
+- Detalle completo (incluida la razón de cada una) en
+  `docs/etapas/etapa-2.md`, secciones "Desviaciones" y "Deseos".

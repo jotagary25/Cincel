@@ -67,22 +67,29 @@ pub struct AgentDescriptor {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Distribution {
-    /// Run through `npx`. The only channel E0 can launch.
+    /// Run through `npx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub npx: Option<NpxDistribution>,
-    /// Run through `uvx` (Python). Parsed but not launchable in E0.
+    /// Run through `uvx` (Python).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uvx: Option<UvxDistribution>,
-    /// Prebuilt binaries keyed by `<os>-<arch>`. Parsed but not launchable in E0.
+    /// Prebuilt binaries keyed by `<os>-<arch>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<BTreeMap<String, BinaryTarget>>,
+    /// Not part of the wire format: set by [`AgentRegistry::with_custom`] for
+    /// agents defined in `settings.json`. Always takes precedence in
+    /// [`AgentRegistry::launch_command`].
+    #[serde(skip)]
+    pub custom: Option<CustomAgent>,
 }
 
 impl Distribution {
     /// Short name of the preferred available channel, used in error messages.
     #[must_use]
     pub fn kind(&self) -> &'static str {
-        if self.npx.is_some() {
+        if self.custom.is_some() {
+            "custom"
+        } else if self.npx.is_some() {
             "npx"
         } else if self.uvx.is_some() {
             "uvx"
@@ -98,6 +105,26 @@ impl Distribution {
     pub fn binary_for_this_platform(&self) -> Option<&BinaryTarget> {
         self.binary.as_ref()?.get(&current_platform_key())
     }
+}
+
+/// A user-defined agent from `settings.json` (`agents.custom`).
+///
+/// Asteroid does not depend on `asteroid-settings` from this crate: the
+/// workspace glue in `asteroid` maps the settings shape onto this struct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomAgent {
+    /// Stable identifier. Shadows a registry entry with the same id.
+    pub id: String,
+    /// Human readable name.
+    pub name: String,
+    /// Program to execute (absolute path or something resolvable on `PATH`).
+    pub command: String,
+    /// Arguments for `command`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 /// `npx` distribution.
@@ -319,30 +346,128 @@ impl AgentRegistry {
         self.agents.iter().find(|agent| agent.id == id)
     }
 
+    /// Merge user-defined agents on top of the loaded registry.
+    ///
+    /// A custom agent whose `id` clashes with a remote entry replaces it
+    /// entirely (`docs/specs/modulos/acp.md`); it is otherwise appended.
+    #[must_use]
+    pub fn with_custom(mut self, custom: Vec<CustomAgent>) -> Self {
+        for agent in custom {
+            self.agents.retain(|existing| existing.id != agent.id);
+            self.agents.push(AgentDescriptor {
+                id: agent.id.clone(),
+                name: agent.name.clone(),
+                version: "custom".to_string(),
+                description: None,
+                repository: None,
+                icon: None,
+                distribution: Distribution {
+                    custom: Some(agent),
+                    ..Distribution::default()
+                },
+            });
+        }
+        self
+    }
+
     /// Build the command needed to run `descriptor`.
     ///
-    /// Only `npx` distributions are supported in E0.
+    /// Channel precedence: `custom` (settings) > `npx` > `uvx` > `binary`.
+    /// `npx` requires a working `node`; `uvx` requires `uv`; `binary` must
+    /// already be installed via [`AgentRegistry::install`].
     ///
     /// # Errors
     ///
-    /// Returns [`AcpError::NotSupportedYet`] for `binary` and `uvx`.
+    /// Returns [`AcpError::NodeMissing`], [`AcpError::UvMissing`],
+    /// [`AcpError::NotInstalled`] or [`AcpError::NotSupportedYet`] (no
+    /// distribution channel at all) depending on what is missing.
     pub fn launch_command(&self, descriptor: &AgentDescriptor) -> Result<LaunchSpec> {
-        match &descriptor.distribution.npx {
-            Some(npx) => {
-                let package = pin_version(&npx.package, &descriptor.version);
-                let mut args = vec!["-y".to_string(), package];
-                args.extend(npx.args.iter().cloned());
-                Ok(LaunchSpec {
-                    program: "npx".to_string(),
-                    args,
-                    env: npx.env.clone(),
-                })
-            }
-            None => Err(AcpError::NotSupportedYet {
-                id: descriptor.id.clone(),
-                kind: descriptor.distribution.kind().to_string(),
-            }),
+        if let Some(custom) = &descriptor.distribution.custom {
+            return Ok(LaunchSpec {
+                program: custom.command.clone(),
+                args: custom.args.clone(),
+                env: custom.env.clone(),
+            });
         }
+        if let Some(npx) = &descriptor.distribution.npx {
+            ensure_node_available().map_err(|_| AcpError::NodeMissing {
+                found: node_major_version()
+                    .map(|major| format!("node {major} (se necesita >= {MIN_NODE_MAJOR})"))
+                    .unwrap_or_else(|| "no se encontró `node` en el PATH".to_string()),
+            })?;
+            let package = pin_version(&npx.package, &descriptor.version);
+            let mut args = vec!["-y".to_string(), package];
+            args.extend(npx.args.iter().cloned());
+            return Ok(LaunchSpec {
+                program: "npx".to_string(),
+                args,
+                env: npx.env.clone(),
+            });
+        }
+        if let Some(uvx) = &descriptor.distribution.uvx {
+            ensure_uv_available()?;
+            let package = pin_version(&uvx.package, &descriptor.version);
+            let mut args = vec![package];
+            args.extend(uvx.args.iter().cloned());
+            return Ok(LaunchSpec {
+                program: "uvx".to_string(),
+                args,
+                env: uvx.env.clone(),
+            });
+        }
+        if descriptor.distribution.binary.is_some() {
+            if crate::install::is_installed(descriptor) {
+                let (_, target) = crate::install::plan(descriptor)?;
+                let cmd_path = crate::install::install_dir_for(&descriptor.id, &descriptor.version)
+                    .join(target.cmd.strip_prefix("./").unwrap_or(&target.cmd));
+                return Ok(LaunchSpec {
+                    program: cmd_path.to_string_lossy().into_owned(),
+                    args: target.args.clone(),
+                    env: target.env.clone(),
+                });
+            }
+            return Err(AcpError::NotInstalled {
+                id: descriptor.id.clone(),
+                kind: "binary".to_string(),
+            });
+        }
+        Err(AcpError::NotSupportedYet {
+            id: descriptor.id.clone(),
+            kind: descriptor.distribution.kind().to_string(),
+        })
+    }
+
+    /// Whether `descriptor`'s `binary` distribution is already installed for
+    /// this platform. Always `false` for `custom`, `npx` and `uvx` channels
+    /// (they need no install step).
+    #[must_use]
+    pub fn is_installed(&self, descriptor: &AgentDescriptor) -> bool {
+        crate::install::is_installed(descriptor)
+    }
+
+    /// Download, verify and extract a `binary` distribution, then return the
+    /// [`LaunchSpec`] for the extracted command.
+    ///
+    /// `confirm` is called with the [`crate::install::InstallPlan`] before any
+    /// network access; when it returns `false` nothing is downloaded and
+    /// [`AcpError::InstallDeclined`] is returned. When the registry omitted a
+    /// `sha256`, `plan.verifiable` is `false` so the caller can warn the user
+    /// before confirming.
+    ///
+    /// # Errors
+    ///
+    /// See [`AcpError::NoBinaryForPlatform`], [`AcpError::ChecksumMismatch`],
+    /// [`AcpError::ExtractFailed`] and [`AcpError::InstallDeclined`].
+    pub fn install(
+        &self,
+        descriptor: &AgentDescriptor,
+        confirm: impl FnOnce(&crate::install::InstallPlan) -> bool,
+    ) -> Result<LaunchSpec> {
+        let (plan, target) = crate::install::plan(descriptor)?;
+        if !confirm(&plan) {
+            return Err(AcpError::InstallDeclined);
+        }
+        crate::install::download_and_extract(&plan, &target)
     }
 
     fn read_cache(path: &Path, ttl: Duration) -> Option<Self> {
@@ -426,6 +551,28 @@ pub fn ensure_node_available() -> Result<u32> {
         None => Err(AcpError::RegistryUnavailable(
             "no se encontró `node` en el PATH".to_string(),
         )),
+    }
+}
+
+/// Whether `uv`/`uvx` is on `PATH`, needed for `uvx` distributions.
+#[must_use]
+pub fn uv_available() -> bool {
+    std::process::Command::new("uvx")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Check that `uvx` is available.
+///
+/// # Errors
+///
+/// Returns [`AcpError::UvMissing`] when `uvx` is not on `PATH`.
+pub fn ensure_uv_available() -> Result<()> {
+    if uv_available() {
+        Ok(())
+    } else {
+        Err(AcpError::UvMissing)
     }
 }
 
@@ -515,13 +662,110 @@ mod tests {
     }
 
     #[test]
-    fn binary_distribution_is_not_supported_yet() {
+    fn binary_distribution_needs_install_first() {
         let registry = AgentRegistry::parse(SAMPLE).expect("parse");
         let descriptor = registry.get("amp-acp").expect("amp");
+        assert!(!registry.is_installed(descriptor));
         let error = registry
             .launch_command(descriptor)
-            .expect_err("no soportado");
-        assert!(matches!(error, AcpError::NotSupportedYet { ref kind, .. } if kind == "binary"));
+            .expect_err("no instalado");
+        // Whether the registry entry matches this platform decides which of
+        // the two "not ready yet" errors comes back.
+        if descriptor.distribution.binary_for_this_platform().is_some() {
+            assert!(matches!(error, AcpError::NotInstalled { ref kind, .. } if kind == "binary"));
+        } else {
+            assert!(matches!(error, AcpError::NoBinaryForPlatform { .. }));
+        }
+    }
+
+    #[test]
+    fn uvx_launch_command_pins_version_without_dash_y() {
+        let registry = AgentRegistry::parse(
+            r#"{"version":"1.0.0","agents":[{
+                "id": "uvx-agent",
+                "name": "Uvx",
+                "version": "2.0.0",
+                "distribution": { "uvx": { "package": "some-acp-agent" } }
+            }]}"#,
+        )
+        .expect("parse");
+        let descriptor = registry.get("uvx-agent").expect("uvx-agent");
+        // This test machine always has `uv`/`uvx` installed (dev prerequisite).
+        let spec = registry.launch_command(descriptor).expect("spec");
+        assert_eq!(spec.program, "uvx");
+        assert_eq!(spec.args, vec!["some-acp-agent@2.0.0"]);
+    }
+
+    #[test]
+    fn custom_agent_shadows_registry_entry_with_same_id() {
+        let registry = AgentRegistry::parse(SAMPLE)
+            .expect("parse")
+            .with_custom(vec![CustomAgent {
+                id: "claude-acp".to_string(),
+                name: "Claude local".to_string(),
+                command: "/usr/local/bin/claude-acp".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: BTreeMap::new(),
+            }]);
+        // Still four agents: the custom entry replaced, not appended.
+        assert_eq!(registry.agents().len(), 4);
+        let descriptor = registry.get("claude-acp").expect("claude-acp");
+        assert_eq!(descriptor.name, "Claude local");
+        let spec = registry.launch_command(descriptor).expect("spec");
+        assert_eq!(spec.program, "/usr/local/bin/claude-acp");
+        assert_eq!(spec.args, vec!["--stdio"]);
+    }
+
+    #[test]
+    fn custom_agent_without_id_clash_is_appended() {
+        let registry = AgentRegistry::parse(SAMPLE)
+            .expect("parse")
+            .with_custom(vec![CustomAgent {
+                id: "mi-agente".to_string(),
+                name: "Mi agente".to_string(),
+                command: "mi-agente".to_string(),
+                args: vec![],
+                env: BTreeMap::new(),
+            }]);
+        assert_eq!(registry.agents().len(), 5);
+        assert!(registry.get("mi-agente").is_some());
+    }
+
+    #[test]
+    fn install_plan_is_not_verifiable_without_sha256() {
+        let registry = AgentRegistry::parse(SAMPLE).expect("parse");
+        let descriptor = registry.get("sin-sha").expect("sin-sha");
+        if descriptor.distribution.binary_for_this_platform().is_none() {
+            return; // Not this platform's entry; nothing to assert.
+        }
+        let mut seen_plan = None;
+        let error = registry
+            .install(descriptor, |plan| {
+                seen_plan = Some(plan.clone());
+                false
+            })
+            .expect_err("declined");
+        assert!(matches!(error, AcpError::InstallDeclined));
+        let plan = seen_plan.expect("confirm fue llamado");
+        assert!(!plan.verifiable, "sin sha256 el plan no es verificable");
+        assert_eq!(plan.sha256, None);
+    }
+
+    #[test]
+    fn install_plan_is_verifiable_with_sha256() {
+        let registry = AgentRegistry::parse(SAMPLE).expect("parse");
+        let descriptor = registry.get("amp-acp").expect("amp-acp");
+        if descriptor.distribution.binary_for_this_platform().is_none() {
+            return;
+        }
+        let error = registry
+            .install(descriptor, |plan| {
+                assert!(plan.verifiable);
+                assert_eq!(plan.sha256.as_deref(), Some("00"));
+                false
+            })
+            .expect_err("declined");
+        assert!(matches!(error, AcpError::InstallDeclined));
     }
 
     #[test]

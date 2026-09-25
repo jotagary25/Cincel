@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+asteroid-acp = { path = "../asteroid-acp" }
+asteroid-chat = { path = "../asteroid-chat" }
 asteroid-editor = { path = "../asteroid-editor" }
 asteroid-project = { path = "../asteroid-project" }
 asteroid-settings = { path = "../asteroid-settings" }
@@ -23,11 +25,15 @@ rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
+# Only to spell `tokio::sync::oneshot::Sender<...>`, the type of
+# `AgentEvent::FsRead`/`FsWrite`'s `reply` field: this crate never touches a
+# tokio runtime itself (`asteroid-acp` owns its own worker thread).
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 gpui_platform = { workspace = true }
-tempfile = { workspace = true }
 
 [features]
 # Enables gpui's test harness (`cargo test -p asteroid-workspace --features test-support`).

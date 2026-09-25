@@ -70,6 +70,10 @@ workspace_actions! {
     CopyPath => "copy_path",
     /// Copies the path of the tree entry relative to the project root.
     CopyRelativePath => "copy_relative_path",
+    /// Stages the tree entry as an `@` mention in the chat composer, the
+    /// context-menu fallback for dragging a file into the chat
+    /// (`gpui-kit`'s tree has no drag source; see `docs/etapas/etapa-2.md`).
+    MentionInChat => "mention_in_chat",
 }
 
 /// The commands that exist but do nothing until stage 3, with the message
