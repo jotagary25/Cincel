@@ -1,0 +1,23 @@
+[package]
+name = "cincel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cincel"
+path = "src/main.rs"
+
+[dependencies]
+cincel-log = { path = "../cincel-log" }
+cincel-settings = { path = "../cincel-settings" }
+cincel-workspace = { path = "../cincel-workspace" }
+gpui-kit = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "cincel-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+imara-diff = { workspace = true }
+ropey = { workspace = true }
+similar = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

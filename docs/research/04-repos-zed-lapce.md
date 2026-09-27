@@ -1,5 +1,7 @@
 # Informe 04: Análisis de código de repos (Zed, gpui-component, Lapce, Helix, ACP SDK, adapters)
 
+_Escrito cuando el proyecto se llamaba Asteroid (hoy Cincel)._
+
 Fecha: 2026-09-17. Subagente Opus con clones shallow en clones locales shallow.
 
 ## 1. Zed / gpui

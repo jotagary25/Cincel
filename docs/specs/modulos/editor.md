@@ -1,9 +1,9 @@
-# Módulo `asteroid-editor`
+# Módulo `cincel-editor`
 
 El elemento editor de código sobre GPUI. Propio, no derivado de otro editor. Referencia de diseño: el editor de Zed (arquitectura, no código).
 
 ## Estructura
-- `EditorView` (entidad GPUI): posee `Entity<Buffer>` (de `asteroid-text` envuelto), `SyntaxState`, `DisplayMap`, `Selection { head: Anchor, anchor: Anchor }`, scroll, estado de búsqueda, referencia al `ReviewStore` para su archivo.
+- `EditorView` (entidad GPUI): posee `Entity<Buffer>` (de `cincel-text` envuelto), `SyntaxState`, `DisplayMap`, `Selection { head: Anchor, anchor: Anchor }`, scroll, estado de búsqueda, referencia al `ReviewStore` para su archivo.
 - `DisplayMap` = `DiffTransformMap → WrapMap → BlockMap` (`03-arquitectura.md §5`). Tipos: `BufferRow`, `DisplayRow`; `to_display(BufferPoint) -> DisplayPoint`, `to_buffer(DisplayPoint) -> BufferPoint | Phantom { hunk, base_row }`.
 - `DiffTransformMap`: se alimenta de `FileReview.hunks`; por cada hunk con `base_rows` no vacío inserta filas fantasma **antes** de `buffer_range.start`. Las filas fantasma tienen su propio `RopeSlice` del `base` y se resaltan con el mismo lenguaje.
 - `EditorElement` (impl `Element`): virtualización (solo filas visibles ± 1 pantalla), layout de líneas con `window.text_system().shape_line`, caché de `ShapedLine` por `(buffer_version, base_version, row, width)`, pintado de fondos de línea (actual, diff), selección, cursor, coincidencias, gutter (números, barras de diff, iconos `+`/`−` al hover), pill flotante por hunk (bloque del `BlockMap`), barra flotante de revisión, scrollbar.

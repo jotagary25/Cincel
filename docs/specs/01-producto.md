@@ -1,10 +1,10 @@
 # Spec 01: Producto
 
-Estado: v1.0 (2026-09-17). Fuente de verdad sobre **qué** hace Asteroid. Las decisiones de fondo están en `docs/00-sintesis-y-decisiones.md`; la investigación en `docs/research/`.
+Estado: v1.0 (2026-09-17). Fuente de verdad sobre **qué** hace Cincel. Las decisiones de fondo están en `docs/00-sintesis-y-decisiones.md`; la investigación en `docs/research/`.
 
 ## 1. Qué es
 
-Asteroid es un editor de código de escritorio para Linux, minimalista y liviano, con un chat integrado que conecta agentes de programación (Claude Code, Codex, Gemini CLI, OpenCode y cualquier otro compatible con ACP) usando las suscripciones que el usuario ya tiene. Su rasgo distintivo: **todo cambio que hace un agente se muestra dentro del editor, segmento por segmento, y el usuario acepta o rechaza cada segmento o cada línea**. Los cambios nunca se revisan en el chat.
+Cincel es un editor de código de escritorio para Linux, minimalista y liviano, con un chat integrado que conecta agentes de programación (Claude Code, Codex, Gemini CLI, OpenCode y cualquier otro compatible con ACP) usando las suscripciones que el usuario ya tiene. Su rasgo distintivo: **todo cambio que hace un agente se muestra dentro del editor, segmento por segmento, y el usuario acepta o rechaza cada segmento o cada línea**. Los cambios nunca se revisan en el chat.
 
 Público objetivo: el propio autor y desarrolladores con perfil similar. Plataforma: Linux, Wayland primero (X11 como respaldo). Máquina de referencia: Pop!_OS 24.04 con escritorio COSMIC.
 
@@ -40,7 +40,7 @@ Público objetivo: el propio autor y desarrolladores con perfil similar. Platafo
 ## 4. Flujos de usuario
 
 ### F1. Abrir un proyecto
-1. `asteroid ~/proyecto` o `asteroid` y luego "Abrir carpeta" (diálogo del portal del sistema).
+1. `cincel ~/proyecto` o `cincel` y luego "Abrir carpeta" (diálogo del portal del sistema).
 2. Aparece el árbol a la derecha, el chat a la izquierda y un editor vacío al centro con la pista "Abrí un archivo o hablale al agente".
 3. Al reabrir la app, vuelve al último proyecto con las mismas pestañas.
 
@@ -51,7 +51,7 @@ Público objetivo: el propio autor y desarrolladores con perfil similar. Platafo
 
 ### F3. Hablar con un agente
 1. Arriba del chat, selector de agente. La lista viene del registro oficial de ACP más lo que el usuario agregue en ajustes. Los agentes cuyo ejecutable no está instalado aparecen atenuados con la pista para instalarlos.
-2. Al elegir un agente, Asteroid lo lanza. Si el agente pide autenticación, muestra una tarjeta con el comando a ejecutar en un terminal y un botón "Ya me autentiqué" que reintenta.
+2. Al elegir un agente, Cincel lo lanza. Si el agente pide autenticación, muestra una tarjeta con el comando a ejecutar en un terminal y un botón "Ya me autentiqué" que reintenta.
 3. El usuario escribe y envía con `Enter` (`Shift+Enter` inserta salto de línea). Puede mencionar archivos con `@` y arrastrar archivos desde el árbol.
 4. La respuesta se muestra en streaming. Cada herramienta que usa el agente aparece como una tarjeta plegada con título, estado y, al desplegarla, el detalle. Las tarjetas de edición muestran el archivo y `+N −M` y al hacer clic llevan al primer segmento pendiente de ese archivo en el editor.
 5. Si el agente pide permiso, aparece una tarjeta con los botones que ofrece el agente (por ejemplo "Permitir", "Permitir siempre", "Rechazar"). El chat queda a la espera.
@@ -69,15 +69,16 @@ Público objetivo: el propio autor y desarrolladores con perfil similar. Platafo
 8. `Alt+Shift+U` deshace el último rechazo (con un aviso emergente al rechazar que lo recuerda).
 9. El usuario puede escribir dentro de un segmento pendiente. Lo que escriba no cuenta como cambio del agente y el segmento se reacomoda.
 10. `Ctrl+Z` deshace la edición del agente como un solo paso (el segmento desaparece porque el texto vuelve al original). `Ctrl+Z` no deshace un "aceptar".
-11. Al cerrar y reabrir Asteroid, los segmentos pendientes siguen ahí, siempre que el archivo no haya cambiado por fuera. Si cambió por fuera, se descarta la revisión de ese archivo y se avisa.
-12. En el siguiente mensaje al agente, Asteroid adjunta un resumen de lo que el usuario rechazó o modificó de su propuesta.
+11. Al cerrar y reabrir Cincel, los segmentos pendientes siguen ahí, siempre que el archivo no haya cambiado por fuera. Si cambió por fuera, se descarta la revisión de ese archivo y se avisa.
+12. En el siguiente mensaje al agente, Cincel adjunta un resumen de lo que el usuario rechazó o modificó de su propuesta.
 
-### F5. Autonomía del agente
-Ajuste con tres valores, elegible por sesión desde el chat:
-- **Revisar después** (predeterminado): el agente escribe sin pedir permiso; todo queda pendiente de aprobación en el editor.
-- **Pedir antes**: cada edición pide permiso antes de escribirse, mostrando el diff propuesto en el chat. Además queda pendiente en el editor.
-- **Aplicar siempre**: sin pedir permiso y aceptando automáticamente. Útil para tareas mecánicas.
-Independientemente del valor, una lista de patrones de archivos sensibles (por defecto `.env*`, `**/.git/**`, `Cargo.lock`, `package-lock.json`) pide siempre permiso antes de escribirse.
+### F5. Permisos del agente
+Cincel no tiene un selector de autonomía propio (se retiró en la Etapa 3, tras la prueba del autor). El comportamiento es uno solo y fijo:
+- Los pedidos de permiso de herramientas de tipo **editar, leer, buscar y pensar** (`edit`, `read`, `search`, `think`) se conceden solos: el agente escribe sin preguntar y **todo queda pendiente de aprobación en el editor**. Nunca se acepta nada automáticamente al terminar el turno.
+- **Ejecutar, descargar, borrar, mover y cualquier otro tipo** (`execute`, `fetch`, `delete`, `move`, `other`) se muestran siempre al usuario en el chat.
+- Cualquier pedido que toque una ruta sensible (`review.sensitive_paths`, por defecto `.env*`, `**/.git/**`, `Cargo.lock`, `package-lock.json`) se muestra siempre al usuario, sea del tipo que sea.
+
+Los **modos propios del agente** (por ejemplo "Manual" / "Auto" / "Plan" de Claude, que llegan como `configOptions` o `availableModes` de ACP) siguen en la fila de selectores del chat y son cosa del agente: cambian lo que el agente hace (planear sin tocar nada, pedir permiso más seguido…), pero todo pedido de permiso que mande pasa por la regla de arriba, así que una edición se concede sola y se revisa después en el editor.
 
 ## 5. Requisitos no funcionales
 
@@ -90,20 +91,19 @@ Independientemente del valor, una lista de patrones de archivos sensibles (por d
 | Archivo > 2 MB o > 50 000 líneas | edición fluida; revisión solo por archivo (sin segmentos inline) |
 | Memoria en reposo con proyecto mediano | < 300 MB |
 | Uso de CPU en reposo | 0% (sin redibujo continuo) |
-| Sin GPU Vulkan | arranca con OpenGL; sin GPU alguna, arranca con renderizado por software si se pide con `ASTEROID_ALLOW_SOFTWARE_GPU=1` |
+| Sin GPU Vulkan | arranca con OpenGL; sin GPU alguna, arranca con renderizado por software si se pide con `CINCEL_ALLOW_SOFTWARE_GPU=1` |
 
 ## 6. Compatibilidad con agentes (v1)
 
 | Agente | Cómo se lanza | Autenticación |
 |---|---|---|
-| Claude Code | `npx -y @agentclientprotocol/claude-agent-acp@<versión del registro>` | sesión de `claude` en la máquina |
-| Codex | `npx -y @agentclientprotocol/codex-acp@<versión>` | sesión de `codex` (ChatGPT) |
-| Gemini CLI | `npx -y @google/gemini-cli@<versión> --acp` | sesión de `gemini` |
-| OpenCode | `opencode acp` | la propia de OpenCode |
-| Cualquier otro del registro ACP | según el registro | según anuncie |
+| Claude Code | adaptador oficial `@agentclientprotocol/claude-agent-acp` (npm, con el Node privado de Cincel) | login de suscripción en un perfil aislado (spec 06) |
+| Codex | adaptador oficial `@agentclientprotocol/codex-acp` (npm) | login ChatGPT en un perfil aislado |
+| Google Antigravity | servidor ACP oficial `agy-acp-server` (binario del catálogo) | login de Google en un perfil aislado |
+| OpenCode y agentes con API key o gateway | fuera de v1 (otra etapa) | — |
 
-Requisitos del sistema: Node ≥ 22 para los agentes distribuidos por npm. Asteroid detecta si falta y lo indica.
+Requisitos del sistema: ninguno además de Cincel. El entorno de Node y los agentes se descargan en la carpeta de datos de Cincel al conectar por primera vez (spec 06 §3). Gemini CLI quedó fuera: Google retiró su login personal en favor de Antigravity (etapa 4).
 
 ## 7. Fuera de alcance explícito
-- Asteroid no llama a ninguna API de modelos directamente ni guarda credenciales.
-- Asteroid no envía telemetría.
+- Cincel no llama a ninguna API de modelos directamente ni guarda credenciales.
+- Cincel no envía telemetría.

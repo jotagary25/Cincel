@@ -9,44 +9,45 @@ Estado: v1.0. Describe los módulos, sus fronteras, el modelo de hilos y las dep
 | Lenguaje | Rust, edition 2024, toolchain fijado en `rust-toolchain.toml` (≥ 1.90) | MSRV de `agent-client-protocol` y `tree-sitter-language` |
 | Motor gráfico | GPUI, el motor de Zed, vía `gpui-pre` 0.3.5 y `gpui-pre-platform` 0.3.5 (la versión exacta que exige `gpui-kit` 0.6.1; `gpui-unofficial` queda como alternativa si gpui-kit migra) | aspecto Zed, Wayland/X11 nativos, renderizado subpíxel |
 | Componentes UI | `gpui-kit` (dock, pestañas, árbol, inputs, markdown en streaming, popovers) | ahorra meses; Apache-2.0 |
-| Editor de código | **propio** (`asteroid-editor`), con un pipeline de display diseñado para el diff inline | ningún widget Rust existente inserta filas fantasma |
+| Editor de código | **propio** (`cincel-editor`), con un pipeline de display diseñado para el diff inline | ningún widget Rust existente inserta filas fantasma |
 | Texto | `ropey` | estándar; lo usan Helix y gpui-kit |
 | Sintaxis | `tree-sitter` 0.27 + `tree-sitter-highlight`, gramáticas estáticas por cargo feature, siempre desde crates.io | evita duplicar `tree-sitter-language` |
 | Diff | `imara-diff` (o su fork `gix-imara-diff` si está más vivo), Histogram + postproceso de hunks; `similar` para diff de palabras | lo que usa Zed; el postproceso es requisito de corrección |
-| Agentes | `agent-client-protocol` 2.1.x (ACP v1) sobre `tokio` | protocolo oficial; Claude, Codex, Gemini, OpenCode |
+| Agentes | `agent-client-protocol` 2.2.x (ACP v1) sobre `tokio` | protocolo oficial; Claude, Codex, Google Antigravity (OpenCode en otra etapa) |
 | Archivos | `notify` 9 + `notify-debouncer-full`, `ignore` para recorrer respetando `.gitignore` | evita agotar inotify |
 | Git | binario `git` del sistema para `status`/`diff` | hereda credenciales y config |
 | Diálogos | `rfd` vía portal xdg | funciona en COSMIC y GNOME |
 | Config | `serde_json` + `json5`/`jsonc-parser` para comentarios | como Zed |
-| Logs | `tracing` + `tracing-subscriber`, a `~/.local/state/asteroid/log/` | diagnóstico |
+| Logs | `tracing` + `tracing-subscriber` + `tracing-appender`, a stderr y a `~/.local/state/cincel/log/` (rotación diaria, 7 archivos); redacción de secretos en `cincel-log` | diagnóstico, `docs/specs/06-etapa4-conexiones-y-cincel.md` §8 |
 
 ## 2. Workspace Cargo
 
 ```
-asteroid-editor/
+cincel-editor/
   Cargo.toml                 workspace, lints compartidos, perfiles (release: lto="fat", codegen-units=1, strip=false)
   rust-toolchain.toml
   deny.toml                  cargo-deny: licencias permitidas (MIT, Apache-2.0, BSD, ISC, Zlib, MPL-2.0, Unicode); prohibidas GPL/AGPL
   crates/
-    asteroid/                binario. main, ventana, arranque, CLI (`asteroid [ruta]`), carga de settings/keymap/tema, wiring de todo
-    asteroid-workspace/      GPUI: layout de dock, pestañas, árbol de archivos, barra de estado, avisos, panel de revisión, comandos y keymap
-    asteroid-editor/         GPUI: el elemento editor (display map con diff, gutter, cursor, selección, búsqueda, pill y barra flotante de revisión)
-    asteroid-chat/           GPUI: panel de chat (transcript, tarjetas de herramientas, permisos, input, selectores)
-    asteroid-text/           sin GPUI: Buffer (rope + anclas + transacciones + undo + EditSource), codificación y fin de línea
-    asteroid-syntax/         sin GPUI: registro de lenguajes, parseo incremental, spans de resaltado, tema de sintaxis
-    asteroid-review/         sin GPUI: ReviewStore, snapshots base, hunks, aceptar/rechazar/rebase, persistencia, informe para el agente
-    asteroid-project/        sin GPUI: Worktree (árbol de archivos), watcher, BufferStore (archivos abiertos, estado sucio, reconciliación con disco), estado git
-    asteroid-acp/            sin GPUI: registro de agentes, lanzamiento de procesos, cliente ACP, modelo de sesión, eventos hacia la UI, handlers fs/permisos
-    asteroid-settings/       sin GPUI: tipos de settings, keymap y tema; carga, valores por defecto, validación, recarga en caliente
+    cincel/                binario. main, ventana, arranque, CLI (`cincel [ruta]`), carga de settings/keymap/tema, wiring de todo
+    cincel-workspace/      GPUI: layout de dock, pestañas, árbol de archivos, barra de estado, avisos, panel de revisión, comandos y keymap
+    cincel-editor/         GPUI: el elemento editor (display map con diff, gutter, cursor, selección, búsqueda, pill y barra flotante de revisión)
+    cincel-chat/           GPUI: panel de chat (transcript, tarjetas de herramientas, permisos, input, selectores)
+    cincel-text/           sin GPUI: Buffer (rope + anclas + transacciones + undo + EditSource), codificación y fin de línea
+    cincel-syntax/         sin GPUI: registro de lenguajes, parseo incremental, spans de resaltado, tema de sintaxis
+    cincel-review/         sin GPUI: ReviewStore, snapshots base, hunks, aceptar/rechazar/rebase, persistencia, informe para el agente
+    cincel-project/        sin GPUI: Worktree (árbol de archivos), watcher, BufferStore (archivos abiertos, estado sucio, reconciliación con disco), estado git
+    cincel-acp/            sin GPUI: registro de agentes, lanzamiento de procesos, cliente ACP, modelo de sesión, eventos hacia la UI, handlers fs/permisos
+    cincel-settings/       sin GPUI: tipos de settings, keymap y tema; carga, valores por defecto, validación, recarga en caliente
+    cincel-log/            sin GPUI: arranque del log a archivo (rotación diaria) y redacción de secretos de login (`docs/specs/06-etapa4-conexiones-y-cincel.md` §8)
 ```
 
-Regla de dependencias: los crates "sin GPUI" no dependen de nada gráfico y se testean con `cargo test` puro. Los crates GPUI dependen de ellos, nunca al revés. `asteroid-editor` no conoce ACP; `asteroid-acp` no conoce el editor. El pegamento vive en `asteroid` y `asteroid-workspace`.
+Regla de dependencias: los crates "sin GPUI" no dependen de nada gráfico y se testean con `cargo test` puro. Los crates GPUI dependen de ellos, nunca al revés. `cincel-editor` no conoce ACP; `cincel-acp` no conoce el editor. El pegamento vive en `cincel` y `cincel-workspace`.
 
 ## 3. Modelo de hilos
 
 - **Hilo principal**: GPUI. Toda entidad de UI y todo `Buffer` abierto viven aquí (GPUI usa `Entity<T>` no `Send`).
 - **Ejecutor de fondo de GPUI** (`cx.background_executor()`): cálculo de diffs, parseo de tree-sitter, recorrido de directorios, lectura de archivos.
-- **Hilo tokio** dedicado (`asteroid-acp`): procesos de agentes y conexiones ACP. Nunca toca UI.
+- **Hilo tokio** dedicado (`cincel-acp`): procesos de agentes y conexiones ACP. Nunca toca UI.
 
 Comunicación UI ⇄ ACP por dos canales asíncronos (`async-channel`):
 - `AgentCommand` (UI → ACP): `Spawn(agent_id, cwd)`, `NewSession`, `Prompt(session, blocks)`, `Cancel(session)`, `SetConfigOption(...)`, `RespondPermission(request_id, option_id)`, `Shutdown`.
@@ -58,7 +59,7 @@ Los `FsRead`/`FsWrite` son peticiones del agente que la UI contesta desde el `Bu
 
 ```
  agente escribe archivo ──► disco ──► notify ──┐
- agente: tool_call kind=edit (pending)         ├──► asteroid-review: ReviewStore
+ agente: tool_call kind=edit (pending)         ├──► cincel-review: ReviewStore
    └─ captura base_text si es 1er contacto ────┤        base_text por archivo
  agente: tool_call_update (completed) ─────────┤        hunks = diff(base_text, texto actual)
    └─ relee archivo, actualiza buffer ─────────┘        accept/reject/rebase
@@ -66,7 +67,7 @@ Los `FsRead`/`FsWrite` son peticiones del agente que la UI contesta desde el `Bu
  fs/read_text_file ────────────────────────────► BufferStore (contenido en memoria) ─► marca base si es 1er contacto
  usuario teclea ───────────────────────────────► Buffer (EditSource::User) ─► ReviewStore.rebase_user_edit
  usuario acepta/rechaza ───────────────────────► ReviewStore ─► (reject) Buffer edit + guardar
- ReviewStore.changed ──────────────────────────► asteroid-editor (DiffTransformMap) y asteroid-workspace (árbol, panel, barra)
+ ReviewStore.changed ──────────────────────────► cincel-editor (DiffTransformMap) y cincel-workspace (árbol, panel, barra)
 ```
 
 Reglas:
@@ -92,9 +93,12 @@ Buffer (rope)  ──►  DiffTransformMap  ──►  WrapMap  ──►  (Fold
 ## 6. Persistencia
 
 Directorios XDG:
-- Config: `~/.config/asteroid/{settings.json, keymap.json, themes/}`.
-- Estado: `~/.local/state/asteroid/{log/, workspaces/<hash de ruta>/layout.json}`.
-- Datos: `~/.local/share/asteroid/review/<hash de ruta>/{state.json, objects/<sha256>}`.
+- Config: `~/.config/cincel/{settings.json, keymap.json, themes/}`.
+- Estado: `~/.local/state/cincel/{log/, workspaces/<hash de ruta>/layout.json}`.
+- Datos: `~/.local/share/cincel/review/<hash de ruta>/{state.json, objects/<sha256>}`.
+- Caché: `~/.cache/cincel/registry.json`.
+
+Al arrancar, antes de leer cualquiera de estos directorios: si existe `<raíz>/asteroid` y no `<raíz>/cincel`, se renombra (o se copia y se deja el original si el renombrado falla, por ejemplo entre sistemas de archivos), con un aviso en el log y un toast una vez abierta la ventana (`docs/specs/06-etapa4-conexiones-y-cincel.md` §7).
 
 `state.json` de revisión: por archivo `{path, base_hash, current_hash, status, turn_id, created_at}`. Al restaurar: leer el archivo tal cual está en disco, comparar su hash con `current_hash`; si coincide, recalcular hunks contra `objects/<base_hash>`; si no, descartar la entrada y avisar. **Nunca se reescribe un archivo al restaurar.** Los objetos huérfanos se borran al aceptar/rechazar todo.
 
@@ -104,11 +108,11 @@ Directorios XDG:
 - stdout del agente con basura: el parser ignora líneas que no son JSON y las manda al log.
 - Cancelación: `session/cancel` + responder `cancelled` a todo permiso pendiente + marcar tool calls colgadas.
 - Archivo cambiado por fuera mientras hay pendientes: se recalculan hunks contra la misma base; si el archivo desaparece, el estado pasa a `Deleted` y el panel ofrece restaurarlo desde la base.
-- Sin Vulkan: reintento con backend GL de wgpu; sin adaptador: mensaje claro y salida, salvo `ASTEROID_ALLOW_SOFTWARE_GPU=1`.
+- Sin Vulkan: reintento con backend GL de wgpu; sin adaptador: mensaje claro y salida, salvo `CINCEL_ALLOW_SOFTWARE_GPU=1`.
 
 ## 8. Calidad
 
 - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo deny check licenses` en cada etapa.
-- Tests unitarios en todos los crates sin GPUI (obligatorios para `asteroid-review` y `asteroid-text`: cobertura de los casos de borde listados en `modulos/review.md`).
-- Tests de integración de `asteroid-acp` contra un agente falso (binario de test que habla ACP) para no depender de red ni de suscripciones.
+- Tests unitarios en todos los crates sin GPUI (obligatorios para `cincel-review` y `cincel-text`: cobertura de los casos de borde listados en `modulos/review.md`).
+- Tests de integración de `cincel-acp` contra un agente falso (binario de test que habla ACP) para no depender de red ni de suscripciones.
 - Smoke test gráfico manual por etapa (lista de comprobación en `05-plan-etapas.md`).

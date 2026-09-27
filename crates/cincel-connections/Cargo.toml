@@ -1,0 +1,60 @@
+[package]
+name = "cincel-connections"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# `tests/fake_login/` and `tests/fake_agent/` are helper binaries, not tests.
+autotests = false
+
+[[test]]
+name = "login"
+path = "tests/login.rs"
+
+[[test]]
+name = "engine"
+path = "tests/engine.rs"
+
+# Test helper: a fake provider login command (prints a URL, maybe a code,
+# waits for a pasted code on stdin, exits 0/1). Built as a bin so the pty
+# tests find it through CARGO_BIN_EXE_cincel-connections-fake-login.
+[[bin]]
+name = "cincel-connections-fake-login"
+path = "tests/fake_login/main.rs"
+
+# Test helper: a minimal ACP agent that announces `auth.logout`, pushes
+# `_auth/status_update` and answers `authenticate` the way Antigravity does
+# (link on stderr, success after a delay), used by the identity probe, ACP
+# login and disconnect tests.
+[[bin]]
+name = "cincel-connections-fake-agent"
+path = "tests/fake_agent/main.rs"
+
+[dependencies]
+cincel-acp = { path = "../cincel-acp" }
+cincel-log = { path = "../cincel-log" }
+async-channel.workspace = true
+dirs.workspace = true
+flate2.workspace = true
+lzma-rs.workspace = true
+portable-pty.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+ureq.workspace = true
+uuid.workspace = true
+zip.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

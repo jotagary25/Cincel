@@ -6,7 +6,6 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/asteroid-editor/asteroid-editor"
 rust-version = "1.90"
 
 [workspace.dependencies]
@@ -15,7 +14,7 @@ gpui = { package = "gpui-pre", version = "=0.3.5" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 gpui-kit = "=0.6.1"
 # agentes
-agent-client-protocol = "2.1"
+agent-client-protocol = "2.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
 async-channel = "2"
 futures = "0.3"
@@ -36,30 +35,37 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 parking_lot = "0.12"
 sha2 = "0.10"
 dirs = "6"
 
-# ACP (agregado por asteroid-acp, E0-b)
+# ACP (agregado por cincel-acp, E0-b)
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 
-# proyecto y ajustes (agregados por asteroid-project/asteroid-settings, E1-B)
+# proyecto y ajustes (agregados por cincel-project/cincel-settings, E1-B)
 jsonc-parser = { version = "0.33", features = ["serde"] }
 globset = "0.4"
 
-# editor (agregado por asteroid-editor, E1-C): búsqueda con regex opcional
+# editor (agregado por cincel-editor, E1-C): búsqueda con regex opcional
 regex = "1"
 
-# workspace (agregado por asteroid-workspace, E1-D): diálogo de carpeta por portal xdg
+# workspace (agregado por cincel-workspace, E1-D): diálogo de carpeta por portal xdg
 rfd = "0.17"
 
-# acp: distribuciones binary/uvx (agregado por asteroid-acp, E2)
+# acp: distribuciones binary/uvx (agregado por cincel-acp, E2)
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# conexiones (agregado por cincel-connections, E4-B): login en pty, runtime
+# Node privado (tar.xz) e ids de conexión
+portable-pty = "0.9"
+lzma-rs = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

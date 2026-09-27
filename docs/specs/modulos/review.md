@@ -1,4 +1,4 @@
-# Módulo `asteroid-review`
+# Módulo `cincel-review`
 
 El modelo de la revisión de cambios del agente. Sin GPUI. Es el crate más importante y el más testeado.
 

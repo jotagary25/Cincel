@@ -1,0 +1,37 @@
+[package]
+name = "cincel-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+autoexamples = false
+
+[dependencies]
+cincel-acp = { path = "../cincel-acp" }
+# The composer is an `EditorView` configured as a Markdown text field.
+cincel-editor = { path = "../cincel-editor" }
+cincel-syntax = { path = "../cincel-syntax" }
+cincel-text = { path = "../cincel-text" }
+# The same GPUI gpui-kit re-exports, named directly so the `test-support`
+# feature can reach it (a feature cannot refer to a dev-dependency).
+gpui = { workspace = true }
+gpui-kit = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+gpui_platform = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# Enables gpui's test harness (`cargo test -p cincel-chat --features test-support`).
+# It is off by default because it also turns on gpui leak detection, which
+# aborts the example window on exit (see `docs/etapas/etapa-0.md`, finding 7).
+test-support = ["gpui/test-support"]
+
+[[example]]
+name = "chat_demo"
+path = "examples/chat_demo.rs"
+
+[lints]
+workspace = true

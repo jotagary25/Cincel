@@ -1,21 +1,35 @@
-# Módulo `asteroid-chat`
+# Módulo `cincel-chat`
 
 Panel de chat sobre GPUI. Consume `AgentEvent` y emite `AgentCommand` (`03-arquitectura.md §3`). Diseño en `02-visual.md §7`.
 
 ## Estructura
-- `ChatPanel` (entidad): `agents: Vec<AgentDescriptor>`, `active: Option<AgentHandle>`, `sessions`, `transcript: Vec<Entry>`, `input`, `config_options`, `autonomy`.
+- `ChatPanel` (entidad): `connections: Vec<ChatConnection>`, `active_connection: Option<String>`, `preselected_connection`, `banner: Option<ConnectionBanner>`, `conversations`, `transcript: Vec<Entry>`, `input`, `config_options`. (Sin `autonomy`: se retiró en la Etapa 3, la política de permisos es fija y vive en el workspace. Sin selector de agentes ni `ChatAgent`: se retiraron en la Etapa 4, ver "Conexiones".)
 - `Entry`: `UserMessage { blocks }`, `AgentText { markdown, streaming }`, `AgentThought { text, collapsed, duration }`, `ToolCall { id, kind, title, status, content: Vec<ToolContent>, locations, stats: Option<(u32,u32)> }`, `Plan { items }`, `Permission { request_id, tool_call, options, answered }`, `AuthRequired { methods }`, `Notice { level, text }`, `TurnSeparator { stop_reason, duration }`.
-- Markdown: componente de `gpui-kit` en modo streaming; código con resaltado de `asteroid-syntax`; botón copiar por bloque.
+- Markdown: componente de `gpui-kit` en modo streaming; código con resaltado de `cincel-syntax`; botón copiar por bloque.
 - Tarjeta de herramienta de edición: muestra path y `+N −M` (de `ReviewStore::stats`), botón "Ver en el editor" → `workspace::open_and_jump(path, first_pending_hunk)`. **No renderiza el diff completo**: como mucho las 3 primeras líneas de contexto al desplegar, con la nota "Revisá en el editor".
 - Permisos: botones en el orden que envía el agente; `Enter` elige el primero; `Esc` elige la primera opción `reject_*`; al responder, la tarjeta se compacta a una línea "Permitido / Rechazado".
-- Input: `Textarea` de `gpui-kit`, crece hasta 8 líneas; `Enter` envía, `Shift+Enter` salto; `@` abre el selector de archivos del proyecto (filtro por subcadena, v1 sin fuzzy); `/` abre comandos del agente; arrastrar desde el árbol inserta mención; pegar imagen no soportado en v1 (aviso).
-- Selectores de pie: autonomía (siempre), y uno por `ConfigOption` de categoría `mode`, `model`, `thought_level`; también `availableModes` legacy. Cambiar uno envía `SetConfigOption`/`SetMode` y refleja la respuesta.
-- Estado del agente en cabecera y en la barra de estado.
+- Input: un `cincel_editor::EditorView` configurado como campo de texto Markdown (sin gutter, ajuste de línea, resaltado de estructura con los tokens de sintaxis, fences con fondo `bg.editor` y monoespaciados; ver `02-visual.md` §7), crece hasta 8 líneas; `Enter` envía, `Shift+Enter` salto; `@` abre el selector de archivos del proyecto (filtro por subcadena, v1 sin fuzzy); `/` abre comandos del agente; arrastrar desde el árbol inserta mención; pegar imagen no soportado en v1 (aviso).
+- Selectores de pie: solo los del agente, uno por `ConfigOption` de categoría `mode`, `model`, `thought_level`; también `availableModes` legacy. Cambiar uno envía `SetConfigOption`/`SetMode` y refleja la respuesta. No hay selector de autonomía (Etapa 3).
+- Aspecto de los mensajes (Etapa 3, correcciones): el del usuario es una burbuja contra el borde derecho con `text.accent` al 14 % sobre `bg.app`, borde de 1 px en `text.accent` al 35 %, radio 8 y ancho máximo del 85 %; el texto se parte al ancho de la burbuja, también un token largo sin espacios. La respuesta del agente es texto plano sobre el fondo del panel, sin burbuja ni regla. Los bloques de código de la respuesta van sobre `bg.editor` con borde de 1 px `border` y una cabecera chica con el lenguaje y "Copiar". Las tarjetas de herramienta siguen en `bg.surface`. No hay etiquetas "Vos" ni nombre del agente.
+- Escala tipográfica única: cuerpo 13 px; código (en línea y en bloque) 12,5 px monoespaciado; filas de herramienta, plan y ayudas 12 px; etiquetas y fechas 11 px; encabezados del markdown como mucho 15 px. (El código en línea dentro de una respuesta queda en 0,875 × 13 ≈ 11,4 px: `gpui-kit` fija esa escala.)
+- El transcript es una `gpui::list` que sigue el final: así `gpui-kit` mide los párrafos con código en línea con el tamaño del chat y no con el de la ventana.
+- Estado del agente en cabecera (píldora, solo con una conexión activa); la barra de estado muestra el chip de la conexión (lo pinta el workspace).
+
+## Conexiones (Etapa 4, `docs/specs/06-etapa4-conexiones-y-cincel.md` §4 F1, F4, F5, §6)
+- **Encabezado**: donde estaba el selector de agente está el control **"Conectar"**. Sin conexión activa es un botón "Conectar"; con una, icono del proveedor (`provider_icon`: monograma C/X/G en un cuadrado redondeado), etiqueta, identidad en gris ("gary@… · Max") y caret. Los dos abren el popover.
+- **Popover** (`Popover::Connections`): una fila por `ChatConnection { id, agent_id, label, identity, last_used, badge }` con icono, etiqueta, identidad, "Usado hace 2 h" e insignia `ConnectionBadge` (Conectada / Sesión vencida en ámbar / No disponible, con el motivo en tooltip). Las filas vencidas llevan "Volver a conectar" y las no disponibles "Reparar". Clic derecho abre el menú contextual (`Popover::ConnectionMenu`) con "Renombrar". Al pie: "Conectar nuevo agente…" y "Eliminar conexión…". La fila activa (o, sin activa, la preseleccionada por `connections.default_label`) va resaltada.
+- **El panel nunca conecta nada**: cada gesto es un `ChatEvent` (`ConnectionSelected { id }`, `NewConnection`, `DeleteConnections`, `RenameConnection { id }`, `Reconnect { id }`, `Repair { id }`) y el workspace decide. `set_connections`, `set_active_connection`, `set_preselected_connection`, `set_banner` y `set_status` son solo de presentación.
+- **Estado vacío** sin conexión: "No hay ningún agente conectado" y botón "Conectar". Placeholder del compositor: "Conectá un agente para empezar…" / "Escribí un mensaje para «etiqueta»…".
+- **Banner** (`ConnectionBanner`) sobre el transcript: "La sesión de «X» venció" con "Volver a conectar" (F4), o "«X» no está disponible: motivo" con "Reparar" (F5).
+- **Eventos ACP nuevos**: `AuthFailed` deja un aviso de error "No se pudo autenticar: …" (nunca se traga) y pone la píldora en `autenticación requerida`; `AuthSucceeded`, `LoggedOut` y `ElicitationCompleted` dejan un aviso informativo.
+- **Historial**: agrupado por la etiqueta de la conexión (`ConversationSummary.group`, con `connection_id`); las conversaciones anteriores a las conexiones (sin `connection_id`) van bajo `LEGACY_CONNECTION_GROUP` = "(conexión anterior)" y se abren de solo lectura (`LEGACY_HISTORY_NOTICE`). `Conversation.connection_id` se deserializa con `#[serde(default)]`, así que los archivos viejos siguen leyéndose.
 - Persistencia: el transcript de la sesión actual se guarda en estado XDG por proyecto para restaurarlo al abrir (solo lectura hasta que el agente soporte `session/load`).
 
 ## Criterios de aceptación
-- [ ] Con el agente falso de `asteroid-acp`, el transcript muestra texto en streaming sin parpadeo y las tarjetas cambian de estado.
+- [ ] Con el agente falso de `cincel-acp`, el transcript muestra texto en streaming sin parpadeo y las tarjetas cambian de estado.
 - [ ] Un pedido de permiso bloquea el envío de nuevos mensajes hasta responderlo; `Esc` lo rechaza.
 - [ ] Cambiar el modelo desde el selector se refleja en la siguiente `configOptions` que devuelve el agente.
 - [ ] `@` inserta `resource_link` con la ruta absoluta del archivo en el prompt enviado.
 - [ ] El chat no muestra nunca un diff completo; la tarjeta enlaza al editor.
+- [x] (E4) Sin conexión activa el encabezado muestra "Conectar" y el estado vacío "No hay ningún agente conectado"; elegir una fila emite `ConnectionSelected` y el panel no conecta nada por su cuenta (tests `without_a_connection_*`, `choosing_a_connection_*`, `the_popover_preselects_*`).
+- [x] (E4) Un `AuthFailed` se muestra en el transcript (test `a_failed_authentication_is_shown_not_swallowed`).

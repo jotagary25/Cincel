@@ -1,4 +1,4 @@
-# Asteroid: síntesis de investigación y propuesta de decisiones
+# Cincel: síntesis de investigación y propuesta de decisiones
 
 Fecha: 2026-09-17. Estado: **borrador para discutir**. Informes detallados en `docs/research/`.
 
@@ -30,7 +30,7 @@ Cada decisión trae mi recomendación. Las marcadas **[TU DECISIÓN]** cambian m
 Granularidad: hunk + **línea** (estilo Antigravity) + archivo + turno. ¿La edición manual dentro de un hunk pendiente es requisito v1 o puede esperar? Cursor y Antigravity lo permiten; implica `apply_non_conflicting_edits` desde el día uno (recomendado igual).
 
 ### D3. Semántica de disco
-Escribir a disco inmediatamente (el agente lo hace igual), `fs/read_text_file` sirve el buffer en memoria, reject = revert quirúrgico + save. Persistir `base_text` content-addressed en `.asteroid/review/` y **nunca reescribir el archivo al restaurar**; si el hash cambió por fuera, descartar ese review. Formatters solo al aceptar.
+Escribir a disco inmediatamente (el agente lo hace igual), `fs/read_text_file` sirve el buffer en memoria, reject = revert quirúrgico + save. Persistir `base_text` content-addressed en `.cincel/review/` y **nunca reescribir el archivo al restaurar**; si el hash cambió por fuera, descartar ese review. Formatters solo al aceptar.
 
 ### D4. Protocolo
 ACP v1 con `agent-client-protocol` 2.1.0 (requiere Rust ≥ 1.88; hoy tenés 1.85). Anunciar `fs.readTextFile/writeTextFile`, `elicitation`, `session.configOptions`. No anunciar `terminal` en v1. Descubrimiento de agentes vía el registry oficial (`registry.json`, 41 agentes) igual que Zed, sin hardcodear comandos. Soportar `agentFileChangeReport` (extensión de JetBrains que Claude y Codex implementan) para saber qué archivos tocó el turno.
@@ -60,7 +60,7 @@ No pisar el diff de git. Accept/Reject del agente es una variante del mismo widg
 Tarball + `install.sh` con `dist`, compilado en Ubuntu 22.04; `.deb` con `cargo-deb`. Sin Snap ni Flatpak. wgpu con Vulkan **y** GL, cascada manual, software GPU detrás de env var. Redibujar por evento, no a 60 Hz. `cargo deny check licenses` desde el commit 1 (hay una cadena GPL cuestionada en gpui, issue #55470). Objetivo de binario: 20–60 MB, arranque < 400 ms.
 
 ### D13. Licencia del proyecto **[TU DECISIÓN]**
-Con la recomendación de D1 el proyecto puede ser Apache-2.0/MIT o propietario. Si eligieras reutilizar código GPL de Zed, Asteroid sería GPL-3.0. ¿Open source? ¿Qué licencia?
+Con la recomendación de D1 el proyecto puede ser Apache-2.0/MIT o propietario. Si eligieras reutilizar código GPL de Zed, Cincel sería GPL-3.0. ¿Open source? ¿Qué licencia?
 
 ## 3. Especificación visual propuesta
 
@@ -109,15 +109,15 @@ Nunca `Ctrl+Y` / `Ctrl+N` (choque con Redo / New File, documentado en Cursor y V
 ## 4. Arquitectura propuesta (workspace Cargo)
 
 ```
-asteroid/
+cincel/
   crates/
-    asteroid-app        binario, ventana, dock, settings, keymap
-    asteroid-editor     editor propio (derivado de gpui-kit input/editor, Apache-2.0) + BlockMap + DiffHunkRenderer
-    asteroid-review     ReviewState/ActionLog: base_text, hunks, accept/reject/rebase, persistencia
-    asteroid-acp        cliente ACP: spawn de agentes, registry, sesiones, puente Send→!Send hacia gpui
-    asteroid-chat       panel de chat: transcript, tool calls, permisos, config options
-    asteroid-project    worktree, file tree, watcher, git status, buffers abiertos
-    asteroid-syntax     tree-sitter grammars + temas
+    cincel-app        binario, ventana, dock, settings, keymap
+    cincel-editor     editor propio (derivado de gpui-kit input/editor, Apache-2.0) + BlockMap + DiffHunkRenderer
+    cincel-review     ReviewState/ActionLog: base_text, hunks, accept/reject/rebase, persistencia
+    cincel-acp        cliente ACP: spawn de agentes, registry, sesiones, puente Send→!Send hacia gpui
+    cincel-chat       panel de chat: transcript, tool calls, permisos, config options
+    cincel-project    worktree, file tree, watcher, git status, buffers abiertos
+    cincel-syntax     tree-sitter grammars + temas
 ```
 
 Dependencias clave: `gpui-pre` 0.3.5, `gpui-kit` 0.6.1, `agent-client-protocol` 2.1.0, `ropey`, `imara-diff`, `similar`, `tree-sitter` 0.27, `notify`, `gix`, `nucleo`, `rfd`, `tokio`.

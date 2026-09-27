@@ -1,4 +1,4 @@
-# Módulo `asteroid-text`
+# Módulo `cincel-text`
 
 Buffer de texto sin dependencias gráficas.
 

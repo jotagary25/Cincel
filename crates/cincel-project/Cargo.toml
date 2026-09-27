@@ -1,0 +1,29 @@
+[package]
+name = "cincel-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cincel-text = { path = "../cincel-text" }
+async-channel = { workspace = true }
+dirs = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
+imara-diff = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+similar = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

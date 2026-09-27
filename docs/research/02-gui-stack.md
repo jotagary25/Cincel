@@ -1,5 +1,7 @@
 # Informe 02: Stack GUI en Rust para un editor de código nativo en Linux (2026)
 
+_Escrito cuando el proyecto se llamaba Asteroid (hoy Cincel)._
+
 Fecha: 2026-09-17. Subagente Opus; versiones verificadas contra crates.io y manifiestos del repo de Zed.
 
 ## 1. Resumen ejecutivo

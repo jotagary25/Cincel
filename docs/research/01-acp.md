@@ -1,5 +1,7 @@
 # Informe 01: ACP (Agent Client Protocol) para Asteroid
 
+_Escrito cuando el proyecto se llamaba Asteroid (hoy Cincel)._
+
 Fecha: 2026-09-17. Investigación realizada con subagente Opus.
 
 ## 0. Estado del protocolo (sept 2026)
@@ -7,7 +9,8 @@ Fecha: 2026-09-17. Investigación realizada con subagente Opus.
 - **ACP v1 = estable y en producción.** Es lo que hay que implementar.
 - **ACP v2 = Draft** desde 2026-07-20. La doc dice: no enviarlo por defecto en producción; soportar ambas versiones en paralelo.
 - Gobernanza: org **`agentclientprotocol`** en GitHub, co-mantenida por Zed + JetBrains + Anthropic/OpenAI, con proceso de RFDs.
-- Transporte: **stdio, JSON-RPC 2.0, NDJSON (mensajes delimitados por `\n`), UTF-8**. `stdout` solo mensajes ACP; logs a `stderr`. Existe draft de Streamable HTTP/WebSocket.
+- Transporte: **stdio, JSON-RPC 2.0, NDJSON (mensajes delimitados por `
+`), UTF-8**. `stdout` solo mensajes ACP; logs a `stderr`. Existe draft de Streamable HTTP/WebSocket.
 - Índice completo de docs: https://agentclientprotocol.com/llms.txt
 
 ## 1. HALLAZGO CLAVE: ¿los agentes escriben a través del cliente?
@@ -63,7 +66,11 @@ En `crates/acp_thread/src/acp_thread.rs::write_text_file`:
 **Contenido `diff`:**
 ```json
 { "type": "diff", "path": "/abs/path/src/config.json",
-  "oldText": "{\n  \"debug\": false\n}", "newText": "{\n  \"debug\": true\n}" }
+  "oldText": "{
+  \"debug\": false
+}", "newText": "{
+  \"debug\": true
+}" }
 ```
 `oldText` es `null` si es archivo nuevo. **No hay rename/delete en v1** (solo `kind: "delete"`/`"move"`). v2 (RFD `diff-file-states`) reemplaza por `changes[]` con ops `add|delete|modify|move|copy`, `fileType`, `mimeType`, `patch` en `git_patch`.
 

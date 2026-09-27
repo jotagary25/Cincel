@@ -1,4 +1,4 @@
-# Módulo `asteroid-project`
+# Módulo `cincel-project`
 
 Proyecto abierto: árbol, watcher, buffers y git. Sin GPUI.
 
@@ -12,5 +12,5 @@ Proyecto abierto: árbol, watcher, buffers y git. Sin GPUI.
 ## Criterios de aceptación
 - [ ] Abrir un proyecto con 50 000 archivos (con `node_modules` ignorado) tarda < 500 ms hasta tener el árbol raíz y termina en fondo.
 - [ ] Crear/borrar/renombrar un archivo desde otra app se refleja en el árbol en < 300 ms.
-- [ ] Guardar desde Asteroid no dispara una recarga del propio buffer (ignorar eventos propios por hash).
+- [ ] Guardar desde Cincel no dispara una recarga del propio buffer (ignorar eventos propios por hash).
 - [ ] Escribir un archivo desde fuera mientras está abierto y limpio lo recarga; si está sucio, marca conflicto.

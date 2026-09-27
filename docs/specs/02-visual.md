@@ -1,12 +1,12 @@
 # Spec 02: Visual e interacción
 
-Estado: v1.0. Describe **cómo se ve y se siente** Asteroid. Los valores concretos (colores, tamaños) son los predeterminados; todos son configurables por tema.
+Estado: v1.0. Describe **cómo se ve y se siente** Cincel. Los valores concretos (colores, tamaños) son los predeterminados; todos son configurables por tema.
 
 ## 1. Ventana y layout
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ● ● ●  [chat ▾] [tab: main.rs ●] [tab: lib.rs]        [árbol ▾]  Asteroid │  barra de título integrada (CSD)
+│ ● ● ●  [chat ▾] [tab: main.rs ●] [tab: lib.rs]        [árbol ▾]  Cincel │  barra de título integrada (CSD)
 ├────────────────┬──────────────────────────────────────────┬──────────────┤
 │  CHAT          │  src › main.rs › fn main                 │  ÁRBOL       │
 │  ┌──────────┐  │  1  use std::io;                         │ ▾ src        │
@@ -32,7 +32,7 @@ Estado: v1.0. Describe **cómo se ve y se siente** Asteroid. Los valores concret
 
 ## 2. Tema
 
-Tokens de color (tema oscuro predeterminado "Asteroid Dark", inspirado en One Dark de Zed; el tema claro "Asteroid Light" sigue al sistema vía el portal `Settings`):
+Tokens de color (tema oscuro predeterminado "Cincel Dark", inspirado en One Dark de Zed; el tema claro "Cincel Light" sigue al sistema vía el portal `Settings`):
 
 | Token | Oscuro | Uso |
 |---|---|---|
@@ -54,7 +54,7 @@ Tokens de color (tema oscuro predeterminado "Asteroid Dark", inspirado en One Da
 | `diff.gutter.deleted` / `.added` / `.modified` | `#e06c75` / `#98c379` / `#e5c07b` | barras del gutter |
 | `status.error` / `.warning` / `.ok` | `#e06c75` / `#e5c07b` / `#98c379` | estados |
 
-Colores de sintaxis: 12 capturas estándar de tree-sitter (`keyword`, `function`, `type`, `string`, `number`, `comment`, `variable`, `property`, `operator`, `punctuation`, `constant`, `attribute`) con la paleta One Dark. El tema es un archivo JSON en `~/.config/asteroid/themes/`.
+Colores de sintaxis: 12 capturas estándar de tree-sitter (`keyword`, `function`, `type`, `string`, `number`, `comment`, `variable`, `property`, `operator`, `punctuation`, `constant`, `attribute`) con la paleta One Dark. El tema es un archivo JSON en `~/.config/cincel/themes/`.
 
 ## 3. Tipografía
 
@@ -72,13 +72,13 @@ Colores de sintaxis: 12 capturas estándar de tree-sitter (`keyword`, `function`
 
 ## 5. El editor
 
-- **Gutter**: números de línea alineados a la derecha, `text.muted`, número actual en `text`. A la izquierda de los números, una barra de 3 px por línea con los colores de diff del agente (v1) y de git (v2). Las filas fantasma no llevan número.
+- **Gutter**: números de línea alineados a la derecha, `text.muted`, número actual en `text`, en una columna de al menos 3 dígitos de ancho. A la izquierda de los números, una barra de 3 px por línea con los colores de diff del agente (v1) y de git (v2). Las filas fantasma no llevan número. El ancho del gutter no depende de la revisión: mostrar o decidir segmentos nunca corre el código.
 - **Línea actual**: fondo `bg.elevated` al 60% (sin borde).
 - **Cursor**: barra de 2 px, parpadeo 500 ms que se detiene tras 5 s sin escribir.
 - **Selección**: `selection`, esquinas rectas.
 - **Coincidencias de búsqueda**: fondo `#e5c07b` al 30%; la actual al 55%.
 - **Espacios en blanco**: ocultos por defecto; ajuste para mostrarlos.
-- **Ajuste de línea**: desactivado por defecto; con guía vertical opcional en la columna 100.
+- **Ajuste de línea**: activado por defecto (`editor.soft_wrap: true`), al ancho que le deja el layout al editor: redimensionar un dock o la ventana vuelve a ajustar el texto. `Alt+Z` lo alterna en la pestaña actual; sin ajuste, las líneas largas se desplazan a lo ancho dentro del editor y nunca se dibujan fuera de él (debajo de un dock). Guía vertical opcional en la columna 100.
 - **Scroll**: barra fina de 8 px que aparece al mover el mouse y se desvanece; scroll suave en trackpad; con rueda, 3 líneas por paso.
 
 ## 6. La revisión de cambios (detalle visual)
@@ -94,17 +94,20 @@ Colores de sintaxis: 12 capturas estándar de tree-sitter (`keyword`, `function`
                                         ┌───────────────────┐
                                         │ ✓ Aceptar  ✗ Rechazar │  pill flotante, bg.elevated,
                                         └───────────────────┘  alineado al borde derecho del
-                                                               editor, en la primera fila del hunk
+                                                               editor, en la primera fila del
+                                                               segmento que le deja lugar
 ```
 - Las filas fantasma (eliminadas) van **encima** de las añadidas del mismo segmento, como en un diff unificado.
 - El segmento tiene un borde izquierdo de 2 px en el gutter (`diff.gutter.modified` si tiene ambas, `.added` o `.deleted` si solo una).
-- El **pill** aparece siempre en el segmento que contiene el cursor o el mouse; en los demás segmentos aparece solo al pasar el mouse. Ancho fijo 190 px, alto 24 px.
-- Al pasar el mouse por una línea concreta del segmento, aparecen en el gutter de esa línea dos iconos de 14 px: `+` (aceptar esta línea) y `−` (rechazar esta línea). Las filas fantasma también los tienen: aceptar una fila fantasma confirma su eliminación; rechazarla la restaura.
+- El **pill** aparece siempre en el segmento que contiene el cursor o el mouse; en los demás segmentos aparece solo al pasar el mouse. Ancho fijo 190 px, alto 24 px, alineado al borde derecho del área de texto (12 px antes de la barra de scroll). Es una capa encima del texto: no ocupa filas ni corre nada.
+- **Dónde se pone el pill**: se prueban, en orden, la primera fila del segmento, las siguientes filas del segmento y la fila justo encima del segmento (en un segmento de pura eliminación, las filas fantasma son las candidatas); gana la primera cuyo texto termina al menos 12 px antes del borde izquierdo del pill. Si ninguna deja lugar, se pinta un **pill compacto** (dos botones de 24 × 24 px, `✓` y `✗`, 52 px en total; con el agente escribiendo, una tercera celda con el spinner) en la primera fila del segmento, al 70 % de opacidad. Los clics siguen a donde se pintó.
+- **Colores del pill**: habilitado, `✓` en `status.ok`, `✗` en `status.error` y las palabras en `text`, a opacidad plena; la mitad bajo el mouse lleva fondo `bg.surface`. Deshabilitado (el agente está escribiendo): todo en `text.muted` y el spinner.
+- Al pasar el mouse por una línea concreta del segmento, aparecen **sobre la columna de números** de esa línea dos iconos: `+` (aceptar esta línea) y `−` (rechazar esta línea), con 2 px entre ellos, alineados al borde derecho de la columna; el número de esa línea se oculta mientras tanto (las filas fantasma no tienen). Miden 14 px si los dos entran en la columna (mínimo 3 dígitos) y 11 px si no (con la fuente de 14 px, tres dígitos miden ≈ 25 px). Las filas fantasma también los tienen: aceptar una fila fantasma confirma su eliminación; rechazarla la restaura. `Alt+Enter` / `Alt+Backspace` hacen lo mismo con la línea del cursor.
 - Los segmentos de un turno anterior aún pendientes se ven igual; el pill muestra un pequeño reloj con tooltip "Turno anterior".
 
 ### 6.2 Barra flotante del editor
 - Abajo a la derecha del editor, 24 px de margen, `bg.elevated`, radio 6, sombra.
-- Contenido: `✓ Aceptar  Ctrl+↵` · `✗ Rechazar  Ctrl+⌫` · `↑ Alt+K` `↓ Alt+J` · `3/7 cambios` · botón `Revisar todo`.
+- Contenido: `✓ Aceptar  Ctrl+↵` · `✗ Rechazar  Ctrl+⌫` · `↑ Alt+K` `↓ Alt+J` · `3/7 cambios` · botón `Revisar todo`. `Aceptar` y `Rechazar` actúan sobre el segmento del cursor (o el actual) y se leen habilitados: `✓` en `status.ok`, `✗` en `status.error`, palabra en `text`; el botón bajo el mouse lleva fondo `bg.surface`.
 - Mientras el agente escribe: spinner y texto "El agente está editando…", botones deshabilitados.
 - Cuando no quedan cambios en el archivo: la barra muestra "Sin cambios pendientes en este archivo · 4 en otros archivos → siguiente archivo (Alt+L)" durante 3 s y desaparece.
 - Se oculta si el editor pierde el foco de ventana.
@@ -116,18 +119,18 @@ Popover anclado a la barra de estado o panel lateral en el chat (ajuste). Lista 
 Archivo con cambios pendientes: nombre en `#e5c07b`, sufijo `+N −M` en `text.muted` tamaño 11. Archivo nuevo del agente: `#98c379`. Carpeta con hijos pendientes: punto de 6 px a la derecha. Raíz: contador total.
 
 ### 6.5 Avisos emergentes
-Abajo al centro del editor, 4 s, `bg.elevated`. Al rechazar: "Segmento rechazado · Deshacer (Alt+Shift+U)". Al descartar una revisión porque el archivo cambió por fuera: "La revisión de X se descartó: el archivo cambió fuera de Asteroid".
+Abajo al centro del editor, 4 s, `bg.elevated`. Al rechazar: "Segmento rechazado · Deshacer (Alt+Shift+U)". Al descartar una revisión porque el archivo cambió por fuera: "La revisión de X se descartó: el archivo cambió fuera de Cincel".
 
 ## 7. El chat
 
 - **Cabecera**: selector de agente (icono + nombre + estado: `listo`, `pensando…`, `esperando permiso`, `desconectado`), botón de sesión nueva, historial de sesiones (lista simple por fecha).
-- **Transcript**: mensajes del usuario con fondo `bg.surface` y radio 6; respuestas del agente sin fondo, markdown renderizado (encabezados, listas, tablas, código con resaltado y botón copiar, enlaces). El texto llega en streaming y se agrega sin saltos.
+- **Transcript**: mensajes del usuario en burbuja contra el borde derecho, `text.accent` al 14 % sobre `bg.app`, borde de 1 px en `text.accent` al 35 %, radio 8, ancho máximo 85 %, con su texto en markdown renderizado igual que las respuestas (listas, negrita, código en línea, bloques con el estilo de bloque de código); un párrafo con menciones se arma con texto y chips en línea; respuestas del agente sin fondo ni burbuja, markdown renderizado (encabezados de 15 px como mucho, listas, tablas, código sobre `bg.editor` con borde de 1 px y cabecera con lenguaje y "Copiar", enlaces). Sin etiquetas "Vos" ni nombre del agente: la diferencia es solo visual. Escala: cuerpo 13 px, código 12,5 px, filas de herramienta / plan / ayudas 12 px, etiquetas y fechas 11 px; todas (y alturas, radios y el composer) se multiplican por el zoom de la interfaz (`Ctrl+=` / `Ctrl+-` / `Ctrl+0`), igual que el árbol, las pestañas, el breadcrumb y la barra de estado. La selección de texto en el chat (respuestas, burbujas, bloques de código, composer) es `text.accent` al 35 %, en ambos temas; la del editor de código no cambia. El texto llega en streaming y se agrega sin saltos.
 - **Pensamiento del agente**: plegado por defecto en una línea "Pensando… (12 s)"; desplegable.
 - **Tarjeta de herramienta**: una fila de 28 px con icono según el tipo (leer, editar, ejecutar, buscar, pensar, otro), título del agente, estado (spinner, ✓, ✗) y a la derecha `+N −M` si es edición. Clic: despliega detalle (comando y salida para ejecución; diff resumido para edición con botón "Ver en el editor" que salta al primer segmento pendiente).
 - **Plan**: lista de tareas con casillas de estado, plegable.
 - **Pedido de permiso**: tarjeta destacada con borde `border.focus`, título, detalle plegado, y los botones que el agente ofrece, en el orden que los envía; el primero es el predeterminado (`Enter`). `Esc` equivale a rechazar.
 - **Autenticación**: tarjeta con el comando a copiar (`claude auth login`, etc.), botón "Copiar", botón "Abrir terminal" (lanza el terminal predeterminado con el comando) y "Reintentar".
-- **Input**: área de texto que crece hasta 8 líneas, placeholder "Preguntale a Claude… (@ para archivos, / para comandos)". Botón enviar / detener. Debajo, fila de selectores compactos: autonomía (`Revisar después ▾`), y los que anuncie el agente (modo, modelo, esfuerzo), como en la captura de referencia.
+- **Input**: un editor de Cincel configurado para Markdown, dentro de una caja de 1 px en `border` (`border.focus` con foco), sin gutter ni números, con ajuste de línea, que crece de 1 a 8 líneas y después hace scroll. `Enter` envía (o confirma el `@` / `/` abierto, o responde el permiso pendiente) y `Shift+Enter` inserta un salto de línea. Resalta la estructura con los tokens de sintaxis y ningún color nuevo: encabezados y marcadores de lista, cita y énfasis en `keyword`; código en línea en `string`; líneas de fence, reglas y URL de enlaces en `comment`; texto de enlaces y menciones `@archivo` en `function`. Cada fila de un bloque cercado (fences incluidos) lleva fondo `bg.editor` de ancho completo y fuente monoespaciada, con el resaltado del lenguaje si el info string nombra uno conocido; el resto usa la fuente de la interfaz. Placeholder "Escribí un mensaje para Claude…" (lo que hacen `@` y `/` va en la línea de ayuda de abajo). Botón enviar / detener dentro del borde derecho. Debajo, fila de selectores compactos: los que anuncie el agente (modo, modelo, esfuerzo), como en la captura de referencia. Cincel no agrega un selector de autonomía propio (`01-producto.md` §F5).
 - **Menciones**: `@` abre una lista de archivos del proyecto filtrada al escribir; el archivo elegido se inserta como chip.
 - **Comandos slash**: `/` abre la lista que anunció el agente, con su descripción.
 
@@ -141,6 +144,7 @@ Abajo al centro del editor, 4 s, `bg.elevated`. Al rechazar: "Segmento rechazado
 | Buscar en archivo | `Ctrl+F` | editor |
 | Deshacer / rehacer | `Ctrl+Z` / `Ctrl+Shift+Z` | editor |
 | Ir a línea | `Ctrl+G` | editor |
+| Vista previa de Markdown | `Ctrl+Shift+V` | editor y área de pestañas, con Markdown activo |
 | Mostrar/ocultar chat | `Ctrl+Shift+A` | global |
 | Mostrar/ocultar árbol | `Ctrl+Shift+E` | global |
 | Foco al chat | `Ctrl+L` | global |

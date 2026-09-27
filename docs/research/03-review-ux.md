@@ -1,5 +1,7 @@
 # Informe 03: UX e implementación del review inline de cambios de agentes
 
+_Escrito cuando el proyecto se llamaba Asteroid (hoy Cincel)._
+
 Fecha: 2026-09-17. Subagente Opus.
 
 ## 0. Veredicto sobre la premisa de Zed

@@ -1,4 +1,4 @@
-# Módulo `asteroid-syntax`
+# Módulo `cincel-syntax`
 
 Resaltado de sintaxis con tree-sitter. Sin GPUI.
 
