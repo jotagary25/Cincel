@@ -501,6 +501,57 @@ fn the_search_filters_rows_and_sections(cx: &mut TestAppContext) {
     );
 }
 
+/// §5.1 (`docs/specs/08-etapa6-cierre-1-0.md`): the snapshot memory cap row
+/// is found by "memoria" and by "foto", writes `review.snapshot_max_total_mb`
+/// keeping the user's comments, and "Restablecer" takes it out again.
+#[gpui::test]
+fn snapshot_memory_cap_row_is_searchable_writable_and_resettable(cx: &mut TestAppContext) {
+    let (_config, paths) = init_test(Some("{\n  // mío\n  \"ui_font_size\": 13\n}\n"), cx);
+    let (workspace, cx) = workspace_window(None, cx);
+    press("ctrl-,", cx);
+    let view = view(&workspace, cx);
+
+    cx.update(|window, cx| view.update(cx, |view, cx| view.set_query("memoria", window, cx)));
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.visible_keys(cx)),
+        ["review.snapshot_max_total_mb"]
+    );
+    cx.update(|window, cx| view.update(cx, |view, cx| view.set_query("foto", window, cx)));
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.visible_keys(cx)),
+        ["review.snapshot_max_total_mb"]
+    );
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.type_number("review.snapshot_max_total_mb", "512", window, cx);
+        })
+    });
+    cx.run_until_parked();
+
+    let settings = cx.update(|_, cx| crate::settings::settings(cx));
+    assert_eq!(settings.review.snapshot_max_total_mb, 512);
+    let written = std::fs::read_to_string(&paths.settings).unwrap();
+    assert!(written.contains("// mío"), "{written}");
+    let review_section = &written[written.find("\"review\"").unwrap()..];
+    assert!(
+        review_section.contains("\"snapshot_max_total_mb\": 512"),
+        "{written}"
+    );
+    assert!(view.read_with(cx, |view, cx| {
+        view.is_modified("review.snapshot_max_total_mb", cx)
+    }));
+
+    view.update(cx, |view, cx| {
+        assert!(view.reset("review.snapshot_max_total_mb", cx))
+    });
+    cx.run_until_parked();
+    let written = std::fs::read_to_string(&paths.settings).unwrap();
+    assert!(!written.contains("snapshot_max_total_mb"), "{written}");
+    let settings = cx.update(|_, cx| crate::settings::settings(cx));
+    assert_eq!(settings.review.snapshot_max_total_mb, 300);
+}
+
 /// §4.5 (D2): nothing gpui-kit would say in English is on screen.
 #[gpui::test]
 fn no_english_text_is_visible(cx: &mut TestAppContext) {

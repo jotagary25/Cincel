@@ -601,35 +601,112 @@ fn the_bar_lists_the_actions_and_the_position(cx: &mut TestAppContext) {
     assert!(painted.review.bar_enabled);
 }
 
-/// A file decided only as a whole (an agent deletion) leads the bar with its
-/// own accept and reject buttons, before the turn's.
+/// A file decided only as a whole (the read-only tab of an agent deletion:
+/// one hunk of phantom rows over an empty buffer) gets the same bar as any
+/// other file, without file buttons: its single hunk's pill decides it.
 #[gpui::test]
-fn the_bar_offers_the_file_decision_when_asked(cx: &mut TestAppContext) {
-    let mut whole = review(vec![hunk(40, &["x", "y"], 0..0)]);
-    whole.file_actions = true;
+fn the_bar_of_a_deleted_file_has_no_file_buttons(cx: &mut TestAppContext) {
+    let whole = review(vec![hunk(40, &["x", "y"], 0..0)]);
     let (view, handle, mut visual) = open_default(cx, "", whole);
     let painted = frame(&view, &mut visual);
     assert_eq!(
         painted.review.bar.as_deref(),
         Some(
-            "✓ Aceptar archivo ✗ Rechazar archivo · ✓ Aceptar todo Ctrl+Alt+↵ · \
-             ✗ Rechazar todo Ctrl+Alt+⌫ · ↑ Alt+K ↓ Alt+J · cambio 1 de 1 · Revisar todo"
+            "✓ Aceptar todo Ctrl+Alt+↵ · ✗ Rechazar todo Ctrl+Alt+⌫ · ↑ Alt+K ↓ Alt+J · \
+             cambio 1 de 1 · Revisar todo"
         )
     );
-    let buttons: Vec<String> = painted
-        .review
-        .bar_buttons
-        .iter()
-        .map(|button| button.text.clone())
-        .collect();
-    assert_eq!(buttons[0], "✓ Aceptar archivo");
-    assert_eq!(buttons[1], "✗ Rechazar archivo");
+    assert!(
+        painted
+            .review
+            .bar_buttons
+            .iter()
+            .all(|button| !button.text.contains("archivo")),
+        "{:?}",
+        painted.review.bar_buttons
+    );
 
-    // The file decision answers the keyboard too (`review::accept_file`).
+    // The pill of the single hunk shows on hover and decides it.
     let events = record(&view, &mut visual);
+    let (line_height, _, _) = geometry(&view, &mut visual);
+    hover(&mut visual, 300., line_height * 0.5);
+    let pill = frame(&view, &mut visual)
+        .review
+        .pills
+        .first()
+        .copied()
+        .expect("the pill shows on hover");
+    assert_eq!(pill.hunk, 40);
+    let center = pill.bounds.center();
+    click(
+        &mut visual,
+        f32::from(pill.bounds.left()) + 40.,
+        f32::from(center.y),
+    );
+    assert_eq!(*events.borrow(), vec![ReviewAction::AcceptHunk(40)]);
+
+    // The file decision still answers the keyboard (`review::accept_file`).
     cx.simulate_keystrokes(handle, "ctrl-shift-enter");
     visual.run_until_parked();
-    assert_eq!(*events.borrow(), vec![ReviewAction::AcceptFile]);
+    assert_eq!(
+        *events.borrow(),
+        vec![ReviewAction::AcceptHunk(40), ReviewAction::AcceptFile]
+    );
+}
+
+/// The pill sticks out of its hunk (here it sits on the row above, the
+/// hunk's own row has no room): the mouse going from the hunk up to the
+/// pill must not make it go away, and the click decides the hunk. The
+/// hover zone is the hunk's rows plus the pill itself.
+#[gpui::test]
+fn the_pill_stays_while_the_mouse_reaches_it_from_above(cx: &mut TestAppContext) {
+    let long = "x".repeat(400);
+    let text = format!("arriba\ncorto\n{long}\nfin\n");
+    // Buffer row 2 (the long one) was added by the agent.
+    let (view, _handle, mut visual) = open_default(cx, &text, review(vec![hunk(10, &[], 2..3)]));
+    let events = record(&view, &mut visual);
+    let (line_height, _, _) = geometry(&view, &mut visual);
+
+    // A row above everything: no pill (the cursor is on row 0, not in the
+    // hunk).
+    hover(&mut visual, 300., line_height * 0.5);
+    assert!(frame(&view, &mut visual).review.pills.is_empty());
+
+    // Into the hunk: its pill shows, on the row above it.
+    hover(&mut visual, 300., line_height * 2.5);
+    let pill = frame(&view, &mut visual)
+        .review
+        .pills
+        .first()
+        .copied()
+        .expect("the pill shows on hover");
+    assert_eq!(pill.hunk, 10);
+    assert_eq!(pill.display_row, 1, "on the row above the hunk");
+    assert!(!pill.compact);
+
+    // Up onto the pill's "Aceptar", outside the hunk's rows: it stays.
+    let accept_x = f32::from(pill.bounds.left()) + 40.;
+    let y = f32::from(pill.bounds.center().y);
+    assert!(
+        y < line_height * 2.,
+        "the button is outside the hunk's rows"
+    );
+    hover(&mut visual, accept_x, y);
+    let painted = frame(&view, &mut visual);
+    assert_eq!(painted.review.pills.len(), 1, "the pill is still there");
+    assert_eq!(painted.review.pills[0].hovered, Some(true));
+
+    // Its top edge too, coming down from further above.
+    hover(&mut visual, accept_x, f32::from(pill.bounds.top()) + 1.);
+    assert_eq!(frame(&view, &mut visual).review.pills.len(), 1);
+
+    // And the click decides the hunk.
+    click(&mut visual, accept_x, y);
+    assert_eq!(*events.borrow(), vec![ReviewAction::AcceptHunk(10)]);
+
+    // Off the pill and off the hunk, it goes away.
+    hover(&mut visual, 300., line_height * 0.5);
+    assert!(frame(&view, &mut visual).review.pills.is_empty());
 }
 
 #[gpui::test]

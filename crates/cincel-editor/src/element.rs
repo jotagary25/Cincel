@@ -925,34 +925,14 @@ fn layout_bar(
         let sep = |specs: &mut Vec<BarSpec>| {
             specs.push(("·".into(), muted, muted, None, 10.));
         };
-        // A file decided only as a whole (a deletion) gets its own two
-        // buttons first; the turn's follow.
-        let lead = if review.file_actions {
-            specs.push((
-                "✓ Aceptar archivo".into(),
-                check,
-                label,
-                Some(ReviewAction::AcceptFile),
-                0.,
-            ));
-            specs.push((
-                "✗ Rechazar archivo".into(),
-                cross,
-                label,
-                Some(ReviewAction::RejectFile),
-                10.,
-            ));
-            sep(&mut specs);
-            10.
-        } else {
-            0.
-        };
+        // A file decided only as a whole (a deletion) has no buttons of its
+        // own here: its single hunk's pill decides it.
         specs.push((
             "✓ Aceptar todo".into(),
             check,
             label,
             Some(ReviewAction::AcceptTurn),
-            lead,
+            0.,
         ));
         specs.push(("Ctrl+Alt+↵".into(), muted, muted, None, 6.));
         sep(&mut specs);
@@ -1709,15 +1689,23 @@ impl Element for EditorElement {
 
             // Pills: always on the hunk with the cursor, and on the one under
             // the mouse (02-visual §6.1), each on the first row that leaves it
-            // room (module docs, "Where the pill goes").
+            // room (module docs, "Where the pill goes"). "Under the mouse" is
+            // the hunk's rows plus its own pill: a pill sticks out of its
+            // rows (the row above, or its top edge), and the mouse reaching
+            // it from above must not make it go away.
             let mut pill_hunks: Vec<usize> = Vec::new();
             if let Some(ix) = view.hunk_under_cursor() {
                 pill_hunks.push(ix);
             }
-            if let Some(ix) = view.hover_row.and_then(|row| view.review_hunk_at_row(row))
-                && !pill_hunks.contains(&ix)
-            {
-                pill_hunks.push(ix);
+            let hovered_hunks = [
+                view.hover_row.and_then(|row| view.review_hunk_at_row(row)),
+                view.hover_pill_zone
+                    .and_then(|id| view.review.hunks.iter().position(|hunk| hunk.id == id)),
+            ];
+            for ix in hovered_hunks.into_iter().flatten() {
+                if !pill_hunks.contains(&ix) {
+                    pill_hunks.push(ix);
+                }
             }
             pill_hunks.sort_unstable();
             let pill_right = bounds.right() - px(SCROLLBAR_WIDTH + PILL_MARGIN);
@@ -2511,6 +2499,13 @@ impl Element for EditorElement {
                     .collect()
             })
             .unwrap_or_default();
+        // The whole painted pill of each hunk: while the mouse is on it, the
+        // pill stays (`hover_pill_zone`).
+        let pill_zones: Vec<(u64, Bounds<Pixels>)> = prepaint
+            .pills
+            .iter()
+            .map(|pill| (pill.hunk, pill.bounds))
+            .collect();
         let clocks: Vec<(u64, Bounds<Pixels>)> = prepaint
             .pills
             .iter()
@@ -2662,14 +2657,20 @@ impl Element for EditorElement {
                         .iter()
                         .find(|(_, bounds)| bounds.contains(&event.position))
                         .map(|(index, _)| *index);
+                    let hover_pill_zone = pill_zones
+                        .iter()
+                        .find(|(_, bounds)| bounds.contains(&event.position))
+                        .map(|(hunk, _)| *hunk);
                     if hover_row != view.hover_row
                         || hover_clock != view.hover_clock
                         || hover_pill != view.hover_pill
+                        || hover_pill_zone != view.hover_pill_zone
                         || hover_bar != view.hover_bar
                     {
                         view.hover_row = hover_row;
                         view.hover_clock = hover_clock;
                         view.hover_pill = hover_pill;
+                        view.hover_pill_zone = hover_pill_zone;
                         view.hover_bar = hover_bar;
                         cx.notify();
                     }

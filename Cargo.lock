@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "cincel"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cincel-log",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-acp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agent-client-protocol",
  "async-channel",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-chat"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "cincel-acp",
  "cincel-editor",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-connections"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-channel",
  "cincel-acp",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-editor"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "cincel-syntax",
  "cincel-text",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-log"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "regex",
  "tempfile",
@@ -1189,17 +1189,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "cincel-perf"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "cincel-project"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-channel",
  "cincel-text",
+ "cincel-watch",
  "dirs 6.0.0",
  "globset",
  "ignore",
  "imara-diff",
  "notify 8.2.0",
- "notify-debouncer-full",
  "parking_lot",
  "serde",
  "serde_json",
@@ -1212,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-review"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "cincel-text",
  "imara-diff",
@@ -1227,13 +1242,13 @@ dependencies = [
 
 [[package]]
 name = "cincel-settings"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-channel",
+ "cincel-watch",
  "dirs 6.0.0",
  "jsonc-parser",
  "notify 8.2.0",
- "notify-debouncer-full",
  "serde",
  "serde_json",
  "tempfile",
@@ -1243,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-syntax"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arborium-dockerfile",
  "arborium-markdown",
@@ -1269,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-text"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "imara-diff",
  "ropey 1.6.1",
@@ -1278,8 +1293,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cincel-watch"
+version = "1.0.0"
+dependencies = [
+ "notify 8.2.0",
+ "tempfile",
+]
+
+[[package]]
 name = "cincel-workspace"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1297,12 +1320,15 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
+ "lzma-rs",
  "parking_lot",
  "regex",
  "rfd",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "tokio",
  "tracing",
@@ -2265,15 +2291,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "file-id"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1fc6a637b6dc58414714eddd9170ff187ecb0933d4c7024d1abbd23a3cc26e9"
-dependencies = [
- "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4837,23 +4854,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "notify-debouncer-full"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2d88b1a7538054351c8258338df7c931a590513fb3745e8c15eb9ff4199b8d1"
-dependencies = [
- "file-id",
- "log",
- "notify 8.2.0",
- "notify-types 2.1.0",
- "walkdir",
-]
-
-[[package]]
 name = "notify-rust"
-version = "4.18.0"
+version = "4.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5b4c1b4f2aa9f25f63a7a49d3dd0ed567b3670da15330a66b29434be899b891"
+checksum = "fe430c879247371c47fdedd328ad4e301e6b30b533c5fd5db1c06d75253d0e46"
 dependencies = [
  "futures-lite",
  "log",
@@ -6485,9 +6489,9 @@ dependencies = [
 
 [[package]]
 name = "rust-i18n"
-version = "4.2.2"
+version = "4.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c43fd69c20da13756643a5bf51ae799965465c78e05c57a1242a736aaa56527"
+checksum = "8502e73e6461c738659455c5d2cf95bc132760a6f203c717e66ee72b78906d7f"
 dependencies = [
  "globwalk",
  "regex",
@@ -6498,9 +6502,9 @@ dependencies = [
 
 [[package]]
 name = "rust-i18n-macro"
-version = "4.2.2"
+version = "4.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "086ec8a9eaa6afda33919b9bc1661c1f4e017c40e99bbd33ca98f6e1cb6ca91f"
+checksum = "d54a28dd9d46108d56b9f0c85b220908844233e561c03087890325104f90f2c6"
 dependencies = [
  "glob",
  "proc-macro2",
@@ -6513,12 +6517,13 @@ dependencies = [
 
 [[package]]
 name = "rust-i18n-support"
-version = "4.2.2"
+version = "4.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac02dcb9a01ec145d0a5534ea9554a966050ca250b346bb2a9ab0fcdafab5979"
+checksum = "e806c2a9701cbd6043992cd935c30cb1fdb128fa15e7b506f3b46f97045737c0"
 dependencies = [
  "arc-swap",
  "base62",
+ "foldhash 0.2.0",
  "globwalk",
  "itertools 0.11.0",
  "normpath",
@@ -7552,12 +7557,12 @@ dependencies = [
 
 [[package]]
 name = "tauri-winrt-notification"
-version = "0.7.3"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed071c670382e85fc2f48ae706492d8c338f4f89bf72520d32f8abfe880aade"
+checksum = "f37a6c354fd28fc9e322ed9bd47e3959576dad28c9d58ea1cf888cce1c7ccb36"
 dependencies = [
  "thiserror 2.0.21",
- "windows 0.61.3",
+ "windows 0.62.2",
  "windows-version",
 ]
 
@@ -7767,9 +7772,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
@@ -8686,6 +8691,19 @@ dependencies = [
  "bitflags 2.13.2",
  "wayland-backend",
  "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols-misc"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e9567599ef23e09b8dad6e429e5738d4509dfc46b3b21f32841a304d16b29c8"
+dependencies = [
+ "bitflags 2.13.2",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "wayland-scanner",
 ]
 

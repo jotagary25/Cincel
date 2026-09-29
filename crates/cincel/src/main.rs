@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cincel_settings::{Config, SettingsWatcher};
+use cincel_workspace::bench;
 use cincel_workspace::{Workspace, WorkspaceOptions};
 use gpui_kit::assets::AllAssets;
 
@@ -22,6 +23,8 @@ const SMOKE_TEST_DURATION: Duration = Duration::from_secs(1);
 const EXIT_NO_WINDOW: i32 = 2;
 
 fn main() -> anyhow::Result<()> {
+    // `cincel --bench` measures from here (`main`); one clock read otherwise.
+    let started_ns = bench::now_ns();
     let args = match Cli::parse(std::env::args().skip(1)) {
         Ok(Some(args)) => args,
         // `--help`, `--version` and the `--print-*` flags already printed what
@@ -32,6 +35,43 @@ fn main() -> anyhow::Result<()> {
             eprintln!("{USAGE}");
             std::process::exit(64); // EX_USAGE
         }
+    };
+
+    // `--bench` (`docs/specs/08-etapa6-cierre-1-0.md` §3.3): before anything
+    // reads the XDG directories, since a measurement run moves the state,
+    // data and cache ones into its own temporary directory.
+    let bench_session = match &args.bench {
+        Some(bench_args) => {
+            let plan = bench::BenchPlan {
+                scenario: bench_args.scenario,
+                root: args.project.clone(),
+                file: bench_args.file.clone(),
+                smoke_test: args.smoke_test,
+            };
+            match bench::Session::start(plan, started_ns) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    eprintln!("cincel: --bench: no se pudo preparar la carpeta temporal: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => None,
+    };
+    let bench_runner = bench_session.as_ref().map(bench::Session::runner);
+    // `--smoke-test` without `--bench` also runs in its own temporary state:
+    // it opens a project to check that the window draws, and that must never
+    // land in the user's recents (it made Cincel reopen the repository).
+    let _smoke_state = if args.smoke_test && args.bench.is_none() {
+        match bench::isolate_state_in_temp() {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                eprintln!("cincel: --smoke-test: no se pudo preparar la carpeta temporal: {error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
     };
 
     // Before anything else reads the XDG directories (logging included: the
@@ -78,7 +118,12 @@ fn main() -> anyhow::Result<()> {
     // The configuration never stops the editor from starting: every problem
     // comes back as an issue, is logged here and shown as a toast once the
     // window exists (`docs/specs/modulos/settings.md`).
-    let loaded = Config::load();
+    let loaded = {
+        // `CINCEL_TRACE_TIMINGS=1` (`bench::TIMING_TARGET`).
+        let _span = tracing::info_span!(target: "cincel::timing", "config_load").entered();
+        Config::load()
+    };
+    bench::mark(bench::Mark::Config);
     let startup_issues: Vec<String> = loaded
         .issues
         .iter()
@@ -100,6 +145,20 @@ fn main() -> anyhow::Result<()> {
     app.run({
         let frames = frames.clone();
         move |cx| {
+            // Before `init` (and before any window opens) so it never shifts
+            // what the existing test suite measures: the fonts stay
+            // unregistered there and `--smoke-test` is what checks them
+            // (`docs/specs/08-etapa6-cierre-1-0.md` §4.2, D7). A failure here
+            // is not fatal: the system fallbacks each font-resolving call
+            // already tries first take over.
+            // `CINCEL_TRACE_TIMINGS=1` (`bench::TIMING_TARGET`).
+            let font_span =
+                tracing::info_span!(target: "cincel::timing", "font_registration").entered();
+            if let Err(error) = cincel_workspace::fonts::register_embedded(cx) {
+                tracing::warn!(%error, "no se pudieron registrar las fuentes embebidas");
+            }
+            drop(font_span);
+
             cincel_workspace::init(config, cx);
             cx.activate(true);
 
@@ -116,7 +175,8 @@ fn main() -> anyhow::Result<()> {
                 WorkspaceOptions {
                     frames: frames.clone(),
                     project: args.project.clone(),
-                    open_last_project: args.project.is_none(),
+                    // A measurement run never falls back to the last project.
+                    open_last_project: args.project.is_none() && args.bench.is_none(),
                     settings_watcher,
                     startup_issues,
                     startup_notices,
@@ -124,8 +184,14 @@ fn main() -> anyhow::Result<()> {
                 },
                 cx,
             );
-            cx.spawn(async move |_| {
-                if let Err(error) = open.await {
+            let bench_runner = bench_runner.clone();
+            cx.spawn(async move |cx| match open.await {
+                Ok(window) => {
+                    if let Some(runner) = bench_runner {
+                        runner.start(window, cx);
+                    }
+                }
+                Err(error) => {
                     tracing::error!(%error, "no se pudo abrir la ventana");
                     std::process::exit(EXIT_NO_WINDOW);
                 }
@@ -152,6 +218,15 @@ fn main() -> anyhow::Result<()> {
     if args.smoke_test && frames.load(Ordering::Relaxed) == 0 {
         tracing::error!("smoke test: la aplicación terminó sin dibujar");
         std::process::exit(1);
+    }
+
+    // `--bench`: the temporary directory goes, and a scenario that could not
+    // run is exit code 1.
+    if let Some(session) = bench_session {
+        let code = session.finish();
+        if code != 0 {
+            std::process::exit(code);
+        }
     }
 
     Ok(())
@@ -194,12 +269,28 @@ Opciones:
   -h, --help            muestra esta ayuda
   -V, --version         muestra la versión
 
+Diagnóstico:
+      --bench ESCENARIO mide el rendimiento y escribe una línea JSON por
+                        medición: startup, open, typing, scroll, idle, finder,
+                        sweep, review-1mb, all (los 8 en orden) o demo (turno
+                        de ejemplo para capturas, queda abierto hasta SIGTERM).
+                        Sin corpus propio, genera uno en una carpeta temporal.
+                        RUTA es el proyecto de startup, idle, finder, sweep y
+                        demo; sweep escribe en 200 archivos de RUTA y después
+                        los deja como estaban
+      --bench-file ARCHIVO  archivo de open, typing y scroll
+      --smoke-test --bench  el smoke test más los tiempos de arranque
+
 Variables de entorno:
   RUST_LOG                     filtro de logs estilo tracing (tiene prioridad)
   CINCEL_ALLOW_SOFTWARE_GPU    1 para permitir un rasterizador por software
   CINCEL_CONFIG_DIR            reemplaza ~/.config/cincel (para pruebas o una
                                 segunda instancia)
   CINCEL_LOG_DIR               reemplaza ~/.local/state/cincel/log
+  CINCEL_BENCH_T0              instante de lanzamiento para --bench
+                                (nanosegundos de CLOCK_MONOTONIC)
+  CINCEL_TRACE_TIMINGS         1 para registrar cuánto tarda cada tramo del
+                                arranque y de la apertura del proyecto
   ZED_DEVICE_ID                fuerza un dispositivo PCI concreto en GPUI";
 
 /// The parsed command line.
@@ -208,6 +299,15 @@ struct Cli {
     project: Option<PathBuf>,
     log_level: Option<String>,
     smoke_test: bool,
+    /// `--bench` (`docs/specs/08-etapa6-cierre-1-0.md` §3.3).
+    bench: Option<BenchArgs>,
+}
+
+/// `--bench ESCENARIO [--bench-file ARCHIVO]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BenchArgs {
+    scenario: bench::Scenario,
+    file: Option<PathBuf>,
 }
 
 impl Cli {
@@ -217,9 +317,36 @@ impl Cli {
     fn parse(args: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
         let mut cli = Self::default();
         let mut args = args.peekable();
+        // `--bench` takes the next word when it names a scenario; alone it
+        // only makes sense with `--smoke-test` (`startup`).
+        let mut bench_requested = false;
+        let mut bench_scenario = None;
+        let mut bench_word = None;
+        let mut bench_file = None;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--bench" => {
+                    bench_requested = true;
+                    if let Some(scenario) = args
+                        .peek()
+                        .and_then(|next| bench::Scenario::from_name(next))
+                    {
+                        bench_scenario = Some(scenario);
+                        args.next();
+                    } else if let Some(next) = args.peek().filter(|next| !next.starts_with('-')) {
+                        bench_word = Some(next.clone());
+                    }
+                }
+                "--bench-file" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "--bench-file necesita un archivo".to_string())?;
+                    bench_file = Some(PathBuf::from(value));
+                }
+                other if other.starts_with("--bench-file=") => {
+                    bench_file = Some(PathBuf::from(&other["--bench-file=".len()..]));
+                }
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     return Ok(None);
@@ -258,9 +385,43 @@ impl Cli {
             }
         }
 
+        if bench_requested {
+            let scenario = match (bench_scenario, cli.smoke_test) {
+                (None, true) | (Some(bench::Scenario::Startup), true) => bench::Scenario::Startup,
+                (Some(_), true) => {
+                    return Err(
+                        "--smoke-test --bench solo mide el arranque: quitá el escenario"
+                            .to_string(),
+                    );
+                }
+                (Some(scenario), false) => scenario,
+                (None, false) => {
+                    return Err(match bench_word {
+                        Some(word) => format!(
+                            "escenario de --bench desconocido: {word} (válidos: {})",
+                            bench::Scenario::names()
+                        ),
+                        None => format!(
+                            "--bench necesita un escenario: {}",
+                            bench::Scenario::names()
+                        ),
+                    });
+                }
+            };
+            cli.bench = Some(BenchArgs {
+                scenario,
+                file: bench_file,
+            });
+        } else if bench_file.is_some() {
+            return Err("--bench-file solo tiene sentido con --bench".to_string());
+        }
+
         Ok(Some(cli))
     }
 }
+
+#[cfg(test)]
+mod bench_cli_tests;
 
 #[cfg(test)]
 mod tests {

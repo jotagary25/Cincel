@@ -20,10 +20,13 @@ use std::time::Duration;
 use cincel_acp::acp::schema::v1::{SessionId, SessionUpdate, ToolCallStatus};
 use cincel_acp::{AgentCommand, AgentEvent, PromptBlock};
 use cincel_chat::ChatPanel;
-use cincel_editor::{EditorView, ReviewAction, ReviewHunkKind, RowKind};
+use cincel_editor::{EditorView, FrameRender, ReviewAction, ReviewHunkKind, RowKind};
 use cincel_project::FsEvent;
 use cincel_settings::Config;
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui::{
+    Bounds, Entity, Focusable as _, Modifiers, Pixels, Point, TestAppContext, VisualTestContext,
+    point, px,
+};
 
 use crate::agents::Agents;
 use crate::center::CenterPanel;
@@ -269,6 +272,49 @@ fn open_deleted_tab(parts: &Parts, unary: &Path, cx: &mut VisualTestContext) -> 
     editor
 }
 
+/// A fresh frame of `editor`, with the render probe on, in the active window
+/// (the floating bar only shows there).
+fn painted(editor: &Entity<EditorView>, cx: &mut VisualTestContext) -> FrameRender {
+    editor.update(cx, |editor, _| {
+        editor.set_render_probe(true);
+        editor.take_render_frames();
+    });
+    cx.update(|window, _| {
+        window.activate_window();
+        window.refresh();
+    });
+    cx.run_until_parked();
+    editor
+        .update(cx, |editor, _| editor.take_render_frames())
+        .pop()
+        .expect("un cuadro pintado")
+}
+
+fn mouse_to(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    cx.simulate_mouse_move(at, None, Modifiers::default());
+    cx.run_until_parked();
+}
+
+/// The bounds of the pill of the deletion's only hunk: the cursor goes up
+/// onto its phantom rows (keyboard) so the pill shows, then back down to the
+/// buffer's only row so it does not.
+fn deleted_pill_bounds(editor: &Entity<EditorView>, cx: &mut VisualTestContext) -> Bounds<Pixels> {
+    cx.update(|window, cx| {
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    cx.simulate_keystrokes("up");
+    let pill = painted(editor, cx)
+        .review
+        .pills
+        .first()
+        .copied()
+        .expect("la píldora con el cursor en el segmento");
+    assert_eq!(pill.hunk, DELETED_FILE_HUNK);
+    cx.simulate_keystrokes("down down down down down down down down");
+    pill.bounds
+}
+
 // ------------------------------------------------------------------ tests
 
 /// (a) The tree keeps the deleted file, struck through in `status.error`
@@ -344,23 +390,15 @@ fn clicking_the_deleted_file_opens_its_red_read_only_tab(cx: &mut TestAppContext
     assert_eq!(hunk.id, DELETED_FILE_HUNK);
     assert_eq!(hunk.kind, ReviewHunkKind::Deleted);
     assert_eq!(hunk.deleted_lines, unary_lines());
-    assert!(view.file_actions && !view.turn_active);
+    assert!(!view.turn_active);
     let title = parts
         .center
         .read_with(cx, |center, _| center.active_tab().unwrap().display_title());
     assert_eq!(title.as_ref(), "unary.py (eliminado)");
 
-    // Painted: six red phantom rows and the bar with the file's buttons.
-    editor.update(cx, |editor, _| editor.set_render_probe(true));
-    // The floating bar only shows in the active window.
-    cx.update(|window, _| {
-        window.activate_window();
-        window.refresh();
-    });
-    cx.run_until_parked();
-    let frame = editor
-        .read_with(cx, |editor, _| editor.render_frames().last().cloned())
-        .expect("un cuadro pintado");
+    // Painted: six red phantom rows and the usual bar, without buttons of
+    // its own for the file (its segment's buttons decide it).
+    let frame = painted(&editor, cx);
     let phantoms = frame
         .rows
         .iter()
@@ -368,14 +406,11 @@ fn clicking_the_deleted_file_opens_its_red_read_only_tab(cx: &mut TestAppContext
         .count();
     assert_eq!(phantoms, 6);
     let bar = frame.review.bar.expect("barra flotante");
-    for part in [
-        "✓ Aceptar archivo",
-        "✗ Rechazar archivo",
-        "✓ Aceptar todo",
-        "✗ Rechazar todo",
-        "Revisar todo",
-    ] {
+    for part in ["✓ Aceptar todo", "✗ Rechazar todo", "Revisar todo"] {
         assert!(bar.contains(part), "{part} en {bar}");
+    }
+    for part in ["Aceptar archivo", "Rechazar archivo"] {
+        assert!(!bar.contains(part), "{part} en {bar}");
     }
 
     // Typing does nothing.
@@ -384,8 +419,9 @@ fn clicking_the_deleted_file_opens_its_red_read_only_tab(cx: &mut TestAppContext
     assert_eq!(editor.read_with(cx, |editor, _| editor.text()), "");
 }
 
-/// (c) Rejecting brings the file back and the tab becomes a normal editor
-/// of it.
+/// (c) Rejecting (the "✗ Rechazar" of the segment's buttons, which show when
+/// the mouse is over the red rows) brings the file back and the tab becomes
+/// a normal editor of it.
 #[gpui::test]
 fn rejecting_restores_the_file_and_the_tab_becomes_editable(cx: &mut TestAppContext) {
     init(cx);
@@ -393,10 +429,24 @@ fn rejecting_restores_the_file_and_the_tab_becomes_editable(cx: &mut TestAppCont
     let (parts, cx) = window(dir.path(), cx);
     let unary = dir.path().join("unary.py");
     let _env = delete_unary(&parts, dir.path(), "", Vec::new(), cx);
-    open_deleted_tab(&parts, &unary, cx);
+    let editor = open_deleted_tab(&parts, &unary, cx);
 
-    // The bar's "✗ Rechazar archivo".
-    act(&parts, &unary, ReviewAction::RejectFile, cx);
+    // With the cursor off the segment and the mouse away, no buttons; the
+    // mouse over the red rows shows them.
+    let pill = deleted_pill_bounds(&editor, cx);
+    mouse_to(cx, point(px(1.), px(1.)));
+    assert!(painted(&editor, cx).review.pills.is_empty(), "sin botones");
+    let y = pill.center().y;
+    mouse_to(cx, point(pill.left() - px(120.), y));
+    let shown = painted(&editor, cx).review.pills;
+    assert_eq!(shown.len(), 1, "los botones aparecen con el mouse encima");
+    assert_eq!(shown[0].hunk, DELETED_FILE_HUNK);
+
+    // Its "✗ Rechazar", with the mouse.
+    let reject = point(pill.right() - px(20.), y);
+    mouse_to(cx, reject);
+    cx.simulate_click(reject, Modifiers::default());
+    settle(cx);
 
     assert_eq!(std::fs::read_to_string(&unary).unwrap(), UNARY);
     let (deleted_review, read_only, editor) = tab(&parts, &unary, cx).expect("la pestaña sigue");

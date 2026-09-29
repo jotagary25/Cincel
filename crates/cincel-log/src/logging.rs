@@ -11,6 +11,8 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer as _;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -22,6 +24,39 @@ const KEPT_LOG_FILES: usize = 7;
 /// `cincel.2026-09-26.log`.
 const LOG_FILE_PREFIX: &str = "cincel";
 const LOG_FILE_SUFFIX: &str = "log";
+
+/// The `tracing` target of the timed sections of startup and project opening
+/// (`docs/specs/08-etapa6-cierre-1-0.md` §3.3); `cincel-workspace` names it
+/// `bench::TIMING_TARGET`.
+const TIMING_TARGET: &str = "cincel::timing";
+
+/// Environment variable that turns the timed sections on.
+const TIMINGS_VAR: &str = "CINCEL_TRACE_TIMINGS";
+
+/// Whether `CINCEL_TRACE_TIMINGS` asks for the timed sections: `1`, `true`
+/// or `yes`.
+fn timings_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes")
+    )
+}
+
+/// `CINCEL_TRACE_TIMINGS=1`: one stderr line per timed section when it
+/// closes (`close time.busy=… time.idle=…`; the two add up to its whole
+/// life), whatever `RUST_LOG` says, and nothing else from this layer.
+fn timings_layer<S>() -> Option<impl tracing_subscriber::Layer<S>>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    timings_enabled(std::env::var(TIMINGS_VAR).ok().as_deref()).then(|| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_target(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .with_filter(Targets::new().with_target(TIMING_TARGET, tracing::Level::TRACE))
+    })
+}
 
 /// Builds the filter: `rust_log` (the `RUST_LOG` environment variable) wins;
 /// `log_level` (`--log-level`) is the fallback; `info` is the default.
@@ -58,7 +93,6 @@ pub fn init(log_level: Option<&str>, log_dir: &Path) -> Option<WorkerGuard> {
         .with_writer(std::io::stderr)
         .with_target(true)
         .with_filter(build_filter(log_level));
-
     let file_setup = std::fs::create_dir_all(log_dir)
         .map_err(|error| error.to_string())
         .and_then(|()| {
@@ -83,11 +117,15 @@ pub fn init(log_level: Option<&str>, log_dir: &Path) -> Option<WorkerGuard> {
             tracing_subscriber::registry()
                 .with(stderr_layer)
                 .with(file_layer)
+                .with(timings_layer())
                 .init();
             Some(guard)
         }
         Err(error) => {
-            tracing_subscriber::registry().with(stderr_layer).init();
+            tracing_subscriber::registry()
+                .with(stderr_layer)
+                .with(timings_layer())
+                .init();
             eprintln!(
                 "cincel: no se pudo abrir el log en {} ({error}); solo se escribe en stderr",
                 log_dir.display()
@@ -123,6 +161,15 @@ mod tests {
 
         assert!(appender.is_ok(), "{appender:?}");
         assert!(log_dir.is_dir());
+    }
+
+    #[test]
+    fn timings_are_off_unless_asked_for() {
+        assert!(!timings_enabled(None));
+        assert!(!timings_enabled(Some("")));
+        assert!(!timings_enabled(Some("0")));
+        assert!(timings_enabled(Some("1")));
+        assert!(timings_enabled(Some(" TRUE ")));
     }
 
     #[test]

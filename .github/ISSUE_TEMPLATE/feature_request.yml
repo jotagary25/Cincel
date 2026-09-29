@@ -1,0 +1,22 @@
+name: Feature request (pedido de función)
+description: Suggest something Cincel doesn't do yet.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem this solves (qué problema resuelve)
+      description: What you're trying to do today, and why it's awkward.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like instead (propuesta)
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (alternativas)
+      description: Other ways you've tried, or other editors' take on this.

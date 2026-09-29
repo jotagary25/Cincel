@@ -34,16 +34,39 @@ Spec: `06-etapa4-conexiones-y-cincel.md`. Conexiones aisladas por suscripción (
 **Comprobación manual**: la lista de `06-etapa4-conexiones-y-cincel.md` §11.
 
 ## Etapa 5: productividad
+Estado: **cerrada** (2026-09-29). Construcción, verificación y desviaciones en `docs/etapas/etapa-5.md`.
 Spec: `07-etapa5-productividad.md` (fuente de verdad; reemplaza a `docs/etapas/pendientes-etapa-5.md`). Buscador rápido de archivos (`Ctrl+P`, `frizbee`); pantalla de configuración como pestaña (`Ctrl+,`) que escribe el mismo `settings.json` conservando comentarios, con la gestión de conexiones y las actualizaciones de adaptador y Node; modal de atajos con buscador (botón en la barra de estado, `F1`); git en el margen del editor (añadido, modificado, eliminado contra HEAD, en su propia columna y sin cambiar el ancho del margen); paneles con foco (`Ctrl+Shift+A` / `Ctrl+Shift+E`) y rueda de foco (`Ctrl+L`); menú en la barra de título (con `Ctrl+N` = nuevo archivo, y salir o cerrar la ventana preguntando por archivos sin guardar) y botones de paneles, sin que nada mueva el texto del editor; y cinco deudas: motivo de `AuthRequired`, buscar y reemplazar con filas fantasma, cancelar descargas de verdad, actualizar adaptador y Node, autoguardado tras una pausa.
 **Comprobación manual**: la lista de `07-etapa5-productividad.md` §14.
 
 ## Etapa 6: rendimiento, distribución y publicación (cierre = versión 1.0)
-- **Rendimiento** medido contra `01-producto.md §5` (arranque en frío, abrir 5 000 líneas, latencia de tecleo, archivos de 1 MB y de 50 000 líneas, memoria y CPU en reposo sin redibujo continuo) y corrección de lo que no cumpla.
-- **Instalador liviano**: tarball + `install.sh` y `.deb` con `cargo-deb`, compilados en GitHub Actions sobre `ubuntu-22.04`; los agentes se siguen descargando al conectar.
-- **Repositorio público**: lo hace el autor; Cincel solo lo guía. README en inglés con sección en español, `CONTRIBUTING`, CI con fmt, clippy `-D warnings`, tests (siempre con las features `cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support`) y `cargo deny`.
-- **Documentación de usuario** en español: instalación, primer arranque, conexiones, revisión de cambios, atajos, ajustes.
+Estado: **cerrada** (2026-09-29). Construcción, verificación, decisiones y
+desviaciones en `docs/etapas/etapa-6.md`. **Versión 1.0 lista para
+publicar**: al autor le quedan crear el repositorio público
+(`docs/publicacion.md`) y la lista de comprobación manual
+(`docs/etapas/etapa-6.md`, o `08-etapa6-cierre-1-0.md` §12).
+Spec: `08-etapa6-cierre-1-0.md` (fuente de verdad del alcance).
+- **Rendimiento** medido contra `01-producto.md §5` (arranque en frío, abrir 5 000 líneas, latencia de tecleo, archivos de 1 MB y de 50 000 líneas, memoria y CPU en reposo sin redibujo continuo) y **comparado con Zed y Antigravity** (VS Code cuando esté instalado) con un banco de medición reproducible que no instrumenta las apps ni captura la sesión del autor; mediciones internas con `cincel --bench`; resultados en `docs/rendimiento.md`; corrección de lo que no cumpla.
+- **Instalador liviano**: tarball + `install.sh` y `.deb` con `cargo-deb`, compilados en GitHub Actions sobre `ubuntu-22.04`, verificados en contenedores limpios 22.04 y 24.04; icono propio; versión 1.0.0 y changelog; los agentes se siguen descargando al conectar.
+- **Repositorio público**: lo hace el autor con la guía `docs/publicacion.md`. README en inglés con sección en español y capturas, `CONTRIBUTING`, `CODE_OF_CONDUCT`, plantillas, CI con fmt, clippy `-D warnings`, tests (siempre con las features `cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support`) y `cargo deny`, y release que arma los dos paquetes; control de datos personales.
+- **Documentación de usuario** en español (`docs/usuario/`): instalación, primer arranque, conexiones, revisión de cambios, atajos, ajustes, solución de problemas.
 - **Fuentes Inter y JetBrains Mono embebidas** en el binario (licencia OFL).
-**Comprobación manual**: instalar desde el tarball y desde el `.deb` en una máquina limpia (o contenedor) y repetir las comprobaciones de las etapas 1 a 5.
+- **Deudas**: tope de la foto en la configuración, binarios persistidos y con deshacer, repaso final en segundo plano, teclas de búsqueda en el keymap por defecto, test del buscador con 50 000 rutas y los tests que faltaban.
+**Comprobación manual**: la lista de `08-etapa6-cierre-1-0.md` §12 (instalar desde el tarball y desde el `.deb` y repetir lo esencial de las etapas 1 a 5).
 
 ## Después de v1 (ideas ordenadas)
-LSP (completado, diagnósticos, ir a definición) · terminal integrado y autenticación de agentes dentro de la app · comentarios sobre segmentos para dialogar con el agente · multi-cursor y plegado · búsqueda en proyecto · paleta de comandos (`Ctrl+Shift+P`) · OpenCode y agentes con API key o gateway · panel de git · ACP v2 (rename/delete/binarios) · macOS.
+Lo que quedó anotado al cerrar la Etapa 6 (detalle y motivo en
+`docs/etapas/etapa-6.md` "Después de la 1.0"): llevar los colores de git de
+`GitGutterColors` a `EditorTheme`; el residuo de ≈10 ms de M11 en el
+escenario combinado (recargar una pestaña abierta durante el repaso final
+del turno); adoptar el cambio del agente sobre un solo archivo grande (1 MB
+o más) sin bloquear el hilo principal; bajar el binario por debajo de los
+75,7 MB actuales si hiciera falta; comprobación cruzada del arranque en
+COSMIC (`tools/perf/run.sh cosmic`) y medir el buscador de archivos sobre el
+corpus grande (50 000 rutas reales, no solo el test unitario).
+
+Ideas de producto, sin fecha: LSP (completado, diagnósticos, ir a
+definición) · terminal integrado y autenticación de agentes dentro de la
+app · comentarios sobre segmentos para dialogar con el agente ·
+multi-cursor y plegado · búsqueda en proyecto · paleta de comandos
+(`Ctrl+Shift+P`) · OpenCode y agentes con API key o gateway · panel de git ·
+ACP v2 (rename/delete/binarios) · macOS.

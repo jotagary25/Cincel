@@ -409,7 +409,12 @@ impl Workspace {
             self.save_layout(cx);
         }
         let settings = crate::settings::settings(cx);
-        let project = match project::open_with(path, &settings, self.project_options, cx) {
+        let opened = {
+            // `CINCEL_TRACE_TIMINGS=1` (`crate::bench::TIMING_TARGET`).
+            let _span = tracing::info_span!(target: "cincel::timing", "project_open").entered();
+            project::open_with(path, &settings, self.project_options, cx)
+        };
+        let project = match opened {
             Ok(project) => project,
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "no se pudo abrir el proyecto");
@@ -1053,10 +1058,8 @@ impl Workspace {
                     .items_center()
                     .gap_1()
                     .child(
-                        div()
-                            .text_size(px(34. * scale))
-                            .text_color(theme.text_accent)
-                            .child("✦"),
+                        crate::logo::logo(px(48. * scale))
+                            .debug_selector(|| "empty-state-logo".to_string()),
                     )
                     .child(
                         div()
@@ -1150,7 +1153,11 @@ impl Workspace {
         let read_only = tab.is_some_and(|tab| tab.read_only);
         let zoom = (crate::settings::ui_scale(cx) * 100.).round() as i32;
         let chat = self.chat.read(cx);
-        let pending = self.review.read(cx).summary().borrow().pending;
+        let (pending, sweeping) = {
+            let summary = self.review.read(cx).summary();
+            let summary = summary.borrow();
+            (summary.pending, summary.sweeping)
+        };
         // The chip of the active connection (`docs/specs/06-etapa4-conexiones-
         // y-cincel.md` §6): provider icon + label, or "Sin conexión".
         let connection_chip = match chat.active_connection() {
@@ -1219,7 +1226,13 @@ impl Workspace {
                             .id("status-pending")
                             .cursor_pointer()
                             .when(pending > 0, |this| this.text_color(theme.status_warning))
-                            .child(SharedString::from(pending_label(pending)))
+                            // A long end-of-turn sweep says so in the same
+                            // place (`crate::review::SWEEP_NOTICE`).
+                            .child(SharedString::from(if sweeping {
+                                crate::review::SWEEP_NOTICE.to_string()
+                            } else {
+                                pending_label(pending)
+                            }))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.review.update(cx, |review, cx| review.toggle_panel(cx));
                             })),
@@ -1404,13 +1417,13 @@ impl Workspace {
                             .child("Demasiado grande para revisar por segmentos: solo el archivo entero"),
                     )
                 })
-                .when(row.binary && !row.too_large, |this| {
+                .when(row.no_copy, |this| {
                     this.child(
                         div()
                             .pl(px(32. * scale))
                             .text_size(px(11. * scale))
                             .text_color(theme.text_muted)
-                            .child("Archivo binario cambiado por el agente: se acepta o se restaura entero"),
+                            .child("Cincel no guardó una copia previa: solo se puede aceptar"),
                     )
                 })
         }));
@@ -1480,6 +1493,9 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // `cincel --bench` (`crate::bench`): start of the frame; a no-op
+        // without `--bench`.
+        crate::bench::frame_begin();
         self.frames.fetch_add(1, Ordering::Relaxed);
         self.last_bounds.set(Some(WindowState::from_window_bounds(
             window.window_bounds(),
@@ -1659,6 +1675,9 @@ impl Render for Workspace {
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)
+            // `cincel --bench`: the element whose paint marks the end of the
+            // frame (`crate::bench::FrameProbe`); absent without `--bench`.
+            .children(crate::bench::frame_probe())
     }
 }
 

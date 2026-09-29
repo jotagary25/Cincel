@@ -55,7 +55,7 @@ pub use identity::{
 };
 pub use login::{
     AcpLogin, LOGIN_TIMEOUT, LoginCommand, LoginEvent, LoginFailure, LoginOptions, LoginPlan,
-    LoginSession, PendingCleanup, default_probe, plan_login,
+    LoginSession, PendingCleanup, default_probe, login_event_log_line, plan_login,
 };
 pub use paths::{CincelPaths, remove_dir_within};
 pub use profile::{

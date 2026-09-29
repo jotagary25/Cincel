@@ -1,0 +1,32 @@
+name: Slow tests
+
+# The real-network download test (crates/cincel-connections/tests/slow_download.rs,
+# §5.6.3) starts a local HTTP server and streams real bytes over a real
+# socket for hundreds of milliseconds; it is `#[ignore]`d so it never runs
+# on every push. It runs here instead: on demand and once a week, so a
+# regression is still caught without slowing down every pull request.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 6 * * 1" # every Monday, 06:00 UTC
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CINCEL_PERF_BUDGET_FACTOR: "4"
+
+jobs:
+  slow-download:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: rustup show (applies rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: cargo test slow_download --ignored (§5.6.3)
+        run: |
+          cargo test -p cincel-connections --test slow_download -- --ignored

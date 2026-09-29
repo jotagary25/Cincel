@@ -29,7 +29,7 @@
 //! | turns | `begin_turn`, `end_turn`, `turn_active(path)`, `is_turn_active` |
 //! | tracking | `capture_base(path, &BufferSnapshot)`, `capture_base_text`, `capture_base_bytes`, `file_written(path, &BufferSnapshot, EditSource)`, `file_created(path, text, previous)`, `file_deleted(path, previous)`, `buffer_edited(path, &BufferEvent, &BufferSnapshot, EditSource)` |
 //! | recompute | `needs_recompute`, `recompute_job`, `apply_recompute`, `recompute(path, &BufferSnapshot)`; pure [`compute_diff`], [`diff::diff_texts`] |
-//! | decisions | `accept_hunk`, `reject_hunk`, `accept_line`, `reject_line`, `accept_file`, `reject_file`, `accept_turn`, `reject_turn`, `accept_all`, `reject_all`, `undo_last_reject`, `can_undo_reject` |
+//! | decisions | `accept_hunk`, `reject_hunk`, `accept_line`, `reject_line`, `accept_file`, `reject_file`, `accept_turn`, `reject_turn`, `accept_all`, `reject_all`, `undo_last_reject`, `can_undo_reject`, `undo_depth` |
 //! | queries | `file`, `files`, `hunks`, `hunk`, `stats`, `pending_count`, `pending_files`, `locations`, `next_hunk`, `prev_hunk` |
 //! | report | `report_for_agent`, `report_patches`, `set_formatted_text`, `forget_turn`, `set_workspace_root` |
 //! | persistence | `save(dir)`, `load(dir, read_current)` |

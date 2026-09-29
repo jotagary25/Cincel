@@ -424,7 +424,39 @@ impl Drop for LoginSession {
     }
 }
 
+/// The safe line [`emit`] logs for `event`: only its kind and, for
+/// [`LoginEvent::Failed`], its [`LoginFailure`] reason and, for
+/// [`LoginEvent::Completed`], whether an identity came back — never the raw
+/// link ([`LoginEvent::UrlDetected`]), the one-time code
+/// ([`LoginEvent::CodeDetected`]), an [`Identity`]'s fields, or a `Failed`
+/// message or `Output` line (either of which could still carry a link or a
+/// code the scanner missed).
+///
+/// Exposed so a test can check exactly this string never contains a secret
+/// fed into one of the variants above, without needing a `tracing`
+/// subscriber that would have to reach across the session's own thread.
+#[must_use]
+pub fn login_event_log_line(event: &LoginEvent) -> String {
+    match event {
+        LoginEvent::Queued => "evento=en_cola".to_string(),
+        LoginEvent::Started => "evento=iniciado".to_string(),
+        LoginEvent::Output(_) => "evento=salida".to_string(),
+        LoginEvent::UrlDetected(_) => "evento=enlace_detectado".to_string(),
+        LoginEvent::CodeDetected(_) => "evento=codigo_detectado".to_string(),
+        LoginEvent::NeedsPastedCode => "evento=esperando_codigo_pegado".to_string(),
+        LoginEvent::Completed { identity } => {
+            format!(
+                "evento=completado identidad_recibida={}",
+                identity.is_some()
+            )
+        }
+        LoginEvent::Failed { reason, .. } => format!("evento=fallido motivo={reason:?}"),
+        LoginEvent::Cancelled => "evento=cancelado".to_string(),
+    }
+}
+
 fn emit(tx: &async_channel::Sender<LoginEvent>, event: LoginEvent) {
+    tracing::info!(paso = %login_event_log_line(&event), "inicio de sesión");
     let _ = tx.send_blocking(event);
 }
 

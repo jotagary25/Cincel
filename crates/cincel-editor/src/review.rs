@@ -93,11 +93,6 @@ pub struct ReviewView {
     /// When it changes, or after a decision with `jump_to_next_on_decide`, the
     /// editor moves the cursor there and scrolls it into view.
     pub current_index: Option<usize>,
-    /// The file is decided only as a whole (a file the agent deleted): the
-    /// floating bar leads with "✓ Aceptar archivo" / "✗ Rechazar archivo"
-    /// ([`ReviewAction::AcceptFile`] / [`ReviewAction::RejectFile`]) before
-    /// the turn's "Aceptar todo" / "Rechazar todo".
-    pub file_actions: bool,
 }
 
 /// A decision or a navigation request, emitted as

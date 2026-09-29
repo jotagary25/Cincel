@@ -33,7 +33,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 use crate::agents::Agents;
 use crate::center::CenterPanel;
 use crate::project::ProjectOptions;
-use crate::review::{BINARY_LABEL, FileState, Review};
+use crate::review::{FileState, Review};
 use crate::test_support::{FakeEnv, isolate_state};
 use crate::workspace::{Workspace, WorkspaceOptions};
 
@@ -701,49 +701,64 @@ fn chained_turns_keep_the_first_base(cx: &mut TestAppContext) {
     assert_eq!(hunk_count(&parts, &a, cx), 2);
 }
 
-/// A binary file changed by the agent: whole file only, "archivo binario
-/// cambiado por el agente" in the tree, and rejecting it restores its bytes.
+/// Binary files are out of the review: changed (watcher), created and
+/// deleted (the sweep) by the agent, nothing is pending and the disk keeps
+/// what the agent left. Opening one shows the notice, not its bytes, and no
+/// review buttons.
 #[gpui::test]
-fn a_binary_file_changed_by_the_agent_is_restored_on_reject(cx: &mut TestAppContext) {
+fn binary_files_changed_by_the_agent_stay_out_of_the_review(cx: &mut TestAppContext) {
     init(cx);
     let dir = project();
     let image = dir.path().join("logo.bin");
-    let original = [0xff_u8, 0xd8, 0x00, 0x10, 0x80];
-    std::fs::write(&image, original).unwrap();
+    let gone = dir.path().join("viejo.bin");
+    let created = dir.path().join("nuevo.png");
+    std::fs::write(&image, [0xff_u8, 0xd8, 0x00, 0x10, 0x80]).unwrap();
+    std::fs::write(&gone, [0x00_u8, 0x01, 0xfe]).unwrap();
     let (parts, cx) = window(dir.path(), cx);
 
     start_turn(&parts, cx);
-    std::fs::write(&image, [0xff_u8, 0xd8, 0x00, 0x11, 0x81, 0x90]).unwrap();
+    let changed = [0xff_u8, 0xd8, 0x00, 0x11, 0x81, 0x90];
+    std::fs::write(&image, changed).unwrap();
     watcher(&parts, vec![FsEvent::Modified(image.clone())], cx);
+    std::fs::write(&created, [0x89_u8, b'P', b'N', b'G', 0x00]).unwrap();
+    std::fs::remove_file(&gone).unwrap();
     end_turn(&parts, cx);
 
-    assert_eq!(
-        tree_label(&parts, "logo.bin", cx).as_deref(),
-        Some(BINARY_LABEL)
-    );
-    assert_eq!(state_of(&parts, &image, cx), Some(FileState::Modified));
-    let rows = parts.review.read_with(cx, |review, _| review.panel_rows());
+    for (path, relative) in [
+        (&image, "logo.bin"),
+        (&gone, "viejo.bin"),
+        (&created, "nuevo.png"),
+    ] {
+        assert!(state_of(&parts, path, cx).is_none(), "{relative}");
+        assert!(tree_label(&parts, relative, cx).is_none(), "{relative}");
+    }
     assert!(
-        rows.iter()
-            .any(|row| row.binary && row.relative == "logo.bin")
-    );
-    assert_eq!(
         parts
             .review
-            .read_with(cx, |review, _| review.pending_count()),
-        1
+            .read_with(cx, |review, _| review.panel_rows())
+            .is_empty()
     );
-    parts
-        .review
-        .update(cx, |review, cx| review.reject_file(&image, cx));
-    settle(cx);
-    assert_eq!(std::fs::read(&image).unwrap(), original);
     assert_eq!(
         parts
             .review
             .read_with(cx, |review, _| review.pending_count()),
         0
     );
+    assert_eq!(std::fs::read(&image).unwrap(), changed);
+    assert!(created.is_file() && !gone.exists());
+
+    // The tab of a binary: the notice, read only, no review.
+    let editor = open(&parts, &image, cx);
+    let (text, read_only, hunks) = editor.read_with(cx, |editor, _| {
+        (
+            editor.text(),
+            editor.is_read_only(),
+            editor.review().hunks.len(),
+        )
+    });
+    assert_eq!(text, crate::center::BINARY_NOTICE);
+    assert!(read_only);
+    assert_eq!(hunks, 0);
 }
 
 /// With the photo taken on the background executor (the real application),

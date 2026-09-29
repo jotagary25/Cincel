@@ -27,9 +27,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
+use cincel_watch::Debouncer;
 use notify::RecursiveMode;
 use notify::event::EventKind;
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use parking_lot::{Condvar, Mutex};
 
 /// Debounce applied to status refreshes (`modulos/project.md`).
@@ -586,7 +586,7 @@ pub enum GitDirEvent {
 /// The watch lives as long as this value.
 pub struct GitDirWatcher {
     git_dir: PathBuf,
-    _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    _debouncer: Debouncer,
 }
 
 impl GitDirWatcher {
@@ -605,26 +605,22 @@ impl GitDirWatcher {
         let git_dir = git_dir.into();
         let (sender, receiver) = async_channel::unbounded();
         let filter_dir = git_dir.clone();
-        let mut debouncer =
-            new_debouncer(
-                debounce,
-                None,
-                move |result: DebounceEventResult| match result {
-                    Ok(events) => {
-                        let changed = events
-                            .iter()
-                            .any(|event| is_git_dir_change(&filter_dir, &event.event));
-                        if changed && sender.try_send(GitDirEvent::Changed).is_err() {
-                            tracing::debug!("nadie escucha los cambios de .git");
-                        }
-                    }
-                    Err(errors) => {
-                        for error in errors {
-                            tracing::debug!(%error, "error observando .git");
-                        }
-                    }
-                },
-            )?;
+        let mut debouncer = Debouncer::new(
+            "cincel-watch-git",
+            debounce,
+            move |batch: cincel_watch::Batch| {
+                for error in batch.errors {
+                    tracing::debug!(%error, "error observando .git");
+                }
+                let changed = batch
+                    .events
+                    .iter()
+                    .any(|event| is_git_dir_change(&filter_dir, event));
+                if changed && sender.try_send(GitDirEvent::Changed).is_err() {
+                    tracing::debug!("nadie escucha los cambios de .git");
+                }
+            },
+        )?;
         debouncer.watch(&git_dir, RecursiveMode::NonRecursive)?;
         let heads = git_dir.join("refs").join("heads");
         if heads.is_dir()
@@ -1105,6 +1101,14 @@ mod tests {
         // `git status` refreshes (and rewrites) the index.
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(dir.path().join("a.txt"), "uno\n").unwrap();
+        // A first pass may legitimately touch the index once when the entry
+        // is "racily clean" (file and index share the same mtime second):
+        // git smudges that entry so later runs can trust the stat data. What
+        // must never happen is the steady state rewriting it again, which is
+        // what would feed the `.git` watcher forever.
+        let status = GitStatus::collect(dir.path());
+        assert!(status.repo_root().is_some());
+        let _ = diff_against_head(dir.path(), &dir.path().join("a.txt"));
         let before = std::fs::read(&index).unwrap();
         let modified_before = std::fs::metadata(&index).unwrap().modified().unwrap();
 

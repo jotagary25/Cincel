@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Cincel
+GenericName=Code Editor
+GenericName[es]=Editor de código
+Comment=Code editor where you review every change an AI agent makes
+Comment[es]=Editor de código donde revisás cada cambio que hace un agente
+Exec=cincel %f
+Icon=dev.cincel.Cincel
+Terminal=false
+Type=Application
+Categories=Development;TextEditor;IDE;
+Keywords=editor;code;agent;review;
+StartupWMClass=dev.cincel.Cincel
+StartupNotify=true

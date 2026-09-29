@@ -160,7 +160,7 @@ pub struct Typography;
 impl Typography {
     /// Fallbacks tried after the configured UI family.
     pub const UI_FALLBACKS: &'static [&'static str] = &[
-        "Inter",
+        crate::fonts::UI_FAMILY,
         "system-ui",
         "Inter Display",
         "Cantarell",
@@ -168,7 +168,7 @@ impl Typography {
     ];
     /// Fallbacks tried after the configured code family.
     pub const CODE_FALLBACKS: &'static [&'static str] = &[
-        "JetBrains Mono",
+        crate::fonts::BUFFER_FAMILY,
         "JetBrainsMono Nerd Font Mono",
         "Zed Mono",
         "DejaVu Sans Mono",
@@ -510,13 +510,25 @@ pub fn apply(theme: &cincel_settings::Theme, settings: &Settings, ui_scale: f32,
     );
 
     let ui_font_family = Typography::ui_font_family(settings, cx);
+    let mono_font_family = Typography::buffer_font_family(settings, cx);
     let kit = KitTheme::global_mut(cx);
 
-    // §3 Typography. An unresolvable chain leaves gpui-kit's own resolved
-    // system font in place.
+    // §3 Typography, named explicitly (the embedded `fonts::UI_FAMILY` and
+    // `fonts::BUFFER_FAMILY` unless the settings chose other installed
+    // families): gpui-kit's own probe names whatever `.SystemUIFont` lands
+    // on (DejaVu Sans, Ubuntu…) when it starts, and that must not stay. An
+    // unresolvable chain leaves gpui-kit's own resolved font in place.
     if let Some(family) = ui_font_family {
         kit.font_family = family;
     }
+    if let Some(family) = mono_font_family {
+        kit.mono_font_family = family;
+    }
+    tracing::info!(
+        ui = %kit.font_family,
+        mono = %kit.mono_font_family,
+        "tipografía de la interfaz"
+    );
     kit.font_size = px(settings.ui_font_size * ui_scale);
     kit.mono_font_size = px(settings.buffer_font_size * ui_scale);
 

@@ -351,7 +351,6 @@ impl DemoReview {
             turn_active: self.turn_active,
             pending_in_other_files: OTHER_FILES_PENDING,
             current_index: None,
-            file_actions: false,
         }
     }
 

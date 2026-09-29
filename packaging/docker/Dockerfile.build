@@ -1,0 +1,37 @@
+# Build image for the release package (`docs/specs/08-etapa6-cierre-1-0.md`
+# §6.6): `ubuntu:22.04` pinned by digest (glibc 2.35, D9), so the binary and
+# the `.deb` it produces (`$auto` deps via `dpkg-shlibdeps`) work on any
+# Ubuntu/Pop!_OS 22.04 or newer. No credentials; packages come from the
+# Ubuntu archive and from crates.io (`cargo install --locked`, D17).
+FROM ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential pkg-config \
+      libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev \
+      libvulkan-dev libfontconfig-dev \
+      git curl ca-certificates \
+      dpkg-dev fakeroot \
+ && rm -rf /var/lib/apt/lists/*
+
+# `rust-toolchain.toml` pins `channel = "stable"`; rustup honors it once the
+# repository is mounted, but the image installs it eagerly (with the same
+# components) so `build.sh` never needs network access inside the container.
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+ENV PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh \
+ && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable \
+      --component rustfmt --component clippy \
+ && rm /tmp/rustup-init.sh
+
+# Packaging tools (D17): fixed versions, compiled from crates.io, never a
+# prebuilt third-party binary.
+RUN cargo install --locked --version 3.8.0 cargo-deb \
+ && cargo install --locked --version 0.9.2 cargo-about --features cli
+
+# `build.sh` and `verify.sh` run with `--user "$(id -u):$(id -g)"`; both
+# rustup and cargo homes are world-readable/writable so that works.
+RUN chmod -R a+rwX /opt/rustup /opt/cargo
+
+WORKDIR /repo

@@ -214,13 +214,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_project = self.project().is_some();
-        let menu_button = self.render_title_menu_button(window, cx);
+        // `.into_any_element()` right away: under Rust 2024's default opaque
+        // capture rules each `impl IntoElement` return otherwise keeps
+        // borrowing `self`/`cx` for as long as the local lives, and two
+        // sequential builder calls in the same block would conflict.
+        let menu_button = self.render_title_menu_button(window, cx).into_any_element();
+        let logo = self.render_title_bar_logo(cx).into_any_element();
 
         let mut row = h_flex()
             .id("title-bar-row")
             .w_full()
             .items_center()
             .gap_1()
+            .child(logo)
             .child(menu_button);
 
         if has_project {
@@ -252,6 +258,16 @@ impl Workspace {
             .child(row)
     }
 
+    /// Cincel's chisel mark, 16 px, to the left of the menu button
+    /// (`crate::logo`); the row stays `items_center()` with no fixed height
+    /// of its own, so a 16 px icon next to the existing buttons never
+    /// changes the title bar's height (`TitleBar::new()` keeps that, D16).
+    fn render_title_bar_logo(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let scale = crate::settings::ui_scale(cx);
+        crate::logo::logo(px(TITLE_BUTTON_ICON_SIZE * scale))
+            .debug_selector(|| "titlebar-logo".to_string())
+    }
+
     /// The menu button of §8.2: `IconName::Menu`, ghost, with the popup menu
     /// attached through gpui-kit's own `DropdownMenu` trait.
     fn render_title_menu_button(
@@ -277,6 +293,7 @@ impl Workspace {
             .w(px(TITLE_BUTTON_SIZE * scale))
             .h(px(TITLE_BUTTON_SIZE * scale))
             .tooltip("Menú")
+            .debug_selector(|| "titlebar-menu".to_string())
             .dropdown_menu(move |menu, window, cx| {
                 let context = TitleMenuContext {
                     workspace: workspace.clone(),

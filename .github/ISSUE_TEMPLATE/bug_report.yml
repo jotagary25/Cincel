@@ -1,0 +1,62 @@
+name: Bug report (informe de error)
+description: Something in Cincel doesn't work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Before submitting, please check the
+        version output and remove any personal data from the log excerpt
+        below (paths under your home directory, real file names, etc.) —
+        see `tools/privacy-check.sh` for what counts as personal data.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened (qué pasó)
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Cincel version (versión de Cincel)
+      description: Output of `cincel --version`.
+      placeholder: "cincel 1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Linux distribution (distribución)
+      placeholder: "Pop!_OS 22.04, Ubuntu 24.04, ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How you installed Cincel (cómo lo instalaste)
+      options:
+        - "Tarball + install.sh"
+        - ".deb"
+        - "Built from source"
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop environment / compositor (escritorio)
+      placeholder: "COSMIC, GNOME (Wayland), KDE Plasma (X11), ..."
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver (GPU)
+      placeholder: "AMD Radeon Vega, amdgpu / NVIDIA RTX 3050 Ti, proprietary driver"
+  - type: textarea
+    id: log
+    attributes:
+      label: Recent log lines (últimas líneas del log)
+      description: >-
+        From `~/.local/state/cincel/log/` (or `.deb`/tarball equivalent).
+        Please remove any personal data first (real names, paths under
+        `/home/<you>/`, tokens).
+      render: text

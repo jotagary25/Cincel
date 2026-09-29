@@ -55,8 +55,8 @@ pub use git::{
 pub use ignore_rules::{ExcludeSet, IgnoreRules};
 pub use recents::{MAX_RECENTS, Recents};
 pub use snapshot::{
-    ProjectSnapshot, RACY_WINDOW, SnapshotChange, SnapshotContent, SnapshotEntry, SnapshotLimits,
-    SnapshotSource,
+    BINARY_SNIFF_BYTES, ProjectSnapshot, RACY_WINDOW, SnapshotChange, SnapshotContent,
+    SnapshotEntry, SnapshotLimits, SnapshotSource, looks_binary, looks_binary_prefix,
 };
 pub use watcher::{FsEvent, WATCH_DEBOUNCE, WatchError, WatchOptions, Watcher};
 pub use worktree::{Entries, Entry, EntryKind, ScanEvent, Worktree, WorktreeConfig, WorktreeScan};

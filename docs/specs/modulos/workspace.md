@@ -19,16 +19,17 @@
 - **Ciclo de revisión** (**v2 (2026-09-28): la base viene de la foto del proyecto; las herramientas son solo una pista**; regla en `03-arquitectura.md` §4):
   1. *Foto al empezar el turno*: `Agents` llama a `Review::begin_prompt`, que saca la foto del proyecto (`cincel_project::ProjectSnapshot::capture`, el recorrido del árbol con sus exclusiones y `files.exclude`; texto hasta `review.max_file_size_kb`; binarios con hash y bytes; por encima de `review.snapshot_max_total_mb` solo hash, y la base sale del buffer si está abierto) en el ejecutor de fondo. El prompt sale cuando la foto está lista; si tarda más de 1 s el chat muestra "Preparando la revisión…". Con `ProjectOptions::inert()` (tests) la foto es síncrona.
   2. *Vigilancia*: `Project` emite `FilesChanged(Vec<FsEvent>)` por cada lote del watcher, para cualquier ruta del proyecto (abierta o no). Para una ruta sin seguimiento la base es la copia de la foto (`capture_base_text`; `file_created` si no existía) y luego `file_written`/`file_deleted` con el disco; renombrar = borrar + crear. Si el buffer tiene cambios sin guardar, se suman a la base (no son del agente).
-  3. *Repaso al terminar* (`end_turn`, también en `agent_gone` y al encadenar turnos): la foto entera contra el disco (tamaño/mtime; contenido si difieren o si el mtime es reciente) y se suma lo que el watcher no avisó; recién después se libera la foto.
+  3. *Repaso al terminar* (`end_turn`, también en `agent_gone` y al encadenar turnos): la foto entera contra el disco (tamaño/mtime; contenido si difieren o si el mtime es reciente) y se suma lo que el watcher no avisó; recién después se libera la foto. **Desde la Etapa 6, el repaso corre en el ejecutor de fondo** (`PhotoState::Sweeping`): el turno sigue activo hasta que el resultado vuelve y recién entonces se adoptan, en el hilo principal y en tramos cortos, solo los archivos que difieren; si tarda más de 1 s, la barra de estado muestra "Revisando los cambios del agente…". Un prompt nuevo espera ese fin igual que hoy espera la foto (`turn_waiter`). Mientras tanto, los lotes del vigilante que llegan de a muchos (más de 4 rutas) también se adoptan en tramos cortos (`WatchQueue`), para que ningún bloqueo del hilo principal supere los 8 ms (M11, `docs/rendimiento.md`).
   4. *Atribución*: lo que Cincel escribe durante el turno (`Project::save`, nuevo archivo, rechazos) emite `HostWrote(path)` y actualiza la foto: no es del agente; `classify` sigue mandando para los buffers en seguimiento. Lo que cambian otros programas durante el turno se atribuye al agente.
   5. *Pistas*: `FsWrite` (`BufferStore::apply_agent_write` + `ReviewStore`), `FsRead` y el primer `tool_call` edit/delete/move con `locations` capturan la base antes, como en v1; si el disco ya difiere de la foto, la base es la foto.
   6. *Turnos encadenados*: cada turno saca su foto; lo pendiente de turnos anteriores conserva su base original.
-  7. *Binarios* (no UTF-8): "archivo binario cambiado por el agente" en el árbol y el panel, solo aceptar o rechazar el archivo entero (rechazar = restaurar los bytes de la foto); sin copia previa, solo aceptar.
+  7. *Binarios* (no UTF-8, o un NUL en los primeros 8 KB: `cincel_project::looks_binary`): **quedan fuera de la revisión** (correcciones tras la prueba de la 1.0). Lo que el agente les haga (crearlos, cambiarlos, borrarlos, o convertir un texto en binario) se aplica sin preguntar y no aparece como pendiente: ni en el árbol, ni en "Revisar todo", ni en la barra de estado, ni en el diálogo de cierre. La foto guarda de ellos solo tamaño y hash. Una pestaña de un binario abierto desde el árbol es de solo lectura, dice "Archivo binario: no se muestra" y no tiene botones de revisión. Se retiraron `review_binaries.rs`, `binaries.json`/`binaries/<sha256>` (se borran al abrir el proyecto si quedaron de una versión anterior) y el `RejectLog`: `Alt+Shift+U` usa la pila del store. Un archivo de *texto* sin copia en la foto sigue en revisión, entero y solo aceptar ("cambiado por el agente, sin copia previa"), en memoria.
+  8. *Botones de un segmento*: aparecen con el cursor en el segmento o el mouse encima; "encima" es las filas del segmento **más el rectángulo de los propios botones** (`EditorView::hover_pill_zone`), porque se dibujan en su esquina superior derecha y pueden salir del segmento (la fila anterior, o su borde superior). Llegar a ellos desde arriba ya no los esconde. La barra flotante es la misma para todos los archivos: "Aceptar todo" · "Rechazar todo" del turno · flechas · "cambio N de M" · "Revisar todo"; un archivo borrado por el agente se decide con los botones de su único segmento o desde "Revisar todo".
 - **Diálogo de buffer sucio** antes de que el agente escriba un archivo con cambios sin guardar: Guardar / Descartar / Mantener (mantener = el agente escribe encima y el hunk incluirá tus cambios).
 
 ## Binario `cincel`
-- CLI: `cincel [ruta] [--log-level ..]`. Sin ruta: último proyecto o pantalla vacía.
-- Arranque: migrar directorios XDG de `asteroid` a `cincel` si hace falta (`docs/specs/06-etapa4-conexiones-y-cincel.md` §7) → iniciar log a archivo (`cincel-log`) → cargar settings/keymap/tema → crear app GPUI → ventana con tamaño/posición restaurados → `Workspace` → toast de migración si hubo alguna.
+- CLI: `cincel [ruta] [--log-level ..] [--bench ESCENARIO [--bench-file ARCHIVO]]`. Sin ruta: último proyecto o pantalla vacía. `--bench` (Etapa 6, D6, `docs/specs/modulos/perf.md`): corre uno de los ocho escenarios de medición interna (`startup`, `open`, `typing`, `scroll`, `idle`, `finder`, `sweep`, `review-1mb`), `all` (los ocho en orden) o `demo` (solo para capturas); imprime JSON por línea a la salida estándar. Sin la bandera, los ganchos de medición (`cincel_workspace::bench`) no hacen nada.
+- Arranque: migrar directorios XDG de `asteroid` a `cincel` si hace falta (`docs/specs/06-etapa4-conexiones-y-cincel.md` §7) → iniciar log a archivo (`cincel-log`) → **registrar las fuentes embebidas Inter y JetBrains Mono** (`cincel_workspace::fonts::register_embedded`, antes de `cincel_workspace::init` y de abrir la ventana; un error se registra y el arranque sigue con los respaldos del sistema) → cargar settings/keymap/tema → crear app GPUI → ventana con tamaño/posición restaurados → `Workspace` → toast de migración si hubo alguna.
 - GPU: intentar Vulkan; si falla, GL; si falla y `CINCEL_ALLOW_SOFTWARE_GPU=1`, software; si no, mensaje y salida con código 2.
 - Recarga en caliente de settings/keymap/tema al cambiar los archivos.
 - Una sola instancia por proyecto no es requisito en v1.
@@ -69,9 +70,9 @@ Detalle y motivos en `docs/etapas/etapa-3.md`, sección "Desviaciones":
 - `review.max_file_size_kb`/`max_lines` se aplican en el host; no pueden
   subir los límites fijos del store (2 MB / 50 000 líneas).
 - ~~Archivos no UTF-8 o binarios no entran en la revisión (no hay buffer).~~
-  Desde la v2 de la revisión (2026-09-28) entran aparte del store, solo por
-  archivo: "archivo binario cambiado por el agente", rechazar = restaurar los
-  bytes de la foto.
+  Desde la v2 de la revisión (2026-09-28) entraban aparte del store, solo
+  por archivo; desde las correcciones tras la prueba de la 1.0 vuelven a
+  quedar fuera, por decisión del autor: se aplican sin revisar.
 - `turn_active` es por archivo (el que el turno en curso está tocando).
 - El diálogo de buffer sucio siempre pregunta antes de un `FsWrite`; al
   arrancar un tool call solo si el permiso no se concedió solo (si no, se
@@ -171,3 +172,38 @@ Detalle, verificación, desviaciones y lista de comprobación manual en
   `Adapters::update_available`/`Runtime::update_available` devuelven una
   versión nueva, con barra de progreso y "Cancelar"; `prune_unused` borra las
   versiones que ya no se usan al arrancar y al detener un agente.
+
+## Etapa 6: rendimiento, deudas de revisión y fuentes embebidas
+
+Detalle, verificación y desviaciones en `docs/etapas/etapa-6.md`. Spec:
+`docs/specs/08-etapa6-cierre-1-0.md`.
+
+- **`bench.rs`** (`crate::bench`, D6, `docs/specs/modulos/perf.md`): los
+  ocho escenarios de `cincel --bench` corren dentro de la ventana real
+  (`Workspace`, `CenterPanel`, `Review`); sin la bandera, los ganchos
+  (`frame_begin`, `frame_probe`) leen un valor global una sola vez y no
+  hacen nada. `FrameProbe` es el elemento de tamaño cero que marca "fin de
+  cuadro" (GPUI 0.3.5 no ofrece un callback tras `present`).
+- **Fuentes embebidas** (`crate::fonts`, D7, `docs/specs/08-etapa6-cierre-
+  1-0.md` §4): Inter (interfaz) y JetBrains Mono (código), diez TTF
+  estáticos registrados una vez al arrancar (`main.rs`, antes de `init`),
+  respaldo del sistema solo para otra familia elegida por el usuario.
+- ~~**Binarios persistidos y deshacer unificado** (`review_binaries.rs`,
+  D13, §5.2): un cambio del agente en un archivo no UTF-8 (imagen, PDF)
+  sigue pendiente aunque se cierre y reabra Cincel; `Alt+Shift+U` deshace
+  el último rechazo, de texto o binario, en el orden real en que ocurrió
+  (`RejectLog`).~~ Retirado en las correcciones tras la prueba de la 1.0
+  (`docs/etapas/etapa-6.md`): los binarios quedan fuera de la revisión.
+- **Repaso final del turno en el ejecutor de fondo** (`review_snapshot.rs`,
+  D12, §5.3): ver "Ciclo de revisión" más arriba, puntos 2 y 3.
+- **Tope de memoria de la foto en Configuración** (`settings_view.rs`,
+  §5.1): fila "Memoria para la foto del proyecto (MB)" en la sección
+  Revisión, clave `review.snapshot_max_total_mb` (`modulos/settings.md`).
+- **Teclas de la barra de búsqueda en el keymap por defecto** (D14, §5.4):
+  `crate::keymap::search_bar_bindings` se eliminó; la precedencia entre el
+  keymap del usuario y las teclas de búsqueda ahora la resuelve el orden de
+  las secciones dentro de `keymap.json` (`modulos/settings.md`), no código.
+- **`gpui-kit/test-support`** (D16, §10.1 de la spec): se sumó a la feature
+  `test-support` de `cincel-workspace` para habilitar clic real por
+  coordenada sobre los botones de la barra de título y de la barra de
+  estado (`click_tests.rs`), sin agregar una variante nueva de `target`.

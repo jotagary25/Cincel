@@ -552,6 +552,10 @@ pub struct EditorView {
     pub(crate) hover_clock: Option<u64>,
     /// `(hunk id, accept half?)` of the pill button under the mouse.
     pub(crate) hover_pill: Option<(u64, bool)>,
+    /// Hunk whose painted pill (anywhere in its bounds) the mouse is over:
+    /// the pill stays up while the mouse is on it, even where it sticks out
+    /// of its hunk's rows (the row above, its top edge).
+    pub(crate) hover_pill_zone: Option<u64>,
     /// Index of the floating bar button under the mouse.
     pub(crate) hover_bar: Option<usize>,
     /// Backgrounds set with [`EditorView::set_row_backgrounds`].
@@ -640,6 +644,11 @@ pub struct EditorView {
     pub(crate) control_cursors: Vec<(Bounds<Pixels>, CursorStyle)>,
     /// The git column of the gutter ([`EditorView::set_git_diff`]).
     pub(crate) git_gutter: crate::git_gutter::GitGutterState,
+    /// Whether the blink task is running: it ends once the cursor settles
+    /// ([`BLINK_IDLE`] without input, or `cursor_blink` off), so an editor at
+    /// rest owns no timer (`docs/rendimiento.md`, M8), and input starts it
+    /// again.
+    blinking: bool,
     _blink_task: Option<Task<()>>,
     _fade_task: Option<Task<()>>,
     _spinner_task: Option<Task<()>>,
@@ -700,6 +709,7 @@ impl EditorView {
             hover_row: None,
             hover_clock: None,
             hover_pill: None,
+            hover_pill_zone: None,
             hover_bar: None,
             row_backgrounds: Vec::new(),
             decorator: None,
@@ -734,7 +744,7 @@ impl EditorView {
             render_frames: VecDeque::new(),
             wrap_epoch: (u64::MAX, u32::MAX, 0, 0),
             blink_visible: true,
-            last_input: Instant::now(),
+            last_input: cx.background_executor().now(),
             autoscroll: false,
             autoscroll_center: false,
             selecting: false,
@@ -751,6 +761,7 @@ impl EditorView {
             bracket_cache: None,
             control_cursors: Vec::new(),
             git_gutter,
+            blinking: false,
             _blink_task: None,
             _fade_task: None,
             _spinner_task: None,
@@ -804,6 +815,9 @@ impl EditorView {
             || settings.line_height != self.settings.line_height;
         self.set_auto_close_pairs(settings.auto_close_pairs);
         self.settings = settings;
+        if self.settings.cursor_blink && !self.blinking {
+            self.start_blinking(cx);
+        }
         if refont {
             self.style = EditorStyle::from_settings(&self.settings, cx);
         }
@@ -2125,8 +2139,12 @@ impl EditorView {
     fn after_input(&mut self, cx: &mut Context<Self>) {
         // The user took over: a jump waiting for the host's answer is void.
         self.pending_jump = None;
-        self.last_input = Instant::now();
+        // The executor's clock (the real one outside the tests).
+        self.last_input = cx.background_executor().now();
         self.blink_visible = true;
+        if self.settings.cursor_blink && !self.blinking {
+            self.start_blinking(cx);
+        }
         self.autoscroll = true;
         // A plain move only brings the cursor into view; a jump to a change
         // asks for the centring again right after this.
@@ -3563,26 +3581,41 @@ enum PointAnchor {
 
 impl EditorView {
     fn start_blinking(&mut self, cx: &mut Context<Self>) {
+        self.blinking = true;
         self._blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(BLINK_INTERVAL).await;
-                let updated = this.update(cx, |this, cx| {
-                    // 02-visual §5: the blink stops 5 s after the last input.
-                    if !this.settings.cursor_blink || this.last_input.elapsed() > BLINK_IDLE {
+                let keep_going = this.update(cx, |this, cx| {
+                    // 02-visual §5: the blink stops 5 s after the last input,
+                    // and so does this task (the next input starts it again).
+                    let idle = cx
+                        .background_executor()
+                        .now()
+                        .saturating_duration_since(this.last_input);
+                    if !this.settings.cursor_blink || idle > BLINK_IDLE {
                         if !this.blink_visible {
                             this.blink_visible = true;
                             cx.notify();
                         }
-                        return;
+                        this.blinking = false;
+                        return false;
                     }
                     this.blink_visible = !this.blink_visible;
                     cx.notify();
+                    true
                 });
-                if updated.is_err() {
+                if !matches!(keep_going, Ok(true)) {
                     break;
                 }
             }
         }));
+    }
+
+    /// Whether the cursor's blink task is running (a test of M8: an editor
+    /// at rest owns no timer).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_blinking(&self) -> bool {
+        self.blinking
     }
 
     /// Opacity of the scrollbar right now (1 while the mouse is moving, fading

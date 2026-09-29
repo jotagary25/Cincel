@@ -1,0 +1,101 @@
+name: CI
+
+# Runs on every push to `main` and on every pull request
+# (docs/specs/08-etapa6-cierre-1-0.md §7.2). Third-party and official
+# GitHub actions are pinned by commit hash (D17), with the human-readable
+# version in a trailing comment.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Less disk on the shared runner, no behavior change (D17/§7.2).
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # A slower, shared CI runner gets 4x the time budget of the reference
+  # machine before a perf-sensitive test is allowed to fail (D15).
+  CINCEL_PERF_BUDGET_FACTOR: "4"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: rustup show (applies rust-toolchain.toml)
+        run: rustup show
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Free disk space (unused preinstalled toolchains)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+      - name: Install build dependencies (same set as packaging/docker/Dockerfile.build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev
+      - name: rustup show (applies rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: cargo clippy (fixed test-feature set, D16/§10.1.4)
+        run: |
+          cargo clippy --workspace --all-targets \
+            --features cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support \
+            -- -D warnings
+
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Free disk space (unused preinstalled toolchains)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+      - name: Install build dependencies (same set as packaging/docker/Dockerfile.build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev
+      - name: rustup show (applies rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the fake-agent / fake-login test helpers
+        run: |
+          cargo build -p cincel-acp --bin cincel-acp-fake-agent -p cincel-connections --bins
+      - name: cargo test (fixed test-feature set, D16/§10.1.4)
+        run: |
+          cargo test --workspace \
+            --features cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support
+
+  deny:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: rustup show (applies rust-toolchain.toml)
+        run: rustup show
+      - name: Install cargo-deny (D17, fixed version, --locked)
+        run: cargo install --locked --version 0.20.2 cargo-deny
+      - run: cargo deny check licenses advisories bans sources
+
+  shellcheck:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck (preinstalled on the ubuntu-22.04 runner image)
+        # §13 lists a top-level `install.sh`; the repo only has
+        # `packaging/install.sh` (already covered by `packaging/*.sh`) — see
+        # the E6-I report for this deviation. `**` needs globstar (bash).
+        run: |
+          shopt -s globstar
+          shellcheck packaging/*.sh packaging/**/*.sh tools/*.sh tools/**/*.sh

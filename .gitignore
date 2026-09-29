@@ -4,3 +4,7 @@
 .DS_Store
 /.cincel/
 /docs/specs/**/*.draft.md
+# Real `.deb` Maintainer address (a GitHub noreply email); never the repo's
+# concern (`docs/specs/08-etapa6-cierre-1-0.md` §11, `packaging/README.md`).
+/packaging/maintainer.txt
+/dist/

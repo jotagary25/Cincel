@@ -549,6 +549,18 @@ const ROWS: &[Row] = &[
         control: number(1., 50_000., 1., 0),
         note: None,
     },
+    Row {
+        section: SettingsSection::Review,
+        key: "review.snapshot_max_total_mb",
+        path: &["review", "snapshot_max_total_mb"],
+        title: "Memoria para la foto del proyecto (MB)",
+        description: "Antes de cada mensaje al agente, Cincel guarda una copia de tus archivos \
+                       para poder mostrarte y deshacer lo que cambie. Este es el máximo que ocupa \
+                       esa copia; pasado el tope, los archivos que no entran solo se pueden \
+                       aceptar enteros.",
+        control: number(16., 4096., 16., 0),
+        note: None,
+    },
 ];
 
 /// Words that make the Connections section match a search.

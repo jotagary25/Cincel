@@ -7,12 +7,15 @@
 //! the shared walker builder) and keeps, per regular file, its size, its
 //! modification time and a copy of its content:
 //!
-//! - valid UTF-8 up to [`SnapshotLimits::max_file_bytes`]:
+//! - text ([`looks_binary`] says no) up to [`SnapshotLimits::max_file_bytes`]:
 //!   [`SnapshotContent::Text`];
-//! - anything else up to that size: [`SnapshotContent::Binary`] (bytes plus
-//!   a hash);
-//! - bigger files, and every file once [`SnapshotLimits::max_total_bytes`]
-//!   of copies is reached: [`SnapshotContent::HashOnly`].
+//! - binary files, whatever their size: [`SnapshotContent::Binary`], size
+//!   and hash only. The review leaves them out (the agent's changes to them
+//!   are applied without review), so the photo only needs to tell them apart
+//!   from the text files;
+//! - bigger text files, and every text file once
+//!   [`SnapshotLimits::max_total_bytes`] of copies is reached:
+//!   [`SnapshotContent::HashOnly`].
 //!
 //! The walk and the reads run on the walker's own thread pool; the call
 //! blocks until everything is read, so run it on a background executor.
@@ -20,7 +23,9 @@
 //! against the disk, cheap metadata first and the content only when the
 //! metadata differs or is too recent to be trusted ([`RACY_WINDOW`], the
 //! "racy git" problem: a write within the same timestamp tick as the photo
-//! keeps size and mtime).
+//! keeps size and mtime). It blocks too: the review runs it on the
+//! background executor through an `Arc<ProjectSnapshot>` (the type is
+//! `Send + Sync`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,6 +48,30 @@ pub const RACY_WINDOW: Duration = Duration::from_secs(2);
 /// Files bigger than this are not even hashed: their changes are detected by
 /// size and modification time only.
 const MAX_HASHED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How many leading bytes [`looks_binary`] searches for a NUL (the same
+/// sniff as the review store's).
+pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+/// Whether `bytes` are a binary file for the review: not valid UTF-8, or a
+/// NUL in the first [`BINARY_SNIFF_BYTES`]. `truncated` says `bytes` are only
+/// the start of the file (a UTF-8 sequence cut at the end is then fine).
+pub fn looks_binary_prefix(bytes: &[u8], truncated: bool) -> bool {
+    if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
+        return true;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(_) => false,
+        // An incomplete sequence at the very end of a truncated read.
+        Err(error) => !(truncated && error.error_len().is_none()),
+    }
+}
+
+/// Whether the whole content `bytes` is a binary file for the review
+/// ([`looks_binary_prefix`] over all of it).
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    looks_binary_prefix(bytes, false)
+}
 
 /// How much of the project the photo copies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,9 +127,10 @@ impl SnapshotSource {
 pub enum SnapshotContent {
     /// Valid UTF-8, exactly as on disk (BOM and line endings included).
     Text(Arc<str>),
-    /// Not UTF-8: the raw bytes, so a reject can put them back.
-    Binary(Arc<[u8]>),
-    /// Over a limit: only size, time and (up to 64 MB) hash.
+    /// A binary file ([`looks_binary`]): only size, time and (up to 64 MB)
+    /// hash. The review leaves binary files out.
+    Binary,
+    /// A text file over a limit: only size, time and (up to 64 MB) hash.
     HashOnly,
 }
 
@@ -111,7 +141,8 @@ pub struct SnapshotEntry {
     pub size: u64,
     /// Modification time, when the file system reports one.
     pub modified: Option<SystemTime>,
-    /// SHA-256 of the content, for binary and hash-only entries.
+    /// SHA-256 of the content, for binary and hash-only entries (`None` over
+    /// 64 MB).
     pub hash: Option<ContentHash>,
     /// The copy, if any.
     pub content: SnapshotContent,
@@ -126,30 +157,20 @@ impl SnapshotEntry {
         }
     }
 
-    /// The bytes copy (text or binary).
-    pub fn bytes(&self) -> Option<&[u8]> {
-        match &self.content {
-            SnapshotContent::Text(text) => Some(text.as_bytes()),
-            SnapshotContent::Binary(bytes) => Some(bytes),
-            SnapshotContent::HashOnly => None,
-        }
-    }
-
-    /// Whether the file was not UTF-8.
+    /// Whether the file was binary ([`looks_binary`]).
     pub fn is_binary(&self) -> bool {
-        matches!(self.content, SnapshotContent::Binary(_))
+        matches!(self.content, SnapshotContent::Binary)
     }
 
-    /// Whether `bytes` are the content this entry recorded. A hash-only
-    /// entry without a hash (a huge file) cannot tell and answers by size.
+    /// Whether `bytes` are the content this entry recorded. An entry without
+    /// a copy nor a hash (a huge file) cannot tell and answers by size.
     pub fn same_bytes(&self, bytes: &[u8]) -> bool {
         if bytes.len() as u64 != self.size {
             return false;
         }
         match &self.content {
             SnapshotContent::Text(text) => text.as_bytes() == bytes,
-            SnapshotContent::Binary(copy) => **copy == *bytes,
-            SnapshotContent::HashOnly => {
+            SnapshotContent::Binary | SnapshotContent::HashOnly => {
                 self.hash.is_none_or(|hash| hash == ContentHash::of(bytes))
             }
         }
@@ -158,8 +179,7 @@ impl SnapshotEntry {
     fn copied_bytes(&self) -> u64 {
         match &self.content {
             SnapshotContent::Text(text) => text.len() as u64,
-            SnapshotContent::Binary(bytes) => bytes.len() as u64,
-            SnapshotContent::HashOnly => 0,
+            SnapshotContent::Binary | SnapshotContent::HashOnly => 0,
         }
     }
 }
@@ -263,7 +283,7 @@ impl ProjectSnapshot {
         self.entries.is_empty()
     }
 
-    /// Bytes held as copies (text and binary).
+    /// Bytes held as copies (text only).
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
@@ -425,7 +445,11 @@ impl ProjectSnapshot {
         if same_meta && !racy {
             return false;
         }
-        if matches!(entry.content, SnapshotContent::HashOnly) && entry.hash.is_none() {
+        if matches!(
+            entry.content,
+            SnapshotContent::HashOnly | SnapshotContent::Binary
+        ) && entry.hash.is_none()
+        {
             // Too big to hash: the metadata is all there is.
             return !same_meta;
         }
@@ -478,18 +502,23 @@ fn read_entry(
     let modified = metadata.modified().ok();
     let size = metadata.len();
     if size > limits.max_file_bytes {
-        let hash = if size <= MAX_HASHED_BYTES {
-            std::fs::read(path)
-                .ok()
-                .map(|bytes| ContentHash::of(&bytes))
+        let (hash, binary) = if size <= MAX_HASHED_BYTES {
+            match std::fs::read(path) {
+                Ok(bytes) => (Some(ContentHash::of(&bytes)), looks_binary(&bytes)),
+                Err(_) => (None, sniff_binary(path)),
+            }
         } else {
-            None
+            (None, sniff_binary(path))
         };
         return Some(SnapshotEntry {
             size,
             modified,
             hash,
-            content: SnapshotContent::HashOnly,
+            content: if binary {
+                SnapshotContent::Binary
+            } else {
+                SnapshotContent::HashOnly
+            },
         });
     }
     let bytes = match std::fs::read(path) {
@@ -500,6 +529,15 @@ fn read_entry(
         }
     };
     let size = bytes.len() as u64;
+    if looks_binary(&bytes) {
+        // Out of the review: no copy, nothing charged to the budget.
+        return Some(SnapshotEntry {
+            size,
+            modified,
+            hash: Some(ContentHash::of(&bytes)),
+            content: SnapshotContent::Binary,
+        });
+    }
     let previous = total.fetch_add(size, Ordering::Relaxed);
     if previous.saturating_add(size) > limits.max_total_bytes {
         total.fetch_sub(size, Ordering::Relaxed);
@@ -511,23 +549,33 @@ fn read_entry(
             content: SnapshotContent::HashOnly,
         });
     }
-    Some(match String::from_utf8(bytes) {
-        Ok(text) => SnapshotEntry {
-            size,
-            modified,
-            hash: None,
-            content: SnapshotContent::Text(Arc::from(text)),
-        },
-        Err(error) => {
-            let bytes = error.into_bytes();
-            SnapshotEntry {
-                size,
-                modified,
-                hash: Some(ContentHash::of(&bytes)),
-                content: SnapshotContent::Binary(Arc::from(bytes)),
-            }
-        }
+    // `looks_binary` said it is valid UTF-8.
+    let text = String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
+    Some(SnapshotEntry {
+        size,
+        modified,
+        hash: None,
+        content: SnapshotContent::Text(Arc::from(text)),
     })
+}
+
+/// [`looks_binary_prefix`] over the first [`BINARY_SNIFF_BYTES`] of a file
+/// too big to read whole (unreadable: text, so it stays in the review).
+fn sniff_binary(path: &Path) -> bool {
+    use std::io::Read as _;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::with_capacity(BINARY_SNIFF_BYTES);
+    if file
+        .take(BINARY_SNIFF_BYTES as u64)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return false;
+    }
+    looks_binary_prefix(&head, true)
 }
 
 #[cfg(test)]
@@ -661,25 +709,56 @@ mod tests {
     }
 
     #[test]
-    fn binaries_keep_bytes_and_hash() {
+    fn binaries_keep_only_size_and_hash() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let bytes = [0xff_u8, 0xfe, 0x00, 0x41, 0x80];
         std::fs::write(root.join("imagen.bin"), bytes).unwrap();
-        // Valid UTF-8 with a NUL is text for the photo (the store decides
-        // it is binary for the review).
+        // Valid UTF-8 with a NUL is binary too (the review store's sniff).
         std::fs::write(root.join("nul.txt"), "a\0b").unwrap();
+        std::fs::write(root.join("texto.txt"), "ñandú\n").unwrap();
+        // A big binary is told apart by its first bytes.
+        let mut big = vec![0x89_u8, b'P', b'N', b'G'];
+        big.extend(std::iter::repeat_n(b'a', 4000));
+        std::fs::write(root.join("grande.png"), &big).unwrap();
 
-        let snapshot = photo(root, SnapshotLimits::default());
+        let limits = SnapshotLimits {
+            max_file_bytes: 1000,
+            max_total_bytes: 1_000_000,
+        };
+        let snapshot = photo(root, limits);
         let binary = snapshot.entry(&root.join("imagen.bin")).unwrap();
         assert!(binary.is_binary());
-        assert_eq!(binary.bytes(), Some(&bytes[..]));
+        assert_eq!(binary.content, SnapshotContent::Binary);
         assert_eq!(binary.hash, Some(ContentHash::of(&bytes)));
+        assert_eq!(binary.size, 5);
         assert!(binary.text().is_none());
         assert!(binary.same_bytes(&bytes));
         assert!(!binary.same_bytes(&[0xff, 0xfe, 0x00, 0x41, 0x81]));
-        let nul = snapshot.entry(&root.join("nul.txt")).unwrap();
-        assert_eq!(nul.text().map(|text| &**text), Some("a\0b"));
+        assert!(snapshot.entry(&root.join("nul.txt")).unwrap().is_binary());
+        assert!(
+            snapshot
+                .entry(&root.join("grande.png"))
+                .unwrap()
+                .is_binary()
+        );
+        // Only the text file is copied.
+        assert_eq!(snapshot.copied_bytes(), "ñandú\n".len() as u64);
+    }
+
+    #[test]
+    fn binary_sniff() {
+        assert!(looks_binary(&[0xff, 0xfe]));
+        assert!(looks_binary(b"a\0b"));
+        assert!(!looks_binary("ñandú".as_bytes()));
+        // A multi-byte sequence cut by a truncated read is still text.
+        let cut = &"ñ".as_bytes()[..1];
+        assert!(looks_binary(cut));
+        assert!(!looks_binary_prefix(cut, true));
+        // A NUL past the sniffed prefix does not count.
+        let mut late = vec![b'a'; BINARY_SNIFF_BYTES];
+        late.push(0);
+        assert!(!looks_binary(&late));
     }
 
     #[test]
@@ -767,6 +846,25 @@ mod tests {
                 .map(|text| &**text),
             Some("del buffer")
         );
+    }
+
+    /// The end-of-turn sweep runs `changes()` on the background executor
+    /// through an `Arc<ProjectSnapshot>` (`08-etapa6-cierre-1-0.md` D12).
+    #[test]
+    fn the_photo_can_be_shared_with_a_background_thread() {
+        fn shareable<T: Send + Sync + 'static>() {}
+        shareable::<ProjectSnapshot>();
+        shareable::<SnapshotChange>();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "uno\n").unwrap();
+        let snapshot = Arc::new(photo(&root, SnapshotLimits::default()));
+        std::fs::write(root.join("a.txt"), "uno y dos\n").unwrap();
+        let shared = snapshot.clone();
+        let changes = std::thread::spawn(move || shared.changes()).join().unwrap();
+        assert_eq!(changes, vec![SnapshotChange::Modified(root.join("a.txt"))]);
+        assert_eq!(changes, snapshot.changes());
     }
 
     /// The budget of the spec: 5 000 files / 50 MB in well under a second

@@ -1,0 +1,17 @@
+[package]
+name = "cincel-watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "File system watching with batches and no wakeups at rest"
+
+[dependencies]
+notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

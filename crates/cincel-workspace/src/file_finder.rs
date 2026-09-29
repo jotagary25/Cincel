@@ -151,33 +151,38 @@ fn fuzzy_matches(candidates: &[Arc<str>], query: &str, limit: usize) -> Vec<Find
     }
     let haystacks: Vec<&str> = candidates.iter().map(Arc::as_ref).collect();
     let mut matcher = frizbee::Matcher::new(query, &frizbee::Config::default());
-    let matches = matcher.match_list_indices(&haystacks);
+    let mut matches = matcher.match_list_indices(&haystacks);
 
-    let mut scored: Vec<(u16, Arc<str>, Vec<usize>)> = matches
-        .into_iter()
-        .map(|found| {
-            let candidate = candidates[found.index as usize].clone();
-            let positions = char_indices_to_byte_offsets(&candidate, &found.indices);
-            (found.score, candidate, positions)
-        })
-        .collect();
     // Score descending; ties broken by path length (chars) then plain
     // alphabetical order (§3.1). `match_list_indices` does not sort by
     // `radix_sort_matches` (that helper only takes `Vec<Match>`, without
     // indices), so the tie-break is applied here instead.
-    scored.sort_by(|(score_a, path_a, _), (score_b, path_b, _)| {
-        score_b
-            .cmp(score_a)
+    //
+    // Sorted and truncated to `limit` *before* `char_indices_to_byte_offsets`
+    // runs on anything: a short query against a huge corpus can match nearly
+    // every candidate (§5.5's own perf test caught this), and converting
+    // every one of those matches' positions only to throw all but `limit` of
+    // them away is most of that cost for nothing (`docs/specs/08-etapa6-
+    // cierre-1-0.md` §5.5).
+    matches.sort_by(|a, b| {
+        let path_a = &candidates[a.index as usize];
+        let path_b = &candidates[b.index as usize];
+        b.score
+            .cmp(&a.score)
             .then_with(|| path_a.chars().count().cmp(&path_b.chars().count()))
             .then_with(|| path_a.cmp(path_b))
     });
 
-    scored
+    matches
         .into_iter()
         .take(limit)
-        .map(|(_, relative, positions)| FinderMatch {
-            relative,
-            positions,
+        .map(|found| {
+            let candidate = candidates[found.index as usize].clone();
+            let positions = char_indices_to_byte_offsets(&candidate, &found.indices);
+            FinderMatch {
+                relative: candidate,
+                positions,
+            }
         })
         .collect()
 }
@@ -299,6 +304,12 @@ impl FileFinder {
         &self.results
     }
 
+    /// Whether a background filter is still running, so [`Self::results`]
+    /// may not match the query yet (`cincel --bench finder`).
+    pub fn is_filtering(&self) -> bool {
+        self.filter_task.is_some()
+    }
+
     /// The selected row, for the tests.
     pub fn selected(&self) -> usize {
         self.selected
@@ -307,6 +318,17 @@ impl FileFinder {
     /// The query field, for the tests.
     pub fn query(&self) -> &Entity<InputState> {
         &self.query
+    }
+
+    /// Seeds [`Self::candidates`] directly and re-filters, without a real
+    /// worktree behind it. Used by `file_finder_perf_tests.rs`
+    /// (`docs/specs/08-etapa6-cierre-1-0.md` §5.5) to exercise the
+    /// background-filtering path (`BACKGROUND_THRESHOLD`) at a corpus size
+    /// (50 000 paths) that would be needlessly slow and disk-heavy to build
+    /// through an actual project directory.
+    pub fn set_candidates_for_test(&mut self, candidates: Vec<Arc<str>>, cx: &mut Context<Self>) {
+        self.candidates = Arc::new(candidates);
+        self.recompute(cx);
     }
 
     /// Opens the panel: fresh candidates, the previous query preselected

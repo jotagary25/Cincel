@@ -12,9 +12,9 @@
 //! either kind; saving, autosave, the dirty dot, the layout file, the review
 //! and the Markdown preview only ever walk the file tabs.
 //!
-//! A file that is not valid UTF-8 still opens, in an editor over a read-only
-//! buffer built with [`cincel_text::Buffer::from_bytes_lossy`]
-//! (`docs/specs/modulos/workspace.md`: "solo lectura").
+//! A file that is not valid UTF-8 (a binary) still opens a tab, read only,
+//! that shows [`BINARY_NOTICE`] instead of its bytes; it is out of the store
+//! and out of the review (`docs/specs/modulos/workspace.md`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -737,17 +737,14 @@ impl CenterPanel {
                 read_only: false,
                 deleted_review: false,
             }),
-            // A file that is not UTF-8 still opens, read only, out of the
-            // store (`docs/specs/modulos/workspace.md`).
+            // A file that is not UTF-8 is a binary: its tab only says so,
+            // read only, out of the store and out of the review
+            // (`docs/specs/modulos/workspace.md`).
             Err(OpenError::NotUtf8(_)) => {
-                let buffer = read_only_buffer(path, cx)?;
-                crate::toast::warn("Archivo abierto en solo lectura: contenido no UTF-8", cx);
-                let (language, relative) = project.read_with(cx, |project, _| {
-                    (project.language_for(path), project.relative(path))
-                });
+                let relative = project.read_with(cx, |project, _| project.relative(path));
                 Some(LoadedFile {
-                    buffer,
-                    language,
+                    buffer: binary_notice_buffer(),
+                    language: None,
                     relative,
                     read_only: true,
                     deleted_review: false,
@@ -844,7 +841,9 @@ impl CenterPanel {
             deleted_review,
         } = loaded;
         let content = TabContent::build(&buffer, language.clone(), project, position, window, cx);
-        if deleted_review {
+        // The view of a deletion and the notice of a binary refuse edits in
+        // the editor too, not only in their buffer.
+        if read_only {
             content
                 .editor()
                 .update(cx, |editor, cx| editor.set_read_only(true, cx));
@@ -2180,22 +2179,18 @@ fn dialog_button(
         .child(label)
 }
 
-/// Opens a file that is not valid UTF-8 as a read-only buffer.
+/// What the tab of a binary file shows instead of its bytes.
+pub const BINARY_NOTICE: &str = "Archivo binario: no se muestra";
+
+/// The read-only buffer of the tab of a file that is not valid UTF-8: only
+/// [`BINARY_NOTICE`], never the bytes (they would be unreadable).
 ///
 /// It is deliberately *not* registered in the store: nothing may ever write
-/// those bytes back, and the store's job is the files Cincel can save.
-fn read_only_buffer(path: &Path, cx: &mut App) -> Option<BufferHandle> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "no se pudo leer el archivo");
-            crate::toast::error(format!("No se pudo leer «{}»", path.display()), cx);
-            return None;
-        }
-    };
-    let (mut buffer, _had_bom) = Buffer::from_bytes_lossy(&bytes);
+/// it to the file, and the store's job is the files Cincel can save.
+fn binary_notice_buffer() -> BufferHandle {
+    let (mut buffer, _had_bom) = Buffer::from_bytes_lossy(BINARY_NOTICE.as_bytes());
     buffer.set_read_only(true);
-    Some(shared(buffer))
+    shared(buffer)
 }
 
 /// Turns an [`OpenError`] into a toast.

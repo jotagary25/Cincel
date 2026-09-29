@@ -285,6 +285,8 @@ impl FilesPanel {
 
     /// Rebuilds the tree items from the worktree.
     pub fn rebuild(&mut self, cx: &mut Context<Self>) {
+        // `CINCEL_TRACE_TIMINGS=1` (`crate::bench::TIMING_TARGET`).
+        let _tree_rebuild = tracing::info_span!(target: "cincel::timing", "tree_rebuild").entered();
         self.ghosts = self.ghost_paths(cx);
         let items = match &self.project {
             Some(project) => {

@@ -12,7 +12,7 @@ Público objetivo: el propio autor y desarrolladores con perfil similar. Platafo
 
 ## 2. Principios
 
-1. **Liviano y rápido.** Arranque bajo 400 ms en frío; binario entre 20 y 60 MB; redibujar solo cuando algo cambia.
+1. **Liviano y rápido.** Arranque bajo 400 ms en frío; binario de hasta 80 MB (meta original 20–60 MB, ajustada el 2026-09-29 por decisión del autor: con todas las optimizaciones de tamaño que no cuestan velocidad pesa 75 MB, de los que 41 MB son código propio y de GPUI y 13 MB las 18 gramáticas de sintaxis; ver `docs/rendimiento.md`); redibujar solo cuando algo cambia.
 2. **Aspecto y sensación de Zed.** Densidad compacta, pocos adornos, tipografía cuidada.
 3. **El editor es el lugar de la verdad.** El chat narra; el editor muestra.
 4. **El agente escribe primero, el usuario decide después.** Los cambios llegan al disco de inmediato para que el agente pueda compilar y probar; cada segmento queda pendiente de aprobación y es reversible de forma quirúrgica.
@@ -95,6 +95,8 @@ Los **modos propios del agente** (por ejemplo "Manual" / "Auto" / "Plan" de Clau
 | Memoria en reposo con proyecto mediano | < 300 MB |
 | Uso de CPU en reposo | 0% (sin redibujo continuo) |
 | Sin GPU Vulkan | arranca con OpenGL; sin GPU alguna, arranca con renderizado por software si se pide con `CINCEL_ALLOW_SOFTWARE_GPU=1` |
+
+**Cómo se mide (Etapa 6, 2026-09-29):** cada meta tiene su forma de medición en `docs/specs/08-etapa6-cierre-1-0.md` §3.1 (M1 a M11) y se mide con `cincel --bench` y con el banco `cincel-perf` en un escritorio Wayland sin pantalla, comparando con Zed y Antigravity. Resultados y método en `docs/rendimiento.md`: las once metas se cumplen con el binario del paquete 1.0.0 (arranque 303 ms, 5 000 líneas en 32 ms, tecla a pantalla 5,9 ms, 138 MB y 0,00 % de CPU en reposo). El tamaño del binario tiene meta propia en §2 (≤ 80 MB).
 
 ## 6. Compatibilidad con agentes (v1)
 

@@ -27,8 +27,8 @@
 //!    `agentFileChangeReport`, every watcher batch and the final sweep, the
 //!    file is re-read from disk into its buffer (minimal edits) and reported
 //!    with `file_written` / `file_deleted` / `file_created`. The `diff` the
-//!    agent sends is never used. Files that are not UTF-8 are reviewed as a
-//!    whole next to the store ("archivo binario cambiado por el agente").
+//!    agent sends is never used. Binary files are out of the review: what
+//!    the agent does to them is applied without asking (`review_snapshot.rs`).
 //! 3. **Buffer events.** Every buffer in review is subscribed to; its events
 //!    are queued by the subscription and drained on the main thread, right
 //!    after each operation of this module (so the snapshot is the one right
@@ -44,6 +44,8 @@
 //! 7. **Persistence.** `~/.local/share/cincel/review/<hash>/`, saved one
 //!    second after the last decision and on quit, loaded when the project
 //!    opens.
+//! 8. **Undo.** `Alt+Shift+U` takes back the last reject (the store's own
+//!    stack).
 //!
 //! The rest of the workspace reads a [`ReviewSummary`] shared through an
 //! `Rc<RefCell<…>>` (the tree, the tabs, the status bar and the panel paint
@@ -76,9 +78,14 @@ use parking_lot::Mutex;
 use crate::center::{CenterEvent, CenterPanel};
 use crate::project::{FilesChanged, HostWrote, Project, ProjectEvent};
 
-/// The photo of the project and the binary files (`review_snapshot.rs`).
+/// The photo of the project and the end-of-turn sweep
+/// (`review_snapshot.rs`).
 #[path = "review_snapshot.rs"]
 mod photo;
+
+pub use photo::{
+    SWEEP_NOTICE, SWEEP_NOTICE_AFTER, SWEEP_SLICE, SweepStats, WATCH_SLICE, WatchStats,
+};
 
 /// Debounce of the background recompute (`03-arquitectura.md` §4.3).
 pub const RECOMPUTE_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -109,19 +116,14 @@ pub struct FileSummary {
     pub removed: u32,
     /// Modified, created or deleted.
     pub state: FileState,
-    /// Only whole-file decisions (too large, binary or deleted).
+    /// Only whole-file decisions (too large, without a copy or deleted).
     pub file_level: bool,
     /// Pending hunks (0 for file-level files).
     pub hunks: usize,
-    /// A file that is not UTF-8 ("archivo binario cambiado por el agente"):
-    /// only whole-file decisions, no diff.
-    pub binary: bool,
     /// A file the photo kept no copy of: it can only be accepted.
     pub no_copy: bool,
 }
 
-/// What the tree says next to a binary file the agent changed.
-pub const BINARY_LABEL: &str = "archivo binario cambiado por el agente";
 /// What the tree says next to a file the agent changed whose previous
 /// content Cincel did not keep (over `review.max_file_size_kb` or
 /// `review.snapshot_max_total_mb`).
@@ -132,21 +134,17 @@ pub const DELETED_TOOLTIP: &str = "Borrado por el agente · pendiente";
 /// previous content as read-only phantom rows. The store numbers its hunks
 /// from 1 upwards, so this one never names a real hunk.
 pub const DELETED_FILE_HUNK: u64 = u64::MAX;
-/// The only phantom row of a deleted binary file (there is no text to show).
-pub const DELETED_BINARY_LINE: &str = "(archivo binario borrado por el agente: sin vista previa)";
 /// The only phantom row of a deleted file the photo kept no copy of.
 pub const DELETED_NO_COPY_LINE: &str = "(borrado por el agente: Cincel no guardó una copia previa)";
+/// Files a build before the 1.0 fixes saved for the binary files, next to
+/// the store's state; removed when the project opens (binary files are out
+/// of the review now).
+const LEGACY_BINARY_STATE: [&str; 2] = ["binaries.json", "binaries"];
 
-/// The tree's label for a file reviewed outside the store (binary or
-/// without a copy), instead of `+N −M`.
+/// The tree's label for a file reviewed outside the store (without a copy),
+/// instead of `+N −M`.
 pub fn outside_label(file: &FileSummary) -> Option<&'static str> {
-    if file.no_copy {
-        Some(NO_COPY_LABEL)
-    } else if file.binary {
-        Some(BINARY_LABEL)
-    } else {
-        None
-    }
+    file.no_copy.then_some(NO_COPY_LABEL)
 }
 
 /// Everything the painting code reads about the review.
@@ -165,6 +163,9 @@ pub struct ReviewSummary {
     pub total: (u32, u32),
     /// An agent turn is running.
     pub turn_active: bool,
+    /// The end-of-turn sweep has been running for over
+    /// [`SWEEP_NOTICE_AFTER`]: the status bar says [`SWEEP_NOTICE`].
+    pub sweeping: bool,
     /// The review panel is open.
     pub panel_open: bool,
     /// The file the "cambios sin guardar" dialog asks about.
@@ -279,8 +280,8 @@ pub struct PanelRow {
     pub deleted: bool,
     /// Reviewable only as a whole file (too large for inline hunks).
     pub too_large: bool,
-    /// Not UTF-8: reviewable only as a whole file, without a diff.
-    pub binary: bool,
+    /// The photo kept no copy of it: it can only be accepted.
+    pub no_copy: bool,
 }
 
 /// A buffer the review listens to.
@@ -381,11 +382,18 @@ pub struct Review {
     limits: Limits,
     /// The photo of the project of the running turn.
     photo: Option<photo::PhotoState>,
-    /// Files that are not UTF-8 the agent changed, created or deleted.
-    binaries: BTreeMap<PathBuf, photo::BinaryChange>,
+    /// Text files the agent changed or deleted that the photo kept no copy
+    /// of (accept only).
+    uncopied: BTreeMap<PathBuf, photo::UncopiedChange>,
     /// Takes the photo on the background executor even for an inert project
     /// (a test of the prompt waiting for it).
     photo_in_background: bool,
+    /// The sweep has run long enough for the status bar to say so.
+    sweep_notice: bool,
+    /// How the last end-of-turn sweep went.
+    last_sweep: Option<SweepStats>,
+    /// The watcher's paths of the running turn still to adopt, in slices.
+    watch: photo::WatchQueue,
     project_subscription: Option<Subscription>,
     /// [`FilesChanged`] and [`HostWrote`] of the open project.
     photo_subscriptions: Vec<Subscription>,
@@ -450,8 +458,11 @@ impl Review {
             persist_scheduled: false,
             limits: Limits::from_settings(&settings),
             photo: None,
-            binaries: BTreeMap::new(),
+            uncopied: BTreeMap::new(),
             photo_in_background: false,
+            sweep_notice: false,
+            last_sweep: None,
+            watch: photo::WatchQueue::default(),
             project_subscription: None,
             photo_subscriptions: Vec::new(),
             _subscriptions: vec![subscription],
@@ -518,7 +529,9 @@ impl Review {
         self.reject_turn_prompt = None;
         self.recompute_dirty.clear();
         self.photo = None;
-        self.binaries.clear();
+        self.uncopied.clear();
+        self.sweep_notice = false;
+        self.watch.clear();
         self.project_subscription = None;
         self.photo_subscriptions.clear();
         self.project = project.clone();
@@ -535,8 +548,8 @@ impl Review {
                 cx.subscribe(&project, |this, _, event: &FilesChanged, cx| {
                     this.on_files_changed(&event.0, cx);
                 }),
-                cx.subscribe(&project, |this, _, event: &HostWrote, _cx| {
-                    this.on_host_wrote(&event.0);
+                cx.subscribe(&project, |this, _, event: &HostWrote, cx| {
+                    this.on_host_wrote(&event.0, cx);
                 }),
             ];
             self.load(cx);
@@ -589,7 +602,7 @@ impl Review {
             Ok(report) => report,
             Err(error) => {
                 tracing::warn!(%error, dir = %dir.display(), "no se pudo leer la revisión guardada");
-                return;
+                cincel_review::LoadReport::default()
             }
         };
         for (path, reason) in &report.dropped {
@@ -607,6 +620,7 @@ impl Review {
                 self.store.file_written(path, &snapshot, EditSource::Load);
             }
         }
+        remove_legacy_binary_state(&dir);
         let max_turn = self.store.files().map(|file| file.turn_id.0).max();
         if let Some(max_turn) = max_turn {
             self.latest_turn = Some(TurnId(max_turn));
@@ -625,17 +639,14 @@ impl Review {
     ///
     /// It also starts the photo of the project the turn is reviewed against
     /// (`review_snapshot.rs`); the prompt must wait for
-    /// [`Self::photo_waiter`] before it goes out.
+    /// [`Self::turn_waiter`] before it goes out. When the previous turn is
+    /// still being swept (in the background), the new turn only starts once
+    /// that is over, and the prompt waits for both.
     pub fn begin_prompt(&mut self, cx: &mut Context<Self>) -> (u64, Option<String>) {
         self.flush(None, cx);
-        if self.active_turn.is_some() {
-            self.sweep_photo(cx);
-        }
-        self.photo = None;
-        if let Some(turn) = self.active_turn.take() {
-            self.store.end_turn(turn);
-            self.reportable.push(turn);
-        }
+        let turn = TurnId(self.next_turn);
+        self.next_turn += 1;
+        let ended = self.active_turn.is_none() || self.finish_turn(Some(turn), cx);
         let mut notes = Vec::new();
         for turn in std::mem::take(&mut self.reportable) {
             if let Some(note) = self.store.report_for_agent(turn) {
@@ -643,17 +654,23 @@ impl Review {
             }
             self.store.forget_turn(turn);
         }
+        if ended {
+            self.open_turn(turn, Vec::new(), cx);
+        }
+        self.refresh(None, cx);
+        (turn.0, (!notes.is_empty()).then(|| notes.join("\n")))
+    }
+
+    /// Starts `turn` and its photo; `waiters` are told when the photo is
+    /// ready.
+    fn open_turn(&mut self, turn: TurnId, waiters: Vec<photo::Waiter>, cx: &mut Context<Self>) {
         if self.pending_count() == 0 {
             self.cycle.clear();
         }
-        let turn = TurnId(self.next_turn);
-        self.next_turn += 1;
         self.store.begin_turn(turn);
         self.active_turn = Some(turn);
         self.latest_turn = Some(turn);
-        self.start_photo(turn, cx);
-        self.refresh(None, cx);
-        (turn.0, (!notes.is_empty()).then(|| notes.join("\n")))
+        self.start_photo(turn, waiters, cx);
     }
 
     /// The agent's turn ended (`AgentEvent::TurnEnded` with any stop
@@ -662,13 +679,22 @@ impl Review {
     ///
     /// First the whole photo is compared with the disk and whatever the
     /// watcher did not report joins the review; only then is the photo
-    /// dropped.
+    /// dropped and the turn closed. The comparison runs on the background
+    /// executor: until it is over the turn stays active (its decisions stay
+    /// disabled) and a new prompt waits (`review_snapshot.rs`).
     pub fn end_turn(&mut self, cx: &mut Context<Self>) {
         self.flush(None, cx);
         if self.active_turn.is_some() {
-            self.sweep_photo(cx);
+            self.finish_turn(None, cx);
         }
-        self.photo = None;
+    }
+
+    /// Closes the running turn once its sweep is over: drops the photo and
+    /// keeps the turn for the next prompt's report.
+    fn close_turn(&mut self, cx: &mut Context<Self>) {
+        photo::release(self.photo.take(), cx);
+        self.watch.clear();
+        self.sweep_notice = false;
         let Some(turn) = self.active_turn.take() else {
             return;
         };
@@ -682,9 +708,18 @@ impl Review {
     }
 
     /// The agent went away: its turn is over and nobody will read the answers
-    /// held by the dirty-buffer dialog.
+    /// held by the dirty-buffer dialog. A prompt waiting for a sweep will
+    /// not go out: the turn it would have started is dropped (the sweep
+    /// itself goes on and closes the turn).
     pub fn agent_gone(&mut self, cx: &mut Context<Self>) {
         self.prompts.clear();
+        if let Some(photo::PhotoState::Sweeping {
+            chained, waiters, ..
+        }) = &mut self.photo
+        {
+            *chained = None;
+            waiters.clear();
+        }
         self.end_turn(cx);
         self.refresh(None, cx);
     }
@@ -1318,7 +1353,7 @@ impl Review {
             Ok(()) => {
                 // `HostWrote` arrives after this update; the photo has to
                 // know now (a capture may follow right away).
-                self.on_host_wrote(path);
+                self.on_host_wrote(path, cx);
                 if let Some(center) = self.center.upgrade() {
                     center.update(cx, |center, cx| center.note_saved(path, cx));
                 }
@@ -1542,8 +1577,11 @@ impl Review {
     /// Accepts every pending change of `path`.
     pub fn accept_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.flush(None, cx);
-        if self.binaries.contains_key(path) {
-            self.accept_binary(path, cx);
+        if let Some(change) = self.uncopied.get(path) {
+            if Some(change.turn) != self.active_turn {
+                self.uncopied.remove(path);
+                self.decided(path, cx);
+            }
             return;
         }
         if self.store.turn_active(path) {
@@ -1558,8 +1596,8 @@ impl Review {
     /// Rejects every pending change of `path`.
     pub fn reject_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.flush(None, cx);
-        if self.binaries.contains_key(path) {
-            self.reject_binary(path, cx);
+        if self.uncopied.contains_key(path) {
+            self.warn_uncopied(path, cx);
             return;
         }
         if self.store.turn_active(path) {
@@ -1575,6 +1613,38 @@ impl Review {
         self.decided(path, cx);
     }
 
+    /// A reject of a text file the photo kept no copy of: nothing to put
+    /// back, it can only be accepted.
+    fn warn_uncopied(&self, path: &Path, cx: &mut Context<Self>) {
+        crate::toast::warn(
+            format!(
+                "No hay copia previa de «{}»: solo se puede aceptar",
+                file_name(path)
+            ),
+            cx,
+        );
+    }
+
+    /// Accepts every uncopied change of `turn` (every turn with `None`).
+    fn accept_uncopied(&mut self, turn: Option<TurnId>) {
+        self.uncopied
+            .retain(|_, change| turn.is_some_and(|turn| change.turn != turn));
+    }
+
+    /// A reject of the uncopied changes of `turn` (every turn with `None`):
+    /// they stay pending, with a notice each.
+    fn reject_uncopied(&self, turn: Option<TurnId>, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = self
+            .uncopied
+            .iter()
+            .filter(|(_, change)| turn.is_none_or(|turn| change.turn == turn))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in paths {
+            self.warn_uncopied(&path, cx);
+        }
+    }
+
     /// The turn `accept_turn`/`reject_turn` act on: the last one that left
     /// something pending.
     fn target_turn(&self) -> Option<TurnId> {
@@ -1583,7 +1653,7 @@ impl Review {
                 .store
                 .files()
                 .any(|file| file.turn_id == turn && file.has_pending_work())
-                || self.binaries.values().any(|change| change.turn == turn))
+                || self.uncopied.values().any(|change| change.turn == turn))
         {
             return Some(turn);
         }
@@ -1591,7 +1661,7 @@ impl Review {
             .files()
             .filter(|file| file.has_pending_work())
             .map(|file| file.turn_id)
-            .chain(self.binaries.values().map(|change| change.turn))
+            .chain(self.uncopied.values().map(|change| change.turn))
             .max()
     }
 
@@ -1607,7 +1677,7 @@ impl Review {
             return;
         };
         self.store.accept_turn(turn);
-        self.decide_binaries(Some(turn), true, cx);
+        self.accept_uncopied(Some(turn));
         self.all_decided(cx);
     }
 
@@ -1624,7 +1694,7 @@ impl Review {
         };
         let reverts = self.store.reject_turn(turn);
         self.apply_reverts(reverts, cx);
-        self.decide_binaries(Some(turn), false, cx);
+        self.reject_uncopied(Some(turn), cx);
         self.offer_undo("Turno rechazado", cx);
         self.all_decided(cx);
     }
@@ -1635,15 +1705,15 @@ impl Review {
         let Some(turn) = self.target_turn() else {
             return (0, 0);
         };
-        let binaries = self
-            .binaries
+        let uncopied = self
+            .uncopied
             .values()
             .filter(|change| change.turn == turn)
             .count();
         self.store
             .files()
             .filter(|file| file.turn_id == turn && file.has_pending_work())
-            .fold((binaries, binaries), |(changes, files), file| {
+            .fold((uncopied, uncopied), |(changes, files), file| {
                 (changes + self.decisions(file), files + 1)
             })
     }
@@ -1651,11 +1721,11 @@ impl Review {
     /// `(pending decisions, files)` over the whole review, every turn: what
     /// closing the window or the project asks about (`crate::review_close`).
     pub fn pending_counts(&self) -> (usize, usize) {
-        let binaries = self.binaries.len();
+        let uncopied = self.uncopied.len();
         self.store
             .files()
             .filter(|file| file.has_pending_work())
-            .fold((binaries, binaries), |(changes, files), file| {
+            .fold((uncopied, uncopied), |(changes, files), file| {
                 (changes + self.decisions(file), files + 1)
             })
     }
@@ -1733,7 +1803,7 @@ impl Review {
             return;
         }
         self.store.accept_all();
-        self.decide_binaries(None, true, cx);
+        self.accept_uncopied(None);
         self.all_decided(cx);
     }
 
@@ -1745,12 +1815,8 @@ impl Review {
             return;
         }
         let reverts = self.store.reject_all();
-        let binaries = !self.binaries.is_empty();
-        self.decide_binaries(None, false, cx);
+        self.reject_uncopied(None, cx);
         if reverts.is_empty() {
-            if binaries {
-                self.all_decided(cx);
-            }
             return;
         }
         self.apply_reverts(reverts, cx);
@@ -1765,7 +1831,7 @@ impl Review {
         self.schedule_persist(cx);
     }
 
-    /// `Alt+Shift+U`: takes the last rejection back.
+    /// `Alt+Shift+U`: takes the last rejection back (the store's own stack).
     pub fn undo_last_reject(&mut self, cx: &mut Context<Self>) {
         self.flush(None, cx);
         if !self.store.can_undo_reject() {
@@ -1832,7 +1898,7 @@ impl Review {
                             continue;
                         }
                     }
-                    self.on_host_wrote(&path);
+                    self.on_host_wrote(&path, cx);
                     if let Some(watched) = self.buffers.remove(&path) {
                         watched.handle.lock().unsubscribe(watched.subscription);
                     }
@@ -1874,7 +1940,7 @@ impl Review {
                 );
                 return;
             }
-            self.on_host_wrote(path);
+            self.on_host_wrote(path, cx);
         }
         if self.store.file(path).is_some()
             && let Some(handle) = self.ensure_buffer(path, cx)
@@ -2062,20 +2128,20 @@ impl Review {
         };
         let mut paths: BTreeSet<PathBuf> = self.cycle.clone();
         paths.extend(self.store.pending_files());
-        paths.extend(self.binaries.keys().cloned());
+        paths.extend(self.uncopied.keys().cloned());
         paths
             .into_iter()
             .map(|path| {
-                if let Some(change) = self.binaries.get(&path) {
+                if let Some(change) = self.uncopied.get(&path) {
                     return PanelRow {
                         relative: relative(&path),
                         added: 0,
                         removed: 0,
                         state: PanelState::Pending,
-                        created: change.state == FileState::Created,
+                        created: false,
                         deleted: change.state == FileState::Deleted,
-                        too_large: !change.restorable(),
-                        binary: change.binary,
+                        too_large: false,
+                        no_copy: true,
                         path,
                     };
                 }
@@ -2101,7 +2167,7 @@ impl Review {
                         !matches!(file.status, FileStatus::Deleted { .. })
                             && self.is_file_level(file)
                     }),
-                    binary: false,
+                    no_copy: false,
                     path,
                 }
             })
@@ -2141,7 +2207,7 @@ impl Review {
     // --------------------------------------------------------------- views
 
     /// Whether `file` is reviewed only as a whole: the store's own limits
-    /// (2 MB / 50 000 lines, binary, deleted) or the stricter
+    /// (2 MB / 50 000 lines, a NUL in the text, deleted) or the stricter
     /// `review.max_file_size_kb` / `review.max_lines`.
     fn is_file_level(&self, file: &FileReview) -> bool {
         file.file_level_only()
@@ -2167,7 +2233,7 @@ impl Review {
             .files()
             .map(|file| self.decisions(file))
             .sum::<usize>()
-            + self.binaries.len()
+            + self.uncopied.len()
     }
 
     /// The [`ReviewView`] of `path`, as the editor paints it.
@@ -2210,7 +2276,6 @@ impl Review {
             hunks,
             turn_active,
             current_index,
-            file_actions: false,
         }
     }
 
@@ -2226,8 +2291,10 @@ impl Review {
     }
 
     /// The single "archivo borrado" hunk of a pending deletion: every line
-    /// the file had, red and read-only, decided as a whole file
-    /// (`file_actions`). `None` when `path` is not a pending deletion.
+    /// the file had, red and read-only. Its hover buttons decide the whole
+    /// file ([`DELETED_FILE_HUNK`] maps to the file decisions in
+    /// [`Self::handle_action`]). `None` when `path` is not a pending
+    /// deletion.
     fn deleted_view(&mut self, path: &Path) -> Option<ReviewView> {
         let (lines, turn, turn_active) = if let Some(file) = self.store.file(path) {
             let FileStatus::Deleted { previous } = &file.status else {
@@ -2238,16 +2305,15 @@ impl Review {
             (lines, file.turn_id, turn_active)
         } else {
             let change = self
-                .binaries
+                .uncopied
                 .get(path)
                 .filter(|change| change.state == FileState::Deleted)?;
-            let line = if change.binary {
-                DELETED_BINARY_LINE
-            } else {
-                DELETED_NO_COPY_LINE
-            };
             let turn_active = self.active_turn == Some(change.turn);
-            (vec![line.to_string()], change.turn, turn_active)
+            (
+                vec![DELETED_NO_COPY_LINE.to_string()],
+                change.turn,
+                turn_active,
+            )
         };
         self.pushed.remove(path);
         let total = self.pending_count();
@@ -2267,18 +2333,17 @@ impl Review {
             pending_in_file: 1,
             pending_in_other_files: total.saturating_sub(1),
             current_index: Some(0),
-            file_actions: true,
         })
     }
 
-    /// Whether `path` is a deletion still waiting for a decision (text or
-    /// binary).
+    /// Whether `path` is a deletion still waiting for a decision (with or
+    /// without a copy).
     pub fn is_pending_deletion(&self, path: &Path) -> bool {
         self.store
             .file(path)
             .is_some_and(|file| matches!(file.status, FileStatus::Deleted { .. }))
             || self
-                .binaries
+                .uncopied
                 .get(path)
                 .is_some_and(|change| change.state == FileState::Deleted)
     }
@@ -2329,7 +2394,7 @@ impl Review {
     fn refresh_summary(&mut self, cx: &App) {
         let pending_files = self.store.pending_files();
         self.cycle.extend(pending_files.iter().cloned());
-        self.cycle.extend(self.binaries.keys().cloned());
+        self.cycle.extend(self.uncopied.keys().cloned());
         let mut files = BTreeMap::new();
         let mut total = (0, 0);
         for path in &pending_files {
@@ -2356,12 +2421,11 @@ impl Review {
                     } else {
                         file.pending_hunks().count()
                     },
-                    binary: false,
                     no_copy: false,
                 },
             );
         }
-        for (path, change) in &self.binaries {
+        for (path, change) in &self.uncopied {
             files.insert(
                 path.clone(),
                 FileSummary {
@@ -2370,8 +2434,7 @@ impl Review {
                     state: change.state,
                     file_level: true,
                     hunks: 0,
-                    binary: change.binary,
-                    no_copy: !change.restorable(),
+                    no_copy: true,
                 },
             );
         }
@@ -2386,6 +2449,7 @@ impl Review {
         summary.pending = self.pending_count();
         summary.total = total;
         summary.turn_active = self.active_turn.is_some();
+        summary.sweeping = self.sweep_notice;
         summary.panel_open = self.panel_open;
         summary.dirty_prompt = self
             .prompts
@@ -2467,6 +2531,29 @@ fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Removes what an earlier build saved for the binary files in `dir`
+/// ([`LEGACY_BINARY_STATE`]): nothing reads it any more.
+fn remove_legacy_binary_state(dir: &Path) {
+    for name in LEGACY_BINARY_STATE {
+        let path = dir.join(name);
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else if path.exists() {
+            std::fs::remove_file(&path)
+        } else {
+            continue;
+        };
+        match removed {
+            Ok(()) => {
+                tracing::info!(path = %path.display(), "estado viejo de binarios borrado")
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "no se pudo borrar el estado viejo de binarios")
+            }
+        }
+    }
 }
 
 /// The toast of a persisted entry that could not be restored

@@ -9,6 +9,7 @@ use cincel_acp::{LaunchSpec, ProcessEnv};
 use cincel_connections::{
     AcpLogin, AgentKind, Identity, IdentityProbe, LoginCommand, LoginEvent, LoginFailure,
     LoginOptions, LoginSession, PendingCleanup, ProbeOutcome, Profile, ProfileProbe,
+    login_event_log_line,
 };
 
 const FAKE_LOGIN: &str = env!("CARGO_BIN_EXE_cincel-connections-fake-login");
@@ -836,4 +837,67 @@ fn real_antigravity_prints_its_login_link() {
         Some(&LoginEvent::Cancelled)
     );
     assert!(!fx.profile.has_credentials());
+}
+
+/// §"Registro" (d): `login.rs`'s `emit` logs one line per step through
+/// [`login_event_log_line`] — this checks that line, the exact string a
+/// `tracing` subscriber would see, never carries the raw link, the one-time
+/// code, a `Failed` message, an `Output` line or an [`Identity`]'s fields,
+/// for every variant that can hold one.
+#[test]
+fn login_log_line_never_carries_the_link_the_code_or_the_identity() {
+    let secret_url = "https://example.test/oauth?code=SUPER-SECRET-TOKEN";
+    let secret_code = "PASTE-ME-1234";
+    let secret_email = "persona@example.test";
+
+    let events = [
+        LoginEvent::UrlDetected(secret_url.to_string()),
+        LoginEvent::CodeDetected(secret_code.to_string()),
+        LoginEvent::Output(format!("abrí {secret_url} y pegá {secret_code}")),
+        LoginEvent::Failed {
+            message: format!("no se pudo completar {secret_url}"),
+            reason: LoginFailure::Timeout,
+        },
+        LoginEvent::Completed {
+            identity: Some(Identity {
+                email: Some(secret_email.to_string()),
+                plan: Some("Claude Max".to_string()),
+                organization: Some("Acme".to_string()),
+            }),
+        },
+    ];
+
+    for event in &events {
+        let line = login_event_log_line(event);
+        assert!(!line.contains(secret_url), "filtró el enlace: {line}");
+        assert!(!line.contains(secret_code), "filtró el código: {line}");
+        assert!(!line.contains(secret_email), "filtró el email: {line}");
+        assert!(!line.contains("Acme"), "filtró la organización: {line}");
+    }
+
+    // The line still says which step it was and, for `Failed`, why —
+    // otherwise the log would be useless.
+    assert_eq!(
+        login_event_log_line(&LoginEvent::Started),
+        "evento=iniciado"
+    );
+    assert_eq!(
+        login_event_log_line(&LoginEvent::NeedsPastedCode),
+        "evento=esperando_codigo_pegado"
+    );
+    assert_eq!(
+        login_event_log_line(&LoginEvent::Cancelled),
+        "evento=cancelado"
+    );
+    assert_eq!(
+        login_event_log_line(&LoginEvent::Failed {
+            message: "no importa".to_string(),
+            reason: LoginFailure::Timeout,
+        }),
+        "evento=fallido motivo=Timeout"
+    );
+    assert_eq!(
+        login_event_log_line(&LoginEvent::Completed { identity: None }),
+        "evento=completado identidad_recibida=false"
+    );
 }

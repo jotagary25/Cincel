@@ -11,7 +11,8 @@ El elemento editor de código sobre GPUI. Propio, no derivado de otro editor. Re
 - Acciones (comandos GPUI con nombre): movimiento (carácter, palabra, línea, inicio/fin, página, documento), selección equivalentes con Shift, `editor::insert_newline` con indentación heredada, `editor::tab`/`backtab` (espacios/tab según ajuste y detección del archivo), `editor::delete_word_*`, `editor::undo/redo`, `editor::select_all`, `editor::copy/cut/paste`, `editor::find`, `editor::find_next/prev`, `editor::go_to_line`, `editor::toggle_soft_wrap`, `review::accept_hunk`, `review::reject_hunk`, `review::accept_line`, `review::reject_line`, `review::accept_file`, `review::reject_file`, `review::next_hunk`, `review::prev_hunk`.
 - Contextos de teclado: `Editor`, `Editor && review_hunk_under_cursor`, `Editor && searching`. `Ctrl+Enter`/`Ctrl+Backspace` solo se ligan bajo `review_hunk_under_cursor`.
 - Mouse: clic posiciona, arrastre selecciona, doble clic palabra, triple clic línea, `Ctrl+clic` no hace nada en v1 (sin multi-cursor), rueda desplaza, clic en fila fantasma posiciona el cursor en ella (solo lectura: se puede seleccionar y copiar).
-- Búsqueda: barra sobre el editor (input de `gpui-kit`), coincidencia insensible a mayúsculas por defecto, regex opcional, contador `3/12`, resalta todas.
+- Búsqueda: barra sobre el editor (input de `gpui-kit`), coincidencia insensible a mayúsculas por defecto, regex opcional, contador `3/12`, resalta todas. Sus teclas (`Tab`/`Shift+Tab` para cambiar de campo, `Enter`/`Ctrl+Enter` para reemplazar uno o todos) viven, desde la Etapa 6, en el `keymap.json` por defecto (`Editor && searching`/`Editor && searching && replacing`, `modulos/settings.md`); `search_bar_bindings` (que antes las reinstalaba en código por encima del keymap del usuario) se retiró.
+- Parpadeo del cursor: la tarea que lo hace parpadear (`view.rs`) termina a los 5 s sin escribir (o si `cursor_blink` está apagado) en vez de seguir despertando el hilo principal cada 500 ms para siempre; la próxima tecla la vuelve a lanzar. Es una de las dos causas que encontró la Etapa 6 para el consumo de CPU en reposo (la otra, los tres vigilantes de archivos: `modulos/watch.md`); con el cursor fijo, Cincel mide 0 % de CPU y 0 cuadros pintados en 60 s de reposo (M8, `docs/rendimiento.md`).
 - Guardar: `editor::save` → `BufferStore::save`; indicador sucio en la pestaña.
 
 ## Reglas de la revisión en el editor
@@ -45,6 +46,19 @@ Detalle, verificación y desviaciones en `docs/etapas/etapa-5.md`. Spec:
   todo" es una única transacción del buffer (`EditSource::User`, un
   `Ctrl+Z` la deshace entera). Reemplaza la limitación de etapas anteriores
   de que la búsqueda no recorría las filas fantasma y no tenía reemplazar.
+
+## Etapa 6: fin del parpadeo en reposo y teclas de búsqueda en el keymap
+
+Detalle, verificación y desviaciones en `docs/etapas/etapa-6.md`. Spec:
+`docs/specs/08-etapa6-cierre-1-0.md` §5.4 y §9.3 (E6-G).
+
+- **`idle_timer_tests.rs`**: la tarea de parpadeo termina en reposo, una
+  tecla la relanza, y con `cursor_blink` apagado no queda ninguna corriendo.
+- **`keymap_search_tests_e6.rs`** (`cincel-workspace`): con el keymap por
+  defecto, `Tab` en la barra cambia de campo y no inserta un tabulado;
+  `Enter` en el campo de reemplazo reemplaza; un `keymap.json` de usuario
+  que reasigna `tab` en su propia sección `Editor` (sin `searching`) gana
+  también con la barra de búsqueda abierta (consecuencia aceptada de D14).
 
 ## Criterios de aceptación
 - [ ] Abrir un archivo de 5 000 líneas y hacer scroll de punta a punta mantiene 60 fps (medido con el instrumentador de GPUI) y no aloca layouts fuera del rango visible.

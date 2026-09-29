@@ -323,26 +323,6 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-/// The search-bar bindings whose context is narrower than `Editor`, as
-/// `(keystroke, context predicate, action)`: `Tab` / `Shift+Tab` in
-/// `Editor && searching` and `Enter` / `Ctrl+Enter` in
-/// `Editor && searching && replacing`.
-///
-/// They are part of [`default_key_bindings`] too. A host that loads a keymap
-/// *after* those defaults (the workspace's `keymap.json`, whose `Editor`
-/// section binds `tab`, `enter` and `ctrl-enter` for plain editing) binds
-/// these again on top of it, so the plain-editing meaning of those keys never
-/// reaches the file while the bar has the keyboard — unless the keymap itself
-/// binds the same keystroke in the same context.
-pub fn search_bar_bindings() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
-    vec![
-        ("tab", CONTEXT_SEARCHING, Box::new(SearchNextField)),
-        ("shift-tab", CONTEXT_SEARCHING, Box::new(SearchPrevField)),
-        ("enter", CONTEXT_REPLACING, Box::new(ReplaceNext)),
-        ("ctrl-enter", CONTEXT_REPLACING, Box::new(ReplaceAll)),
-    ]
-}
-
 /// Installs [`default_key_bindings`] into the app.
 pub fn bind_default_keys(cx: &mut gpui::App) {
     cx.bind_keys(default_key_bindings());

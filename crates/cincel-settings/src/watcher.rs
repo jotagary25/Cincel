@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
+use cincel_watch::Debouncer;
 use notify::{EventKind, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 
 use crate::paths::Paths;
 
@@ -63,7 +63,7 @@ pub enum WatchError {
 /// The watcher lives as long as this value: drop it to stop watching.
 pub struct SettingsWatcher {
     paths: Paths,
-    _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    _debouncer: Debouncer,
 }
 
 impl SettingsWatcher {
@@ -91,25 +91,22 @@ impl SettingsWatcher {
 
         let (sender, receiver) = async_channel::unbounded();
         let watched = paths.clone();
-        let mut debouncer =
-            new_debouncer(
-                debounce,
-                None,
-                move |result: DebounceEventResult| match result {
-                    Ok(events) => {
-                        let paths = events
-                            .iter()
-                            .filter(|event| changes_content(&event.kind))
-                            .flat_map(|event| event.paths.iter());
-                        emit(&watched, paths, &sender);
-                    }
-                    Err(errors) => {
-                        for error in errors {
-                            tracing::warn!(%error, "error observando la configuración");
-                        }
-                    }
-                },
-            )?;
+        // `cincel-watch`: no wakeups while nothing changes (M8).
+        let mut debouncer = Debouncer::new(
+            "cincel-watch-settings",
+            debounce,
+            move |batch: cincel_watch::Batch| {
+                for error in batch.errors {
+                    tracing::warn!(%error, "error observando la configuración");
+                }
+                let paths = batch
+                    .events
+                    .iter()
+                    .filter(|event| changes_content(&event.kind))
+                    .flat_map(|event| event.paths.iter());
+                emit(&watched, paths, &sender);
+            },
+        )?;
 
         // The themes directory is inside the config directory, so one
         // recursive watch would cover both; watching it explicitly keeps the

@@ -62,6 +62,7 @@ Colores de sintaxis: 12 capturas estándar de tree-sitter (`keyword`, `function`
 
 - UI: `Inter`, respaldo `system-ui`. 13 px.
 - Código: `JetBrains Mono`, respaldo `Zed Mono`, `DejaVu Sans Mono`, `monospace`. 14 px, interlineado 1.5. Ligaduras desactivadas por defecto.
+- **Desde la Etapa 6 (2026-09-29):** Inter 4.1 y JetBrains Mono 2.304 vienen dentro del programa (`crates/cincel-workspace/assets/fonts/`, licencia OFL) y se registran al arrancar; el aspecto es el mismo en cualquier equipo. Los respaldos solo se usan si el usuario elige en la configuración otra familia que no está instalada.
 - Renderizado subpíxel con gamma 1.8 (lo que provee el motor gráfico); ajuste `text.rendering = "subpixel" | "grayscale"`.
 
 ## 4. Forma y densidad

@@ -189,8 +189,12 @@ impl Project {
             let (batches, ready) = async_channel::unbounded::<Vec<cincel_project::ScanEvent>>();
             let executor = cx.background_executor().clone();
             let batching = executor.clone();
+            // `CINCEL_TRACE_TIMINGS=1`: lives until the walk ends
+            // (`crate::bench::TIMING_TARGET`).
+            let first_scan = tracing::info_span!(target: "cincel::timing", "first_scan");
             executor
                 .spawn(async move {
+                    let _first_scan = first_scan;
                     loop {
                         let Ok(event) = scan.recv().await else {
                             break;
@@ -225,6 +229,7 @@ impl Project {
             }));
         } else {
             // Deterministic path: finish the walk here, before anyone looks.
+            let _first_scan = tracing::info_span!(target: "cincel::timing", "first_scan").entered();
             for event in scan {
                 worktree.apply(event);
             }
@@ -608,6 +613,11 @@ impl Project {
     /// then hands it on as [`FilesChanged`]. The watcher's drain calls it;
     /// the tests call it by hand (their projects run without a watcher).
     pub fn apply_fs_events(&mut self, events: &[FsEvent], cx: &mut Context<Self>) {
+        // `CINCEL_TRACE_TIMINGS=1` (`crate::bench::TIMING_TARGET`): the
+        // main-thread cost of one watcher batch, the review's share included.
+        let _watch_batch =
+            tracing::info_span!(target: "cincel::timing", "watch_batch", events = events.len())
+                .entered();
         let mut tree_changed = false;
         for event in events {
             tree_changed |= self.worktree.apply_fs_event(event);

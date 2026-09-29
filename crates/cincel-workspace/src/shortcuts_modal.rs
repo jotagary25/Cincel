@@ -535,7 +535,9 @@ fn before_note(
 /// producing the display rows of §5.1 ("Una acción con varias teclas muestra
 /// todas"). `default_only` (the same widget layer under `Keymap::default()`,
 /// without the user's file) backs [`before_note`].
-fn build_rows(combined: &Keymap, default_only: &Keymap) -> Vec<ShortcutRow> {
+///
+/// `pub(crate)`: see [`default_only_keymap`].
+pub(crate) fn build_rows(combined: &Keymap, default_only: &Keymap) -> Vec<ShortcutRow> {
     struct Group {
         identity: String,
         context: ContextExpr,
@@ -623,7 +625,11 @@ fn combined_keymap(cx: &App) -> Keymap {
 /// The built-in keymap (no user file) layered over the widget defaults, for
 /// [`before_note`]'s baseline. No `App` needed: [`Keymap::default`] only
 /// parses the built-in JSONC.
-fn default_only_keymap() -> Keymap {
+///
+/// `pub(crate)` so `user_docs_tests` can enumerate the exact same rows the
+/// modal shows, with no user `keymap.json` in the way, to check
+/// `docs/usuario/atajos.md` documents every one of them (spec 08 §8.2).
+pub(crate) fn default_only_keymap() -> Keymap {
     widget_only_keymap().layered(Keymap::default())
 }
 

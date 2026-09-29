@@ -200,10 +200,6 @@ pub fn install(keymap: &Keymap, cx: &mut App) {
     cx.bind_keys(base);
     cx.bind_keys(built_in_bindings());
     cx.bind_keys(conversion.bindings);
-    // The editor's search-bar keys (`Tab`, and `Enter` / `Ctrl+Enter` in the
-    // replace field) go on top of the keymap's plain-editing `Editor`
-    // bindings, unless the keymap binds that key in that same context.
-    cx.bind_keys(search_bar_bindings(keymap));
     // A modal dialog outranks even the user's keymap: while it is up, `Enter`
     // and `Esc` belong to it, not to whatever the focused element does with
     // them.
@@ -212,51 +208,6 @@ pub fn install(keymap: &Keymap, cx: &mut App) {
         skipped = conversion.skipped.len(),
         "keymap instalado en GPUI"
     );
-}
-
-/// The editor's search-bar bindings ([`cincel_editor::search_bar_bindings`])
-/// that `keymap` does not bind itself in the same context.
-///
-/// The keymap's `Editor` section binds `tab`, `enter` and `ctrl-enter` for
-/// plain editing and is installed after the editor's own defaults, so it
-/// would otherwise win over the narrower `Editor && searching` /
-/// `Editor && searching && replacing` defaults (GPUI ranks bindings of the
-/// same node by order) and the keys would reach the file while the search
-/// bar has the keyboard (`docs/specs/07-etapa5-productividad.md` §10.2).
-fn search_bar_bindings(keymap: &Keymap) -> Vec<KeyBinding> {
-    cincel_editor::search_bar_bindings()
-        .into_iter()
-        .filter(|(keystroke, context, _)| !keymap_binds(keymap, keystroke, context))
-        .filter_map(|(keystroke, context, action)| {
-            let predicate = KeyBindingContextPredicate::parse(context).ok().map(Rc::new);
-            KeyBinding::load(
-                keystroke,
-                action,
-                predicate,
-                false,
-                None,
-                &DummyKeyboardMapper,
-            )
-            .ok()
-        })
-        .collect()
-}
-
-/// Whether some section of `keymap` with the context `context` binds (or
-/// unbinds) `keystroke`.
-fn keymap_binds(keymap: &Keymap, keystroke: &str, context: &str) -> bool {
-    let wanted = KeyBindingContextPredicate::parse(context).ok();
-    keymap.sections().iter().any(|section| {
-        let theirs = section.context.to_string();
-        let theirs = theirs.trim();
-        let same_context = theirs == context
-            || (wanted.is_some() && KeyBindingContextPredicate::parse(theirs).ok() == wanted);
-        same_context
-            && section
-                .bindings
-                .iter()
-                .any(|binding| binding.keystroke.to_string() == keystroke)
-    })
 }
 
 /// The bindings of the modal dialogs, which win over everything else while
@@ -539,38 +490,6 @@ mod tests {
             Some("chat::Send")
         );
         assert_eq!(camel_case_command("sin_espacio_de_nombres"), None);
-    }
-
-    #[test]
-    fn search_bar_keys_go_on_top_unless_the_keymap_binds_them() {
-        let names = |bindings: &[KeyBinding]| -> Vec<&'static str> {
-            bindings
-                .iter()
-                .map(|binding| binding.action().name())
-                .collect()
-        };
-        let defaults = search_bar_bindings(&Keymap::default());
-        assert_eq!(
-            names(&defaults),
-            vec![
-                "editor::search_next_field",
-                "editor::search_prev_field",
-                "editor::replace_next",
-                "editor::replace_all",
-            ]
-        );
-
-        // A user who binds `enter` in the replace field keeps their binding.
-        let user = Keymap::parse(
-            r#"[{ "context": "Editor && searching && replacing",
-                  "bindings": { "enter": "editor::find_next" } }]"#,
-        );
-        assert!(user.is_clean(), "{:?}", user.issues);
-        let keymap = Keymap::default().layered(user.value);
-        assert!(
-            !names(&search_bar_bindings(&keymap)).contains(&"editor::replace_next"),
-            "the keymap's own binding wins"
-        );
     }
 
     // Needs gpui's test harness, like the other `#[gpui::test]`s of the crate.

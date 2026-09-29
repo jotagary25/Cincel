@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  App icon for Cincel (`dev.cincel.Cincel`, D10). A stylized chisel on the
+  editor's dark background, with a short green/red pair of marks standing for
+  the accept/reject review segments (`docs/specs/08-etapa6-cierre-1-0.md`
+  §6.4). No text, no fine detail: it stays readable at 16 px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#21252b"/>
+  <g transform="rotate(-45 32 32)">
+    <!-- handle -->
+    <rect x="28" y="4" width="8" height="20" rx="3" fill="#d19a66"/>
+    <!-- ferrule -->
+    <rect x="27" y="24" width="10" height="5" rx="1" fill="#abb2bf"/>
+    <!-- blade, beveled edge -->
+    <path d="M28.5 29 h7 v17 l-3.5 6 l-3.5 -6 z" fill="#e6e9ef"/>
+  </g>
+  <!-- accept / reject marks -->
+  <rect x="41" y="45" width="14" height="4" rx="2" fill="#98c379"/>
+  <rect x="41" y="51" width="9" height="4" rx="2" fill="#e06c75"/>
+</svg>

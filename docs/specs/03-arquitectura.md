@@ -87,11 +87,13 @@ Los `FsRead`/`FsWrite` son peticiones del agente que la UI contesta desde el `Bu
 ```
 
 Reglas:
-0. **La foto.** `Review::begin_prompt` saca la foto (`cincel_project::ProjectSnapshot`) en el ejecutor de fondo y el prompt se envía cuando está lista; si tarda más de 1 s, el chat muestra "Preparando la revisión…". Presupuesto: 5 000 archivos / 50 MB en menos de 1 s. Cada turno saca su foto; un archivo que ya está en revisión conserva su base original hasta que el usuario decide (la foto nueva no lo re-basa). Archivos no UTF-8: "archivo binario cambiado por el agente", solo por archivo, rechazar = restaurar los bytes. Archivos sin copia (más grandes que `review.max_file_size_kb` o por encima del tope total): la base sale del buffer si estaba abierto al sacar la foto; si no, solo se puede aceptar. Los cambios hechos por otros programas durante el turno se atribuyen al agente.
+0. **La foto.** `Review::begin_prompt` saca la foto (`cincel_project::ProjectSnapshot`) en el ejecutor de fondo y el prompt se envía cuando está lista; si tarda más de 1 s, el chat muestra "Preparando la revisión…". Presupuesto: 5 000 archivos / 50 MB en menos de 1 s. Cada turno saca su foto; un archivo que ya está en revisión conserva su base original hasta que el usuario decide (la foto nueva no lo re-basa). Archivos binarios (no UTF-8, o un NUL en los primeros 8 KB): fuera de la revisión, lo que el agente les haga se aplica sin revisar; la foto guarda de ellos solo tamaño y hash. Archivos sin copia (más grandes que `review.max_file_size_kb` o por encima del tope total): la base sale del buffer si estaba abierto al sacar la foto; si no, solo se puede aceptar. Los cambios hechos por otros programas durante el turno se atribuyen al agente.
 1. La **base** de un archivo se fija en el primer contacto del turno: la copia de la foto (si el buffer no tiene cambios sin guardar), `fs/read_text_file`, `oldText` del primer `diff` del tool call, o lectura de disco al ver el primer `tool_call` de tipo `edit` con ese path en `locations`. Si el archivo está abierto con cambios sin guardar del usuario, se pregunta (guardar / descartar / mantener) antes de que el agente lo toque; si no se puede preguntar (permiso ya concedido), se guarda. Si el agente lo cambió por otra vía (sin pista), la base es la foto y los cambios sin guardar del usuario se suman a la base.
 2. Los `diff` que manda el agente son **señal de interfaz**, no fuente de verdad. La verdad son los bytes en disco releídos al completarse cada tool call de edición (y al llegar el `agentFileChangeReport` del final del turno, si el agente lo soporta), las notificaciones del watcher y el repaso final contra la foto.
 3. Los hunks se recalculan en el ejecutor de fondo con debounce de 50 ms cada vez que cambia el buffer o la base, descartando resultados de versiones viejas.
 4. Aceptar = mover la base. Rechazar = editar el buffer con el texto de la base y guardar. Ninguna otra operación toca disco.
+
+**Etapa 6 (2026-09-29):** el repaso final del turno (toda la foto contra el disco) corre en el ejecutor de fondo y entrega los cambios en tramos de ≤ 3 ms; el turno sigue activo hasta que termina (`docs/specs/08-etapa6-cierre-1-0.md` §5.3, medido en `docs/rendimiento.md` M11). El vigilante de archivos es el crate propio `cincel-watch` (`modulos/watch.md`), que no despierta en reposo.
 
 ## 5. Pipeline de display del editor
 
@@ -119,6 +121,8 @@ Al arrancar, antes de leer cualquiera de estos directorios: si existe `<raíz>/a
 
 `state.json` de revisión: por archivo `{path, base_hash, current_hash, status, turn_id, created_at}`. Al restaurar: leer el archivo tal cual está en disco, comparar su hash con `current_hash`; si coincide, recalcular hunks contra `objects/<base_hash>`; si no, descartar la entrada y avisar. **Nunca se reescribe un archivo al restaurar.** Los objetos huérfanos se borran al aceptar/rechazar todo.
 
+**Etapa 6 (2026-09-29):** la revisión persiste también los cambios de archivos binarios hechos por el agente (`binaries.json` + `binaries/<sha256>`, aparte del store) y su rechazo se deshace con `Alt+Shift+U` (deshacer unificado, `ReviewStore::undo_depth`); `08-etapa6-cierre-1-0.md` §5.2. **Retirado tras la prueba de la 1.0:** los binarios quedan fuera de la revisión (se aplican sin revisar; `docs/etapas/etapa-6.md`, "Correcciones tras la prueba de la 1.0").
+
 ## 7. Errores y resiliencia
 
 - Proceso de agente muerto: evento `Exited`, tarjeta en el chat, el turno se marca cancelado, los pendientes de revisión se conservan.
@@ -133,3 +137,5 @@ Al arrancar, antes de leer cualquiera de estos directorios: si existe `<raíz>/a
 - Tests unitarios en todos los crates sin GPUI (obligatorios para `cincel-review` y `cincel-text`: cobertura de los casos de borde listados en `modulos/review.md`).
 - Tests de integración de `cincel-acp` contra un agente falso (binario de test que habla ACP) para no depender de red ni de suscripciones.
 - Smoke test gráfico manual por etapa (lista de comprobación en `05-plan-etapas.md`).
+
+**Etapa 6 (2026-09-29):** la misma verificación corre en GitHub Actions (`.github/workflows/ci.yml`: fmt, clippy `-D warnings`, tests con las features fijas, `cargo deny`; `slow-tests.yml` para los tests de tiempo; `release.yml` arma tarball y `.deb` con `packaging/build.sh`). Rendimiento medido contra Zed y Antigravity con `cincel-perf` (`modulos/perf.md`, resultados en `docs/rendimiento.md`).

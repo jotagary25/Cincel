@@ -8,6 +8,15 @@
 > (Etapa 6); las deudas técnicas menores que ninguna de las dos etapas asumió
 > todavía siguen abiertas en la sección B de más abajo, con las que la
 > Etapa 5 sí resolvió marcadas como tales.
+>
+> **Nota (2026-09-29): la Etapa 6 se cerró.** Cierra también la versión
+> **1.0**. Su fuente de verdad fue `docs/specs/08-etapa6-cierre-1-0.md`; su
+> alcance construido, verificación, decisiones y desviaciones están en
+> `docs/etapas/etapa-6.md`. Los puntos 5 a 9 de la sección A (rendimiento,
+> instalador, repositorio público, documentación de usuario, fuentes
+> embebidas) y las deudas de la sección B que le tocaban ya están cerrados,
+> marcados como tales más abajo. Lo que queda abierto después de la 1.0
+> apunta a `docs/etapas/etapa-6.md` §"Después de la 1.0".
 
 # Pendientes para la Etapa 5 (v1.0) y después
 
@@ -22,11 +31,11 @@ los puntos 5 a 9 pasaron a la Etapa 6 (`docs/specs/05-plan-etapas.md`).
 2. ~~**Pantalla de configuración** (`Ctrl+,`): secciones con interruptores y selectores para lo ya construido (tema y modo claro/oscuro, fuentes y tamaños, ajuste de línea, tabulación y espacios, auto-cierre de pares, autoguardado, saltar al siguiente cambio al decidir, rutas sensibles, conexiones: renombrar, reparar, volver a conectar, eliminar). Escribe el mismo `settings.json`; las dos vías conviven.~~ **Construido.**
 3. ~~**Botón visible y modal de atajos** con buscador, agrupados por categoría (generales, editor, revisión, chat, conexiones), leídos del keymap efectivo (incluye los del usuario).~~ **Construido.**
 4. ~~**Git en el margen del editor**: barras de añadido/modificado/eliminado por línea desde `git diff`, sin pisar los segmentos del agente (renderer distinto, como Zed); en el árbol ya está.~~ **Construido.**
-5. **Rendimiento**: medir y publicar arranque en frío, latencia de tecleo, memoria en reposo, CPU en reposo (0% sin redibujo continuo), archivos de 1 MB y 50 000 líneas; corregir lo que no cumpla `01-producto.md §5`. (Etapa 6.)
-6. **Instalador**: tarball + `install.sh` con `dist` (build en contenedor Ubuntu 22.04, vendorizando `libxkbcommon`/`libxcb*`/`libstdc++`, `dlopen` de wayland-client), `.deb` con `cargo-deb`; decisión tomada: instalador liviano (los agentes se descargan al conectar). Opción "preparar todos los agentes" desde configuración. (Etapa 6.)
-7. **Repositorio público**: URL real en `Cargo.toml`, README final con capturas, `CONTRIBUTING`, CI de GitHub Actions (fmt, clippy `-D warnings`, tests, `cargo deny`), y renombrar la carpeta del repo a `cincel` (lo hace el autor). (Etapa 6.)
-8. **Documentación de usuario**: instalación, primer arranque, conexiones, revisión de cambios, atajos, ajustes. (Etapa 6.)
-9. **Fuentes**: Inter y JetBrains Mono no están en la máquina de referencia y sin ellas la negrita del markdown no cambia de peso y el aspecto difiere de la spec. Propuesta: embeber ambas en el binario (licencia OFL, permitida) para un aspecto idéntico en cualquier equipo. (Etapa 6.)
+5. ~~**Rendimiento**: medir y publicar arranque en frío, latencia de tecleo, memoria en reposo, CPU en reposo (0% sin redibujo continuo), archivos de 1 MB y 50 000 líneas; corregir lo que no cumpla `01-producto.md §5`.~~ **Construido en la Etapa 6** (`docs/rendimiento.md`, `docs/etapas/etapa-6.md`).
+6. ~~**Instalador**: tarball + `install.sh` con `dist` (build en contenedor Ubuntu 22.04, vendorizando `libxkbcommon`/`libxcb*`/`libstdc++`, `dlopen` de wayland-client), `.deb` con `cargo-deb`; decisión tomada: instalador liviano (los agentes se descargan al conectar).~~ **Construido en la Etapa 6** (`packaging/`, `docs/etapas/etapa-6.md`). La opción "preparar todos los agentes" desde configuración no entró en el alcance acordado de la Etapa 6 (`08-etapa6-cierre-1-0.md` §9): queda para después de la 1.0.
+7. ~~**Repositorio público**: URL real en `Cargo.toml`, README final con capturas, `CONTRIBUTING`, CI de GitHub Actions (fmt, clippy `-D warnings`, tests, `cargo deny`), y renombrar la carpeta del repo a `cincel` (lo hace el autor).~~ **Construido en la Etapa 6**: todo lo que no requiere la cuenta del autor está listo (`docs/etapas/etapa-6.md`); crear el repositorio, empujar y renombrar la carpeta local siguen siendo del autor (`docs/publicacion.md`).
+8. ~~**Documentación de usuario**: instalación, primer arranque, conexiones, revisión de cambios, atajos, ajustes.~~ **Construido en la Etapa 6** (`docs/usuario/`).
+9. ~~**Fuentes**: Inter y JetBrains Mono no están en la máquina de referencia y sin ellas la negrita del markdown no cambia de peso y el aspecto difiere de la spec. Propuesta: embeber ambas en el binario (licencia OFL, permitida) para un aspecto idéntico en cualquier equipo.~~ **Construido en la Etapa 6** (`crates/cincel-workspace/src/fonts.rs`, `docs/specs/08-etapa6-cierre-1-0.md` §4).
 
 ## B. Deudas técnicas anotadas en las etapas (candidatas para la 5 o inmediatamente después)
 - ~~`AgentEvent::AuthRequired` no trae el `message` del agente: el motivo real solo llega por el tail de stderr (hallazgo del caso Gemini). Agregar `message: Option<String>` en `cincel-acp`.~~ **Resuelto en la Etapa 5** (`docs/specs/07-etapa5-productividad.md` §10.1, `docs/specs/modulos/acp.md`).

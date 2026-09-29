@@ -136,6 +136,35 @@ Detalle, verificación y desviaciones en `docs/etapas/etapa-5.md`. Spec:
   corta una descarga en curso" y el deseo "botón Actualizar cuando el
   registry publica una versión más nueva".
 
+## Etapa 6: descarga lenta real y política de actualización de Node
+
+Detalle, verificación y desviaciones en `docs/etapas/etapa-6.md`. Spec:
+`docs/specs/08-etapa6-cierre-1-0.md` §5.6.3.
+
+- **`Runtime::update_available`/`update` solo ofrecen actualizar dentro de
+  la política configurada, nunca a un mayor distinto**: con
+  `connections.runtime.node_version: "lts"`, la LTS más nueva ≥ `MIN_NODE_
+  MAJOR`; con un mayor fijo (`"22"`), la más nueva **de esa misma línea**
+  (nunca salta a la 24); con una versión completa (`"24.11.1"`), nunca
+  ofrece nada (está fijada, sin red). Ya se comportaba así desde que se
+  agregó el botón en la Etapa 5; esta etapa lo deja probado de punta a
+  punta contra un servidor real.
+- **`crates/cincel-connections/tests/slow_download.rs`** (`#[ignore]`,
+  §5.6.3): servidor HTTP local (`std::net::TcpListener`, sin ningún
+  framework) que entrega 1 MB cada 100 ms; `Runtime::ensure` corre en su
+  propio hilo con el `HttpDownloader` real (no uno en memoria, a diferencia
+  del resto de los tests del crate) y se cancela a los 300 ms: el hilo
+  termina en menos de 500 ms (× `CINCEL_PERF_BUDGET_FACTOR`, D15), sin
+  `.part` ni carpeta de staging, y el servidor ve la conexión cerrada. Se
+  corre a mano (`cargo test -p cincel-connections --test slow_download --
+  --ignored`) o en el job semanal/manual de CI, nunca en cada push: es el
+  único test del crate que de verdad tarda y usa la red (loopback).
+- **`settings_update_e2e_tests.rs`** (`cincel-workspace`): actualizar Node y
+  cancelar una actualización de punta a punta, desde `Ctrl+,` → Conexiones,
+  con `ConnectionsFixture` y un descargador en memoria; antes se probaba
+  por partes (el hilo de actualización en este crate, y el cableado de
+  eventos en `settings_bridge.rs` por separado).
+
 ## Seguridad
 - El índice nunca guarda credenciales (test `index_never_contains_credentials`).
 - Borrado de perfiles solo dentro de `connections/` (canonicalize + `starts_with`, rechaza la raíz y symlinks).

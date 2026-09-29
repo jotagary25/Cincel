@@ -23,7 +23,7 @@ Tipos y carga de configuración. Sin GPUI.
 ```
 - La sección `agents` (Etapa 2/3) se renombró a `connections` en la Etapa 4 (`docs/specs/06-etapa4-conexiones-y-cincel.md` §9): `default`, `custom` y `registry_url` desaparecieron (el sistema de conexiones que los reemplaza es un workstream posterior); `mcp_servers` se mudó tal cual. `registry_url` no se movió a `connections` porque el registro (`cincel-acp::registry`) usa una URL fija, no lee ese ajuste.
 - Un archivo que todavía trae la sección vieja `agents` (en cualquier forma, incluido un `agents.autonomy` suelto) carga igual y avisa una sola vez, en `agents`: "ajuste retirado: la sección «agents» ahora se llama «connections» … se ignora, podés borrarlo". `agents.autonomy` en sí se había retirado en la Etapa 3 (la política de permisos es fija, `01-producto.md §F5`).
-- `~/.config/cincel/keymap.json`: lista de `{ context, bindings }` (`modulos/workspace.md`).
+- `~/.config/cincel/keymap.json`: lista de `{ context, bindings }` (`modulos/workspace.md`). Desde la Etapa 6 (D14), el `DEFAULT_KEYMAP_JSONC` incluye, después de la sección `Editor`, las secciones `Editor && searching` (`tab`/`shift-tab`: cambiar de campo) y `Editor && searching && replacing` (`enter`/`ctrl-enter`: reemplazar uno o todos); antes, esas cuatro teclas funcionaban pero no figuraban en el archivo por defecto ni en el modal de atajos (`F1`).
 - `~/.config/cincel/themes/*.json`: tokens de `02-visual.md §2` + colores de sintaxis; desde la Etapa 5 suma `git.added`, `git.modified`, `git.deleted` (un tema de usuario sin esas claves usa los del tema incluido de su apariencia).
 
 ## Responsabilidades
@@ -31,6 +31,23 @@ Tipos y carga de configuración. Sin GPUI.
 - `load()` tolerante: un valor inválido se reporta (ruta JSON + motivo) y se usa el predeterminado; nunca impide arrancar.
 - Watcher de los tres archivos → `SettingsEvent::Changed`.
 - `cincel --print-default-settings` imprime el JSON predeterminado con comentarios.
+
+## Etapa 6: tope de memoria de la foto en Configuración
+
+Detalle, verificación y desviaciones en `docs/etapas/etapa-6.md`. Spec:
+`docs/specs/08-etapa6-cierre-1-0.md` §5.1.
+
+`review.snapshot_max_total_mb` (16–4096, por defecto 300; fuera de rango se
+reporta y se usa 300) ya existía como clave, pero sin fila en la pestaña de
+configuración: solo se podía cambiar escribiendo `settings.json` a mano.
+Desde esta etapa, `crates/cincel-workspace/src/settings_view.rs` (tabla
+`ROWS`, sección Revisión, después de `review.max_lines`) tiene la fila
+**"Memoria para la foto del proyecto (MB)"** (control `number(16., 4096.,
+16., 0)`), con la descripción "Antes de cada mensaje al agente, Cincel
+guarda una copia de tus archivos para poder mostrarte y deshacer lo que
+cambie. Este es el máximo que ocupa esa copia; pasado el tope, los archivos
+que no entran solo se pueden aceptar enteros." Aparece al buscar "memoria" o
+"foto" en la pestaña; el turno siguiente usa el valor nuevo.
 
 ## Etapa 5: edición del archivo desde la interfaz y keymap efectivo
 

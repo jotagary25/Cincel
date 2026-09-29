@@ -22,13 +22,16 @@
 
 pub mod actions;
 pub mod agents;
+pub mod bench;
 pub mod center;
 pub mod connection_modal;
 pub mod conversations;
 pub mod file_finder;
 pub mod focus;
+pub mod fonts;
 pub mod keymap;
 pub mod layout;
+pub mod logo;
 pub mod markdown_preview;
 pub mod new_file;
 pub mod panels;
@@ -50,23 +53,41 @@ mod appearance_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod autosave_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod bench_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod click_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod connection_cancel_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod deleted_file_review_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod file_finder_perf_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod file_finder_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod first_open_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod fonts_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod git_gutter_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod keymap_search_tests_e6;
+#[cfg(all(test, feature = "test-support"))]
+mod login_modal_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod logo_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod modal_scroll_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod pending_review_close_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod review_binary_exclusion_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod review_counter_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod review_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod settings_update_e2e_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod settings_view_tests;
 #[cfg(all(test, feature = "test-support"))]
@@ -74,11 +95,17 @@ mod shortcuts_modal_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod snapshot_review_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod sweep_background_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod test_support;
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
 #[cfg(all(test, feature = "test-support"))]
 mod title_bar_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod user_docs_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod watch_slice_tests;
 
 pub use agents::Agents;
 pub use center::{CenterItem, CenterPanel, Tab, TabContent};

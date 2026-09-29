@@ -111,6 +111,8 @@ pub enum Autosave {
 
 /// Smallest and largest `files.autosave_delay_ms`, in milliseconds.
 const AUTOSAVE_DELAY_RANGE: (u64, u64) = (100, 60_000);
+/// `review.snapshot_max_total_mb` (docs/specs/08-etapa6-cierre-1-0.md §5.1).
+const SNAPSHOT_MAX_TOTAL_MB_RANGE: (u64, u64) = (16, 4096);
 
 /// `files`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -454,10 +456,22 @@ impl Settings {
                     ),
                     max_file_size_kb: reader.field(review, "max_file_size_kb", d.max_file_size_kb),
                     max_lines: reader.field(review, "max_lines", d.max_lines),
-                    snapshot_max_total_mb: reader.field(
+                    snapshot_max_total_mb: reader.checked_field(
                         review,
                         "snapshot_max_total_mb",
                         d.snapshot_max_total_mb,
+                        |mb: &u64| {
+                            if (SNAPSHOT_MAX_TOTAL_MB_RANGE.0..=SNAPSHOT_MAX_TOTAL_MB_RANGE.1)
+                                .contains(mb)
+                            {
+                                Ok(())
+                            } else {
+                                Err(
+                                    "review.snapshot_max_total_mb tiene que estar entre 16 y 4096"
+                                        .to_owned(),
+                                )
+                            }
+                        },
                     ),
                     sensitive_paths: reader.array(
                         review,
@@ -806,6 +820,25 @@ mod tests {
         let loaded = Settings::parse(r#"{ "files": { "autosave_delay_ms": 250 } }"#);
         assert!(loaded.is_clean(), "{:?}", loaded.issues);
         assert_eq!(loaded.value.files.autosave_delay_ms, 250);
+    }
+
+    #[test]
+    fn snapshot_max_total_mb_out_of_range_is_rejected() {
+        for mb in [0, 15, 4097, 1_000_000] {
+            let loaded = Settings::parse(&format!(
+                r#"{{ "review": {{ "snapshot_max_total_mb": {mb} }} }}"#
+            ));
+            assert_eq!(loaded.value.review.snapshot_max_total_mb, 300, "{mb}");
+            assert_eq!(loaded.issues.len(), 1, "{mb}: {:?}", loaded.issues);
+            assert_eq!(loaded.issues[0].path, "review.snapshot_max_total_mb");
+        }
+    }
+
+    #[test]
+    fn snapshot_max_total_mb_inside_range_is_accepted() {
+        let loaded = Settings::parse(r#"{ "review": { "snapshot_max_total_mb": 512 } }"#);
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert_eq!(loaded.value.review.snapshot_max_total_mb, 512);
     }
 
     #[test]

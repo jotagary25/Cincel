@@ -859,6 +859,13 @@ impl ReviewStore {
         !self.undo_stack.is_empty()
     }
 
+    /// How many rejects [`Self::undo_last_reject`] can take back right now
+    /// (at most [`UNDO_LIMIT`]): comparing it before and after a reject tells
+    /// whether the store stacked one.
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
     /// Takes back the last reject: returns what the host must do to put the
     /// rejected text back (the hunks reappear when those edits come back as
     /// [`EditSource::Review`] events).

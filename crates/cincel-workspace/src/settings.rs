@@ -53,12 +53,16 @@ pub fn install(config: Config, cx: &mut App) {
         ui_scale: 1.0,
         fingerprint,
     };
-    crate::theme::apply(
-        settings.theme(),
-        &settings.config.settings,
-        settings.ui_scale,
-        cx,
-    );
+    {
+        // `CINCEL_TRACE_TIMINGS=1` (`crate::bench::TIMING_TARGET`).
+        let _span = tracing::info_span!(target: "cincel::timing", "theme_load").entered();
+        crate::theme::apply(
+            settings.theme(),
+            &settings.config.settings,
+            settings.ui_scale,
+            cx,
+        );
+    }
     crate::keymap::install(&settings.config.keymap, cx);
     cx.set_global(settings);
 }

@@ -3,10 +3,16 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.90"
+# D22: `<usuario>` is a placeholder the author replaces once the
+# repository is created (docs/publicacion.md, step 5) — never guessed or
+# filled in ahead of time.
+repository = "https://github.com/<usuario>/cincel"
+homepage = "https://github.com/<usuario>/cincel"
+description = "Code editor where you review every change an AI agent makes"
 
 [workspace.dependencies]
 # UI (fijadas al par que exige gpui-kit 0.6.1)
@@ -26,7 +32,6 @@ imara-diff = "0.2"
 similar = "3"
 # proyecto
 notify = "8"
-notify-debouncer-full = "0.5"
 ignore = "0.4"
 # utilidades
 serde = { version = "1", features = ["derive"] }
@@ -84,3 +89,8 @@ opt-level = 2
 lto = "fat"
 codegen-units = 1
 opt-level = 3
+# D11: the profile no longer generates its own debug info; what the
+# standard library brings along only adds size. Function names (for a
+# readable backtrace) are kept; only line-number tables and the rest of
+# DWARF go.
+strip = "debuginfo"

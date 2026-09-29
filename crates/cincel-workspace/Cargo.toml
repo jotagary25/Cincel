@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 cincel-acp = { path = "../cincel-acp" }
@@ -28,6 +29,10 @@ parking_lot = { workspace = true }
 # `cincel_chat::markdown` (`crate::markdown_preview`): the preview shows a
 # muted placeholder instead of loading them.
 regex = { workspace = true }
+# `cincel --bench` (`crate::bench`, spec 08 §3.3): `CLOCK_MONOTONIC` for the
+# `CINCEL_BENCH_T0` time base, `CLOCK_BOOTTIME` and the clock tick rate to
+# place the process start of `/proc/self/stat` on it.
+rustix = { workspace = true, features = ["time", "param"] }
 # Fuzzy matching for the quick file finder (`Ctrl+P`, `crate::file_finder`,
 # `docs/specs/07-etapa5-productividad.md` §3, D1).
 frizbee = { workspace = true }
@@ -46,12 +51,26 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 gpui_platform = { workspace = true }
+# Only to build a minimal, valid Node `.tar.xz` release in
+# `settings_update_e2e_tests.rs` (§5.6.1): the same format
+# `cincel-connections`'s own engine tests already build, reused here rather
+# than duplicated logic, so a fake "Actualizar a vX" can complete for real.
+tar = { workspace = true }
+lzma-rs = { workspace = true }
 
 [features]
 # Enables gpui's test harness (`cargo test -p cincel-workspace --features test-support`).
 # It is off by default because it also turns on gpui leak detection, which
 # aborts the real application on exit (see `docs/etapas/etapa-0.md`, finding 7).
-test-support = ["gpui/test-support", "cincel-editor/test-support"]
+# `gpui-kit/test-support` (D16, `docs/specs/08-etapa6-cierre-1-0.md` §5.6):
+# lets tests simulate a real coordinate click on a gpui-kit component (its
+# own `Button` etc.) and have the click actually register, instead of just
+# reading where it painted. The fixed feature set of every test/clippy
+# command (`cincel-editor/test-support,cincel-workspace/test-support,
+# cincel-chat/test-support`) does not change: this only adds to what this
+# crate's own `test-support` feature turns on, one extra recompile, not a
+# new `target` variant.
+test-support = ["gpui/test-support", "cincel-editor/test-support", "gpui-kit/test-support"]
 
 [lints]
 workspace = true

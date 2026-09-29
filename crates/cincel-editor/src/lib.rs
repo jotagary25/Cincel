@@ -59,9 +59,11 @@
 //! - **Key contexts**: `Editor`, `Editor && searching`,
 //!   `Editor && searching && replacing` and
 //!   `Editor && review_hunk_under_cursor` (see [`EditorView::key_context`]).
-//!   A host that loads its own keymap after the defaults re-binds
-//!   [`search_bar_bindings`] on top of it, so `Tab`, `Enter` and `Ctrl+Enter`
-//!   keep their search-bar meaning while the bar has the keyboard.
+//!   The default keymap (`cincel-settings`'s `DEFAULT_KEYMAP_JSONC`) binds
+//!   `Tab`, `Enter` and `Ctrl+Enter` again in those narrower contexts, placed
+//!   after the plain `Editor` section, so they keep their search-bar meaning
+//!   while the bar has the keyboard (`docs/specs/08-etapa6-cierre-1-0.md`
+//!   §5.4, D14).
 //!
 //! # Display pipeline
 //!
@@ -239,6 +241,8 @@ mod editing_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod git_gutter_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod idle_timer_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod review_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod search_tests;
@@ -259,7 +263,7 @@ pub use actions::{
     SelectPageUp, SelectRight, SelectToDocumentEnd, SelectToDocumentStart, SelectToLineEnd,
     SelectToLineStart, SelectUp, SelectWordLeft, SelectWordRight, SortLines, Tab, ToggleComments,
     ToggleSearchCase, ToggleSearchRegex, ToggleSoftWrap, ToggleWhitespace, Undo, UndoLastReject,
-    Uppercase, bind_default_keys, default_key_bindings, search_bar_bindings,
+    Uppercase, bind_default_keys, default_key_bindings,
 };
 pub use decorations::{Decorator, TextDecorations};
 pub use display_map::{

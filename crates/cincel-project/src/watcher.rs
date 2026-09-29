@@ -1,13 +1,16 @@
 //! The file system watcher.
 //!
-//! `notify` 8 plus `notify-debouncer-full`, 100 ms of debounce, one recursive
+//! `notify` 8 batched by `cincel-watch` (no wakeups at rest; it replaced
+//! `notify-debouncer-full`, whose thread woke up every 25 ms forever), 100 ms
+//! windows, one recursive
 //! watch on the project root — **directories, never files**, which is both
 //! what the spec asks for and the only way to survive an atomic save: an
 //! editor that writes `main.rs.tmp` and renames it over `main.rs` destroys
 //! the inode a per-file watch was holding.
 //!
-//! The debouncer's file-id cache is what turns that rename pair into a single
-//! [`FsEvent::Renamed`]; when a backend only reports one half, the event
+//! inotify pairs the two halves of a rename (`RenameMode::Both`, which
+//! `cincel-watch` keeps instead of the halves), and that pair becomes a
+//! single [`FsEvent::Renamed`]; when a backend only reports one half, the event
 //! degrades to a [`FsEvent::Removed`] plus a [`FsEvent::Created`], which the
 //! `Worktree` and the `BufferStore` both handle.
 //!
@@ -19,9 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
+use cincel_watch::Debouncer;
 use notify::RecursiveMode;
 use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 
 use crate::ignore_rules::{ExcludeSet, IgnoreRules};
 
@@ -109,7 +112,7 @@ pub enum WatchError {
 pub struct Watcher {
     root: PathBuf,
     rules: Arc<IgnoreRules>,
-    _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    _debouncer: Debouncer,
 }
 
 impl Watcher {
@@ -139,24 +142,21 @@ impl Watcher {
 
         let (sender, receiver) = async_channel::unbounded();
         let filter = rules.clone();
-        let mut debouncer = new_debouncer(
+        let mut debouncer = Debouncer::new(
+            "cincel-watch-project",
             options.debounce,
-            None,
-            move |result: DebounceEventResult| match result {
-                Ok(events) => {
-                    let batch: Vec<FsEvent> = events
-                        .iter()
-                        .filter_map(|event| translate(&event.event))
-                        .filter(|event| keep(&filter, event))
-                        .collect();
-                    if !batch.is_empty() {
-                        send(&sender, batch);
-                    }
+            move |batch: cincel_watch::Batch| {
+                for error in batch.errors {
+                    tracing::warn!(%error, "error observando el proyecto");
                 }
-                Err(errors) => {
-                    for error in errors {
-                        tracing::warn!(%error, "error observando el proyecto");
-                    }
+                let batch: Vec<FsEvent> = batch
+                    .events
+                    .iter()
+                    .filter_map(translate)
+                    .filter(|event| keep(&filter, event))
+                    .collect();
+                if !batch.is_empty() {
+                    send(&sender, batch);
                 }
             },
         )?;
@@ -217,7 +217,7 @@ fn translate(event: &notify::Event) -> Option<FsEvent> {
             RemoveKind::Any | RemoveKind::File | RemoveKind::Folder | RemoveKind::Other,
         ) => Some(FsEvent::Removed(first)),
         EventKind::Modify(ModifyKind::Name(mode)) => match mode {
-            // The debouncer pairs both halves when its file-id cache can.
+            // inotify pairs both halves by their cookie.
             RenameMode::Both => {
                 let to = event.paths.get(1).cloned()?;
                 Some(FsEvent::Renamed { from: first, to })

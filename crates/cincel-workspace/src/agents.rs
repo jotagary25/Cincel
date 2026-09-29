@@ -356,8 +356,12 @@ impl Agents {
         // The review follows the project: it saves the one being left and
         // loads the one persisted for the new root.
         let for_review = self.project.clone();
-        self.review
-            .update(cx, |review, cx| review.set_project(for_review, cx));
+        {
+            // `CINCEL_TRACE_TIMINGS=1` (`crate::bench::TIMING_TARGET`).
+            let _span = tracing::info_span!(target: "cincel::timing", "review_restore").entered();
+            self.review
+                .update(cx, |review, cx| review.set_project(for_review, cx));
+        }
         self.transcript_task = None;
         self.sandbox_root = None;
         self.conversation = None;
@@ -1145,7 +1149,7 @@ impl Agents {
             return;
         }
         if matches!(owned, AgentCommand::Prompt { .. })
-            && let Some(ready) = self.review.update(cx, |review, _| review.photo_waiter())
+            && let Some(ready) = self.review.update(cx, |review, _| review.turn_waiter())
         {
             self.defer_prompt(owned, ready, cx);
             return;

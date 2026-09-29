@@ -945,6 +945,14 @@ impl ConnectionsModal {
                 }
             }
             LoginEvent::Failed { message, reason } => {
+                // The friendly sentence replaces Antigravity's own English
+                // wording (§"Avisos del inicio de sesión" (b)); the original
+                // stays reachable under "Ver detalles técnicos" instead of
+                // being thrown away. `flow`'s last use has to come before
+                // `self.session = None` below (both borrow `self`).
+                if is_antigravity_link_expired(&message) {
+                    flow.output.push(message.clone());
+                }
                 self.session = None;
                 self.fail(failure_message(&reason, &message), cx);
                 return;
@@ -1553,8 +1561,23 @@ fn prepare_error_message(error: &ConnectionsError) -> String {
     }
 }
 
+/// Whether `message` is Antigravity's own login-server timeout
+/// (`agy_acp_server`'s `oauth/credential_manager.py`,
+/// `_LOGIN_TIMEOUT_SECONDS = 300`): it gives up on the browser after 5
+/// minutes and answers `authenticate` with English text to that effect,
+/// well before Cincel's own 15-minute `LOGIN_TIMEOUT`. Recognized by
+/// substring, since the exact wording is the provider's, not ours.
+fn is_antigravity_link_expired(message: &str) -> bool {
+    message.contains("Timed out waiting for the authentication flow")
+        || message.contains("Onboarding failed")
+}
+
 /// What to say when the login failed.
 fn failure_message(reason: &LoginFailure, message: &str) -> String {
+    if is_antigravity_link_expired(message) {
+        return "El enlace venció sin completarse. Antigravity da 5 minutos para iniciar sesión."
+            .to_string();
+    }
     match reason {
         LoginFailure::Timeout => {
             "Se agotó el tiempo de espera (15 minutos) sin que aprobaras el acceso.".to_string()
@@ -1569,6 +1592,19 @@ fn failure_message(reason: &LoginFailure, message: &str) -> String {
         }
         LoginFailure::Rejected => format!("El agente rechazó el inicio de sesión: {message}"),
         _ => format!("El inicio de sesión falló: {message}"),
+    }
+}
+
+/// The muted line next to the link (§"Avisos del inicio de sesión" (a)):
+/// Antigravity's own server gives up after 5 minutes
+/// (`is_antigravity_link_expired`'s doc); Claude's and Codex's CLIs have no
+/// timeout of their own, so the number shown is Cincel's own
+/// [`cincel_connections::LOGIN_TIMEOUT`] (15 minutes).
+fn link_expiry_notice(kind: Option<AgentKind>) -> &'static str {
+    if kind == Some(AgentKind::Antigravity) {
+        "Este enlace vence en 5 minutos."
+    } else {
+        "Abrilo dentro de los próximos 15 minutos."
     }
 }
 
@@ -1876,6 +1912,13 @@ impl ConnectionsModal {
                             .clone()
                             .map(|url| self.render_link(&url, theme, scale, cx)),
                     )
+                    .when(flow.url.is_some(), |this| {
+                        this.child(
+                            Self::muted(link_expiry_notice(flow.kind), theme)
+                                .id("login-link-expiry")
+                                .debug_selector(|| "login-link-expiry".to_string()),
+                        )
+                    })
                     .children(flow.notice.clone().map(|notice| Self::muted(notice, theme)))
                     .when(
                         flow.kind == Some(AgentKind::Antigravity) && flow.url.is_some(),
@@ -2023,9 +2066,19 @@ impl ConnectionsModal {
             Step::Failed { message } => {
                 column = column
                     .child(Self::title("No se pudo conectar", theme, scale))
+                    // §"Avisos del inicio de sesión" (c): a link already
+                    // detected before the error stays on screen, above it —
+                    // "Abrir en el navegador" and "Copiar" keep working even
+                    // after the login itself failed.
+                    .children(
+                        flow.url
+                            .clone()
+                            .map(|url| self.render_link(&url, theme, scale, cx)),
+                    )
                     .child(
                         div()
                             .id("connect-error")
+                            .debug_selector(|| "connect-error".to_string())
                             .whitespace_normal()
                             .text_color(theme.status_error)
                             .child(SharedString::from(message.clone())),
@@ -2567,6 +2620,41 @@ mod tests {
                 .contains("Sin conexión a internet")
         );
         assert!(prepare_error_message(&ConnectionsError::RuntimeMissing).contains("internet"));
+    }
+
+    /// §"Avisos del inicio de sesión" (a) y (b).
+    #[test]
+    fn antigravity_link_expiry_gets_a_plain_language_message() {
+        assert!(is_antigravity_link_expired(
+            "Onboarding failed: Timed out waiting for the authentication flow to complete"
+        ));
+        assert!(is_antigravity_link_expired("Onboarding failed: otra cosa"));
+        assert!(!is_antigravity_link_expired("denegado"));
+
+        let message = failure_message(
+            &LoginFailure::Rejected,
+            "Onboarding failed: Timed out waiting for the authentication flow to complete",
+        );
+        assert_eq!(
+            message,
+            "El enlace venció sin completarse. Antigravity da 5 minutos para iniciar sesión."
+        );
+        // A `Rejected` failure that is *not* the link expiring keeps the raw
+        // wording, same as before.
+        assert!(failure_message(&LoginFailure::Rejected, "denegado").contains("denegado"));
+
+        assert_eq!(
+            link_expiry_notice(Some(AgentKind::Antigravity)),
+            "Este enlace vence en 5 minutos."
+        );
+        assert_eq!(
+            link_expiry_notice(Some(AgentKind::Claude)),
+            "Abrilo dentro de los próximos 15 minutos."
+        );
+        assert_eq!(
+            link_expiry_notice(Some(AgentKind::Codex)),
+            "Abrilo dentro de los próximos 15 minutos."
+        );
     }
 
     #[test]

@@ -3,6 +3,16 @@ allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", 
 confidence-threshold = 0.8
 [advisories]
 yanked = "warn"
+# Crates transitivos de gpui-kit / cosmic-text / wgpu marcados como "sin
+# mantenimiento" (RUSTSEC unmaintained). Ningun crate cincel-* depende de ellos
+# directamente; se revisan al subir gpui-kit. Se ignoran con motivo (2026-09-29).
+ignore = [
+    { id = "RUSTSEC-2024-0384", reason = "instant: transitivo de gpui/wgpu; sin reemplazo hasta que gpui lo suba" },
+    { id = "RUSTSEC-2024-0436", reason = "paste: transitivo de gpui/wgpu; macro de compilacion, sin superficie en tiempo de ejecucion" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: transitivo de ureq/rustls; se retira al subir ureq" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz: transitivo de cosmic-text (gpui); sin reemplazo hasta que gpui lo suba" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: transitivo de cosmic-text (gpui); sin reemplazo hasta que gpui lo suba" },
+]
 [bans]
 multiple-versions = "allow"
 [sources]

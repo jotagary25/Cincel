@@ -106,13 +106,29 @@ pub const DEFAULT_KEYMAP_JSONC: &str = r##"[
     }
   },
 
-  // La barra de búsqueda del editor.
+  // La barra de búsqueda del editor. "tab"/"shift-tab" mueven el foco entre
+  // sus campos en lugar de tabular el archivo; como esta sección va después
+  // de "Editor", gana ella mientras la barra tiene el foco (si reasignás
+  // "tab" en tu propia sección "Editor" sin "searching", esa gana también
+  // acá, igual que en Zed).
   {
     "context": "Editor && searching",
     "bindings": {
       "enter": "editor::find_next",
       "shift-enter": "editor::find_prev",
-      "escape": "editor::dismiss_find"
+      "escape": "editor::dismiss_find",
+      "tab": "editor::search_next_field",
+      "shift-tab": "editor::search_prev_field"
+    }
+  },
+
+  // El campo "Reemplazar…" de la barra de búsqueda, cuando tiene el foco:
+  // "enter" reemplaza la coincidencia actual y "ctrl-enter" reemplaza todas.
+  {
+    "context": "Editor && searching && replacing",
+    "bindings": {
+      "enter": "editor::replace_next",
+      "ctrl-enter": "editor::replace_all"
     }
   },
 
@@ -205,9 +221,10 @@ const DEFAULT_SETTINGS_JSONC: &str = r##"{
     "max_file_size_kb": 2048,
     // Ídem por cantidad de líneas.
     "max_lines": 50000,
-    // Megabytes que puede ocupar la copia del proyecto que se toma antes de
-    // cada mensaje al agente; pasado el tope, los archivos guardan solo su
-    // huella y la base sale del buffer si está abierto.
+    // Antes de cada mensaje al agente, Cincel guarda una copia de tus
+    // archivos para poder mostrarte y deshacer lo que cambie. Este es el
+    // máximo que ocupa esa copia (de 16 a 4096 MB); pasado el tope, los
+    // archivos que no entran solo se pueden aceptar enteros.
     "snapshot_max_total_mb": 300,
     // Rutas que siempre piden confirmación antes de que el agente las toque.
     "sensitive_paths": ["**/.env*", "**/.git/**", "**/Cargo.lock", "**/package-lock.json"]
@@ -283,6 +300,8 @@ mod tests {
         let keymap = Keymap::default();
         let editor = ["Editor"];
         let hunk = ["Editor", "review_hunk_under_cursor"];
+        let searching = ["Editor", "searching"];
+        let replacing = ["Editor", "searching", "replacing"];
         let chat = ["Chat"];
         let center = ["Center"];
         let global: [&str; 0] = [];
@@ -336,6 +355,11 @@ mod tests {
             ("ctrl-=", &global, "workspace::zoom_in"),
             ("ctrl--", &global, "workspace::zoom_out"),
             ("ctrl-0", &global, "workspace::zoom_reset"),
+            // `08-etapa6-cierre-1-0.md` §5.4 (D14): search-bar keys.
+            ("tab", &searching, "editor::search_next_field"),
+            ("shift-tab", &searching, "editor::search_prev_field"),
+            ("enter", &replacing, "editor::replace_next"),
+            ("ctrl-enter", &replacing, "editor::replace_all"),
         ];
         for (stroke, contexts, command) in cases {
             let keystroke = Keystroke::parse(stroke).unwrap();
