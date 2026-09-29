@@ -299,7 +299,9 @@ fn updating_node_from_the_settings_tab_completes(cx: &mut TestAppContext) {
     let engine = node_engine(&env, Box::new(downloader));
     let (_workspace, view, cx) = connections_window(engine.clone(), stable_registry(), cx);
 
-    let info = view.read_with(cx, |view, _| view.connections_info().clone());
+    // The update check runs on a real OS thread (`watch_files: true`), so a
+    // single `run_until_parked` is not enough on a slow, shared machine.
+    let info = wait_for_info(&view, cx, |info| info.node.update.is_some());
     assert_eq!(info.node.installed.as_deref(), Some(INSTALLED_NODE_VERSION));
     assert_eq!(
         info.node.update.as_deref(),
@@ -320,10 +322,31 @@ fn updating_node_from_the_settings_tab_completes(cx: &mut TestAppContext) {
         Some(NODE_VERSION.to_string()),
         "el runtime instalado tiene que apuntar a la versión nueva"
     );
-    let info = view.read_with(cx, |view, _| view.connections_info().clone());
+    let info = wait_for_info(&view, cx, |info| {
+        info.operation.is_none() && info.node.installed.as_deref() == Some(NODE_VERSION)
+    });
     assert_eq!(info.node.installed.as_deref(), Some(NODE_VERSION));
     assert_eq!(info.node.update, None, "ya no queda nada para ofrecer");
     assert!(info.operation.is_none());
+}
+
+/// Polls the connections info until `done` holds, or for ten seconds: the
+/// update check and the installs run on real threads here, and the CI's
+/// shared runners can take a while to schedule them.
+fn wait_for_info(
+    view: &Entity<SettingsView>,
+    cx: &mut VisualTestContext,
+    done: impl Fn(&crate::settings_view::ConnectionsInfo) -> bool,
+) -> crate::settings_view::ConnectionsInfo {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        let info = view.read_with(cx, |view, _| view.connections_info().clone());
+        if done(&info) || std::time::Instant::now() >= deadline {
+            return info;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// §5.6.1: cancelling a Node update mid-download returns to "Actualizar a

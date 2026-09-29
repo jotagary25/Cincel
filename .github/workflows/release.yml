@@ -75,6 +75,10 @@ jobs:
             --manifest-path crates/cincel/Cargo.toml \
             packaging/about.hbs \
             -o target/release/THIRD-PARTY-LICENSES.html
+          # `crates/cincel/Cargo.toml` (cargo-deb assets) reads it from the
+          # directory `packaging/build.sh` uses: keep a copy there too.
+          mkdir -p target/ubuntu-22.04
+          cp target/release/THIRD-PARTY-LICENSES.html target/ubuntu-22.04/THIRD-PARTY-LICENSES.html
 
       - name: cargo deb (the generic maintainer already in crates/cincel/Cargo.toml; packaging/README.md)
         run: |
