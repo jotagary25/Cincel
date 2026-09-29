@@ -116,8 +116,9 @@ jobs:
             "$STAGE_DIR/share/doc/cincel/OFL-Inter.txt"
           install -m 0644 crates/cincel-workspace/assets/fonts/jetbrains-mono/OFL.txt \
             "$STAGE_DIR/share/doc/cincel/OFL-JetBrainsMono.txt"
+          # `dist/` lives at the repo root: two levels up from `target/stage`.
           (cd target/stage && tar --numeric-owner --owner=0 --group=0 \
-            -czf "../dist/$PKG_NAME.tar.gz" "$PKG_NAME")
+            -czf "../../dist/$PKG_NAME.tar.gz" "$PKG_NAME")
 
       - name: Checksums
         run: |

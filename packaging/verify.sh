@@ -11,6 +11,9 @@ set -eu
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 DIST_DIR=${1:-"$REPO_ROOT/dist"}
+# Docker only bind-mounts absolute paths: accept a relative one (the release
+# workflow passes `dist`) by resolving it here.
+DIST_DIR=$(cd "$DIST_DIR" && pwd)
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_ROOT/Cargo.toml" | head -n1)
 PKG_NAME="cincel-$VERSION-x86_64-linux"
 TARBALL="$DIST_DIR/$PKG_NAME.tar.gz"
