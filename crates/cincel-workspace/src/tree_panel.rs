@@ -11,11 +11,14 @@
 //! and fold (gpui-kit's own bindings), and the context menu offers "Revelar en
 //! carpeta", "Copiar ruta" and "Copiar ruta relativa". Colors follow
 //! `docs/specs/02-visual.md` §6.4: files with pending agent changes in
-//! `#e5c07b` with a `+N −M` suffix, files the agent created in `#98c379`,
-//! folders with pending children carry a 6 px dot, and the header over the
-//! tree shows the project total; git colors apply to everything else.
+//! `#e5c07b` with a `+N −M` suffix, files the agent created in `#98c379`
+//! with `+N`, files it deleted struck through in `status.error` with `−N`
+//! (kept in the tree until the deletion is decided, even once the worktree
+//! dropped them), folders with pending children carry a 6 px dot, and the
+//! header over the tree shows the project total; git colors apply to
+//! everything else.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use cincel_project::{EntryKind, GitFileStatus, Worktree};
@@ -26,6 +29,7 @@ use gpui::{
 use gpui_kit::assets::IconName;
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::tree::{TreeEntry, TreeEvent, TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::prelude::*;
@@ -33,7 +37,9 @@ use gpui_kit::{div, px};
 
 use crate::WorkspaceEvent;
 use crate::project::{Project, ProjectEvent};
-use crate::review::{FileState, Review, SharedSummary, stats_label};
+use crate::review::{
+    DELETED_TOOLTIP, FileState, FileSummary, Review, SharedSummary, outside_label, tree_stats_label,
+};
 use crate::theme::ThemeColors;
 
 /// The GPUI key context the tree declares, and the one the `Enter` binding
@@ -60,8 +66,44 @@ pub struct FilesPanel {
     review: SharedSummary,
     /// Whether [`FilesPanel::set_review`] added its observation.
     review_wired: bool,
+    /// Relative paths of the files the agent deleted, still pending, that
+    /// the worktree no longer lists: the tree keeps showing them, struck
+    /// through, until the deletion is decided.
+    ghosts: BTreeSet<PathBuf>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+/// How the tree paints a file with pending agent changes
+/// (`docs/specs/02-visual.md` §6.4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewRowStyle {
+    /// Color of the name and the icon: `status.ok` for a file the agent
+    /// created, `status.error` for one it deleted, `status.warning` for one
+    /// it changed.
+    pub color: gpui::Hsla,
+    /// The counter after the name: `+N`, `−N`, `+N −M` or the label of a
+    /// file reviewed outside the store.
+    pub suffix: SharedString,
+    /// A deleted file's name is struck through.
+    pub strikethrough: bool,
+    /// What hovering the row says (a deleted file only).
+    pub tooltip: Option<&'static str>,
+}
+
+/// The [`ReviewRowStyle`] of `file`.
+pub fn review_row_style(file: &FileSummary, theme: &ThemeColors) -> ReviewRowStyle {
+    let deleted = file.state == FileState::Deleted;
+    ReviewRowStyle {
+        color: review_color(file.state, theme),
+        suffix: SharedString::from(
+            outside_label(file)
+                .map(str::to_owned)
+                .unwrap_or_else(|| tree_stats_label(file)),
+        ),
+        strikethrough: deleted,
+        tooltip: deleted.then_some(DELETED_TOOLTIP),
+    }
 }
 
 impl FilesPanel {
@@ -77,6 +119,7 @@ impl FilesPanel {
                 context_target: None,
                 review: SharedSummary::default(),
                 review_wired: false,
+                ghosts: BTreeSet::new(),
                 focus_handle: cx.focus_handle(),
                 _subscriptions: vec![subscription],
             }
@@ -105,7 +148,15 @@ impl FilesPanel {
     /// it changes.
     pub fn set_review(&mut self, review: &Entity<Review>, cx: &mut Context<Self>) {
         self.review = review.read(cx).summary();
-        let subscription = cx.observe(review, |_, _, cx| cx.notify());
+        // A deletion that appears or gets decided adds or drops a row of
+        // its own; anything else only repaints.
+        let subscription = cx.observe(review, |this, _, cx| {
+            if this.ghost_paths(cx) != this.ghosts {
+                this.rebuild(cx);
+            } else {
+                cx.notify();
+            }
+        });
         // Kept before the project subscription, which `set_project` replaces.
         if self.review_wired {
             self._subscriptions[1] = subscription;
@@ -121,6 +172,14 @@ impl FilesPanel {
         self.project.as_ref()
     }
 
+    /// The root line's counters ("1 archivo · 3 cambios · +0 −36",
+    /// `crate::review::totals_label`), or `None` with nothing pending.
+    pub fn root_review_label(&self) -> Option<String> {
+        let review = self.review.borrow();
+        (review.pending > 0)
+            .then(|| crate::review::totals_label(review.files.len(), review.pending, review.total))
+    }
+
     fn has_review_observation(&self) -> bool {
         self.review_wired
     }
@@ -128,12 +187,38 @@ impl FilesPanel {
     /// The review label of `relative` as the tree paints it (`+N −M`), for
     /// the tests.
     pub fn review_label(&self, relative: &Path, cx: &App) -> Option<String> {
+        self.review_style(relative, cx)
+            .map(|style| style.suffix.to_string())
+    }
+
+    /// How the row of `relative` paints its review state, for the tests.
+    pub fn review_style(&self, relative: &Path, cx: &App) -> Option<ReviewRowStyle> {
         let project = self.project.as_ref()?;
         let absolute = project.read(cx).absolute(relative);
+        let theme = ThemeColors::global(cx);
         self.review
             .borrow()
             .file(&absolute)
-            .map(|file| stats_label(file.added, file.removed))
+            .map(|file| review_row_style(file, theme))
+    }
+
+    /// The pending deletions the worktree no longer lists, relative to the
+    /// root.
+    fn ghost_paths(&self, cx: &App) -> BTreeSet<PathBuf> {
+        let Some(project) = &self.project else {
+            return BTreeSet::new();
+        };
+        let project = project.read(cx);
+        let review = self.review.borrow();
+        review
+            .files
+            .iter()
+            .filter(|(_, file)| file.state == FileState::Deleted)
+            .map(|(path, _)| project.relative(path))
+            .filter(|relative| {
+                !relative.as_os_str().is_empty() && !project.worktree().contains(relative)
+            })
+            .collect()
     }
 
     /// The tree state, for tests and for the status bar.
@@ -167,6 +252,31 @@ impl FilesPanel {
         labels
     }
 
+    /// Whether the keyboard focus is anywhere inside the panel: the tree, its
+    /// context menu or the panel itself
+    /// (`docs/specs/07-etapa5-productividad.md` §7.1).
+    ///
+    /// Answers from the last rendered frame, like every GPUI focus query.
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx)
+    }
+
+    /// "Enfocar" the panel (§7.1): the selected row of the tree, or the first
+    /// one when nothing is selected, so the arrows work right away. With an
+    /// empty tree or no project, the panel itself.
+    pub fn focus_selected_or_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.is_none() || self.tree.read(cx).entry(0).is_none() {
+            window.focus(&self.focus_handle, cx);
+            return;
+        }
+        self.tree.update(cx, |tree, cx| {
+            if tree.selected_index().is_none() {
+                tree.set_selected_index(Some(0), cx);
+            }
+            tree.focus(window, cx);
+        });
+    }
+
     /// Opens the file at `relative` as if the tree had been clicked. Used by
     /// the tests, which cannot synthesize a double click.
     pub fn open_for_test(&mut self, relative: &Path, pin: bool, cx: &mut Context<Self>) {
@@ -175,10 +285,16 @@ impl FilesPanel {
 
     /// Rebuilds the tree items from the worktree.
     pub fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.ghosts = self.ghost_paths(cx);
         let items = match &self.project {
             Some(project) => {
                 let project = project.read(cx);
-                build_items(project.worktree(), Path::new(""), &self.expanded)
+                build_items(
+                    project.worktree(),
+                    Path::new(""),
+                    &self.expanded,
+                    &self.ghosts,
+                )
             }
             None => Vec::new(),
         };
@@ -245,6 +361,21 @@ impl FilesPanel {
                 .selected_item()
                 .map(|item| path_of(&item.id))
         })
+    }
+
+    /// The base folder for "Nuevo archivo" (`docs/specs/07-etapa5-
+    /// productividad.md` §8.2, D6, E5-I): the folder selected in the tree,
+    /// the folder containing the selected file, or `None` with nothing
+    /// selected (the caller falls back to the project root).
+    pub fn new_file_base_folder(&self, cx: &App) -> Option<PathBuf> {
+        let project = self.project.as_ref()?;
+        let relative = self.target(cx)?;
+        let absolute = project.read(cx).absolute(&relative);
+        if absolute.is_dir() {
+            Some(absolute)
+        } else {
+            absolute.parent().map(Path::to_path_buf)
+        }
     }
 
     fn on_reveal_in_folder(
@@ -337,18 +468,69 @@ fn is_placeholder(id: &SharedString) -> bool {
 }
 
 /// Builds the items of one directory, recursing into the expanded ones.
-fn build_items(worktree: &Worktree, dir: &Path, expanded: &HashSet<PathBuf>) -> Vec<TreeItem> {
-    worktree
+///
+/// `ghosts` are pending deletions the worktree no longer lists (relative
+/// paths): they are merged in among the files of their folder, and a folder
+/// the agent removed with them is shown too, so every deletion stays
+/// visible until it is decided.
+fn build_items(
+    worktree: &Worktree,
+    dir: &Path,
+    expanded: &HashSet<PathBuf>,
+    ghosts: &BTreeSet<PathBuf>,
+) -> Vec<TreeItem> {
+    // `(is_dir, name, relative path)` in the worktree's order: folders
+    // first, then files.
+    let mut children: Vec<(bool, String, PathBuf)> = worktree
         .children(dir)
         .map(|entry| {
-            let id = SharedString::from(entry.path.to_string_lossy().to_string());
-            let item = TreeItem::new(id.clone(), SharedString::from(entry.name().to_string()));
-            if entry.kind != EntryKind::Dir {
+            (
+                entry.kind == EntryKind::Dir,
+                entry.name().to_string(),
+                entry.path.clone(),
+            )
+        })
+        .collect();
+    let mut missing: BTreeMap<PathBuf, bool> = BTreeMap::new();
+    for ghost in ghosts {
+        let Ok(rest) = ghost.strip_prefix(dir) else {
+            continue;
+        };
+        let Some(first) = rest.components().next() else {
+            continue;
+        };
+        let child = dir.join(first);
+        if worktree.contains(&child) {
+            continue;
+        }
+        *missing.entry(child.clone()).or_default() |= &child != ghost;
+    }
+    for (path, is_dir) in missing {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let key = name.to_lowercase();
+        // Among its kind, alphabetically (case-insensitive).
+        let at = children
+            .iter()
+            .position(|(other_dir, other, _)| {
+                (*other_dir == is_dir && other.to_lowercase() > key) || (is_dir && !*other_dir)
+            })
+            .unwrap_or(children.len());
+        children.insert(at, (is_dir, name, path));
+    }
+    children
+        .into_iter()
+        .map(|(is_dir, name, path)| {
+            let id = SharedString::from(path.to_string_lossy().to_string());
+            let item = TreeItem::new(id.clone(), SharedString::from(name));
+            if !is_dir {
                 return item;
             }
-            let is_expanded = expanded.contains(&entry.path);
+            let is_expanded = expanded.contains(&path);
             let children = if is_expanded {
-                build_items(worktree, &entry.path, expanded)
+                build_items(worktree, &path, expanded, ghosts)
             } else {
                 Vec::new()
             };
@@ -371,7 +553,10 @@ fn build_items(worktree: &Worktree, dir: &Path, expanded: &HashSet<PathBuf>) -> 
 }
 
 /// The icon of a file, by extension (`docs/specs/02-visual.md` §4: Lucide).
-fn file_icon(path: &Path) -> IconName {
+///
+/// `pub(crate)` so the file finder (`crate::file_finder`, E5-F) can reuse the
+/// exact same icon the tree shows (§3.2).
+pub(crate) fn file_icon(path: &Path) -> IconName {
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -403,7 +588,8 @@ fn status_color(status: Option<GitFileStatus>, theme: &ThemeColors) -> Option<gp
 fn review_color(state: FileState, theme: &ThemeColors) -> gpui::Hsla {
     match state {
         FileState::Created => theme.status_ok,
-        FileState::Modified | FileState::Deleted => theme.status_warning,
+        FileState::Modified => theme.status_warning,
+        FileState::Deleted => theme.status_error,
     }
 }
 
@@ -503,10 +689,8 @@ impl Render for FilesPanel {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| root.display().to_string());
-            let (pending, total) = {
-                let review = self.review.borrow();
-                (review.pending, review.total)
-            };
+            let pending = self.review.borrow().pending;
+            let totals = self.root_review_label();
             let scale = crate::settings::ui_scale(cx);
             div()
                 .id("files-root")
@@ -520,15 +704,12 @@ impl Render for FilesPanel {
                 .text_size(px(12. * scale))
                 .child(SharedString::from(name))
                 .when(pending > 0, |this| {
-                    this.child(
+                    this.children(totals.map(|totals| {
                         div()
                             .text_size(px(11. * scale))
                             .text_color(theme.status_warning)
-                            .child(SharedString::from(format!(
-                                "{pending} pendientes · {}",
-                                stats_label(total.0, total.1)
-                            ))),
-                    )
+                            .child(SharedString::from(totals))
+                    }))
                 })
         });
 
@@ -591,16 +772,20 @@ fn render_row(
             is_folder && review.has_pending_under(&absolute),
         )
     };
+    let style = agent
+        .as_ref()
+        .filter(|_| !placeholder)
+        .map(|file| review_row_style(file, theme));
     let color = if placeholder {
         Some(theme.text_muted)
-    } else if let Some(file) = &agent {
-        Some(review_color(file.state, theme))
+    } else if let Some(style) = &style {
+        Some(style.color)
     } else {
         status_color(status, theme)
     };
-    let suffix = agent
-        .as_ref()
-        .map(|file| SharedString::from(stats_label(file.added, file.removed)));
+    let strikethrough = style.as_ref().is_some_and(|style| style.strikethrough);
+    let tooltip = style.as_ref().and_then(|style| style.tooltip);
+    let suffix = style.map(|style| style.suffix);
     let has_changes_under = has_changes_under || pending_under;
 
     let icon = if placeholder {
@@ -658,6 +843,8 @@ fn render_row(
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .when_some(color, |this, color| this.text_color(color))
+                        // A file the agent deleted, still pending.
+                        .when(strikethrough, |this| this.line_through())
                         .child(item.label.clone()),
                 )
                 .children(suffix.map(|suffix| {
@@ -694,6 +881,9 @@ fn render_row(
             let _ = panel.update(cx, |panel, cx| panel.open(&relative, pin, cx));
         });
     }
+    if let Some(tooltip) = tooltip {
+        row = row.tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx));
+    }
     row
 }
 
@@ -714,7 +904,7 @@ mod tests {
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
 
         let worktree = tree_of(dir.path());
-        let items = build_items(&worktree, Path::new(""), &HashSet::new());
+        let items = build_items(&worktree, Path::new(""), &HashSet::new(), &BTreeSet::new());
         assert_eq!(items.len(), 2);
         // Folders first.
         assert_eq!(items[0].label, "src");
@@ -735,13 +925,36 @@ mod tests {
 
         let worktree = tree_of(dir.path());
         let expanded = HashSet::from([PathBuf::from("src")]);
-        let items = build_items(&worktree, Path::new(""), &expanded);
+        let items = build_items(&worktree, Path::new(""), &expanded, &BTreeSet::new());
         assert!(items[0].is_expanded());
         assert_eq!(items[0].children.len(), 1);
         assert_eq!(items[0].children[0].label, "main.rs");
         assert_eq!(
             path_of(&items[0].children[0].id),
             PathBuf::from("src/main.rs")
+        );
+    }
+
+    /// Pending deletions the worktree no longer lists keep their row, in
+    /// order among the files, and a folder removed with them shows too.
+    #[test]
+    fn pending_deletions_stay_in_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("a.py"), "").unwrap();
+        std::fs::write(dir.path().join("z.py"), "").unwrap();
+
+        let worktree = tree_of(dir.path());
+        let ghosts = BTreeSet::from([PathBuf::from("m.py"), PathBuf::from("viejo/uno.py")]);
+        let expanded = HashSet::from([PathBuf::from("viejo")]);
+        let items = build_items(&worktree, Path::new(""), &expanded, &ghosts);
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_ref()).collect();
+        assert_eq!(labels, ["src", "viejo", "a.py", "m.py", "z.py"]);
+        assert!(items[1].is_folder());
+        assert_eq!(items[1].children[0].label, "uno.py");
+        assert_eq!(
+            path_of(&items[1].children[0].id),
+            PathBuf::from("viejo/uno.py")
         );
     }
 

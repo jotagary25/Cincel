@@ -16,7 +16,10 @@
 //!   SHA-256 when published, disk-space check) at the registry's version;
 //! * [`LoginSession`]: the provider login in a hidden pty (Claude, Codex) or
 //!   through ACP `authenticate` (Antigravity), streaming [`LoginEvent`]s;
-//! * [`disconnect()`]: logout + safe profile removal.
+//! * [`disconnect()`]: logout + safe profile removal;
+//! * [`CancelToken`]: real cancellation of the downloads and installs of
+//!   "Preparando…" and of the updates (`docs/specs/07-etapa5-productividad.md`
+//!   §10.3), which leaves no partial file behind.
 //!
 //! [`Connections`] ties them together for the UI (see
 //! `docs/specs/modulos/connections.md` for the protocol).
@@ -24,6 +27,7 @@
 #![deny(missing_docs)]
 
 mod adapters;
+mod cancel;
 mod disconnect;
 mod envutil;
 mod error;
@@ -42,6 +46,7 @@ pub use adapters::{
     PackageInstaller, binary_plan, download_size_hint, free_space, install_space_needed,
     registry_version,
 };
+pub use cancel::CancelToken;
 pub use disconnect::{DisconnectReport, LogoutStep, disconnect};
 pub use error::{ConnectionsError, Result, human_size};
 pub use identity::{
@@ -59,7 +64,7 @@ pub use profile::{
 };
 pub use runtime::{
     Downloader, HttpDownloader, MIN_NODE_MAJOR, NODE_DIST_URL, NodePaths, NodeVersion, RangeBody,
-    Runtime, RuntimeProgress, keep_runtime_entry, node_platform, pick_lts, sha256_file,
+    Runtime, RuntimeProgress, keep_runtime_entry, node_platform, pick_lts, pick_major, sha256_file,
 };
 pub use scanner::{
     OutputScanner, find_code, find_login_urls, is_login_url, redact_line, strip_ansi,
@@ -92,6 +97,15 @@ pub enum PrepareProgress {
     Runtime(RuntimeProgress),
     /// Adapter install (npm install, or the binary download).
     Adapter(AdapterProgress),
+}
+
+/// What [`Connections::prune_unused`] removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Runtime directories (`node-v24.1.0`).
+    pub runtimes: Vec<String>,
+    /// Adapter versions, as `(agent_id, version)`.
+    pub adapters: Vec<(String, String)>,
 }
 
 /// Facade over store, runtime and adapters.
@@ -217,32 +231,64 @@ impl Connections {
     /// only what is installed is used. Never touches credentials
     /// ("Reparar"). Returns the runtime when the agent needs one.
     ///
+    /// Cancelling `cancel` (the modal's "Cancelar") stops the download or
+    /// `npm install` in progress and removes what it left half-done; the
+    /// call then returns [`ConnectionsError::Cancelled`]. A second
+    /// preparation of the same agent (or of another npm agent, for the
+    /// shared runtime) waits for a running one to finish.
+    ///
     /// # Errors
     ///
-    /// Runtime or install errors.
+    /// Runtime or install errors, [`ConnectionsError::Cancelled`].
     pub fn prepare(
         &self,
         registry: Option<&AgentRegistry>,
         kind: AgentKind,
         progress: &mut dyn FnMut(PrepareProgress),
+        cancel: &CancelToken,
     ) -> Result<(Option<NodePaths>, AdapterInstall)> {
+        cancel.check()?;
         let node = if kind.needs_node() {
             Some(match (&registry, self.runtime.installed()) {
                 (None, Some(node)) => node,
                 (None, None) => return Err(ConnectionsError::RuntimeMissing),
                 (Some(_), _) => self
                     .runtime
-                    .ensure(&mut |step| progress(PrepareProgress::Runtime(step)))?,
+                    .ensure(&mut |step| progress(PrepareProgress::Runtime(step)), cancel)?,
             })
         } else {
             None
         };
-        let adapter = self
-            .adapters
-            .ensure(registry, kind, node.as_ref(), &mut |step| {
+        let adapter = self.adapters.ensure(
+            registry,
+            kind,
+            node.as_ref(),
+            &mut |step| {
                 progress(PrepareProgress::Adapter(step));
-            })?;
+            },
+            cancel,
+        )?;
         Ok((node, adapter))
+    }
+
+    /// Start-up cleanup (`docs/specs/07-etapa5-productividad.md` §10.4, D13):
+    /// remove adapter versions that are neither `current` nor in `in_use`
+    /// ([`Adapters::prune_unused`]) and, when `in_use` is empty (nothing
+    /// runs yet), runtimes other than `current` ([`Runtime::prune_old`]).
+    /// Call it once at start-up before launching any agent (and, with the
+    /// live connections' versions, when a connection stops).
+    ///
+    /// # Errors
+    ///
+    /// I/O errors removing a directory.
+    pub fn prune_unused(&self, in_use: &[(&str, &str)]) -> Result<PruneReport> {
+        let adapters = self.adapters.prune_unused(in_use)?;
+        let runtimes = if in_use.is_empty() {
+            self.runtime.prune_old()?
+        } else {
+            Vec::new()
+        };
+        Ok(PruneReport { runtimes, adapters })
     }
 
     /// The private runtime when `kind` needs one.

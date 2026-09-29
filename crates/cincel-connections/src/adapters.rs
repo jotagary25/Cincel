@@ -13,9 +13,17 @@
 //!
 //! Either way the install lands in a staging directory that is renamed into
 //! place, so a half-finished install never looks installed.
+//!
+//! Etapa 5 (`docs/specs/07-etapa5-productividad.md` §10.3, §10.4): every
+//! install takes a [`CancelToken`] (downloads stop within one 64 KiB read,
+//! unpacking within one read of one entry, `npm install` has its process
+//! group killed; the `.part` and the staging directory are removed), and
+//! [`Adapters::update`] installs a new version next to the one in use
+//! (D13), which [`Adapters::prune_unused`] removes later.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -23,11 +31,14 @@ use std::time::Duration;
 use cincel_acp::{AgentRegistry, LaunchSpec, ProcessEnv};
 use serde::{Deserialize, Serialize};
 
+use crate::cancel::{CancelReader, CancelToken, WorkLock, or_cancelled};
 use crate::envutil;
 use crate::error::{ConnectionsError, Result, io_err};
 use crate::paths::{CincelPaths, create_private_dir, write_atomic};
 use crate::profile::{AdapterSource, AgentKind};
-use crate::runtime::{Downloader, HttpDownloader, NodePaths, sha256_file};
+use crate::runtime::{
+    Downloader, HttpDownloader, NodePaths, download_part, foreign_staging, sha256_file,
+};
 
 /// How an installed adapter is run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,11 +150,14 @@ pub enum AdapterProgress {
 /// fake.
 pub trait PackageInstaller: Send + Sync {
     /// Install `package_spec` (`name@version`) under `prefix` (so it lands in
-    /// `<prefix>/node_modules/<name>`), using `cache` as npm's cache.
+    /// `<prefix>/node_modules/<name>`), using `cache` as npm's cache. Must
+    /// stop promptly (killing whatever it started) once `cancel` is
+    /// cancelled; the caller removes `prefix`.
     ///
     /// # Errors
     ///
-    /// [`ConnectionsError::InstallFailed`] with the tail of npm's output.
+    /// [`ConnectionsError::InstallFailed`] with the tail of npm's output,
+    /// [`ConnectionsError::Cancelled`].
     fn install(
         &self,
         node: &NodePaths,
@@ -151,12 +165,19 @@ pub trait PackageInstaller: Send + Sync {
         prefix: &Path,
         cache: &Path,
         npmrc: &Path,
+        cancel: &CancelToken,
     ) -> Result<()>;
 }
 
+/// How often [`NpmInstaller`] checks its cancel token.
+const NPM_POLL: Duration = Duration::from_millis(100);
+
 /// `node <npm-cli.js> install --prefix <dir> --cache <cincel cache> ...`
 /// with the private runtime first in `PATH`, `npm_config_*` from the
-/// user's shell stripped and an empty `userconfig`/`globalconfig`.
+/// user's shell stripped and an empty `userconfig`/`globalconfig`. npm runs
+/// as the leader of its own process group; while it runs the token is
+/// checked every 100 ms and, once cancelled, the whole group (npm and its
+/// lifecycle scripts) is killed and reaped before returning.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NpmInstaller;
 
@@ -168,6 +189,7 @@ impl PackageInstaller for NpmInstaller {
         prefix: &Path,
         cache: &Path,
         npmrc: &Path,
+        cancel: &CancelToken,
     ) -> Result<()> {
         let env = ProcessEnv::new()
             .with_unset("npm_config_*")
@@ -203,19 +225,64 @@ impl PackageInstaller for NpmInstaller {
             .arg("--loglevel=error")
             .arg(package_spec)
             .current_dir(prefix)
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         envutil::apply_std(&mut command, &env, &BTreeMap::new());
-        let output = command
-            .output()
-            .map_err(|error| ConnectionsError::InstallFailed {
-                package: package_spec.to_string(),
-                message: error.to_string(),
-            })?;
-        if output.status.success() {
+        cancel.check()?;
+        let failed = |message: String| ConnectionsError::InstallFailed {
+            package: package_spec.to_string(),
+            message,
+        };
+        let mut child = command.spawn().map_err(|error| failed(error.to_string()))?;
+        // Drain both pipes so npm never blocks on a full one.
+        let drain = |pipe: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut bytes);
+                }
+                bytes
+            })
+        };
+        let stdout = drain(
+            child
+                .stdout
+                .take()
+                .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+        );
+        let stderr = drain(
+            child
+                .stderr
+                .take()
+                .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+        );
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(error) => return Err(failed(error.to_string())),
+            }
+            if cancel.is_cancelled() {
+                kill_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                // The reader threads end with the pipes; not joined, so a
+                // helper that escaped the group cannot stall the cancel.
+                return Err(ConnectionsError::Cancelled);
+            }
+            std::thread::sleep(NPM_POLL);
+        };
+        if status.success() {
             return Ok(());
         }
-        let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
+        let mut text = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+        text.push_str(&String::from_utf8_lossy(&stdout.join().unwrap_or_default()));
         let tail: String = text
             .lines()
             .rev()
@@ -230,6 +297,16 @@ impl PackageInstaller for NpmInstaller {
             message: tail,
         })
     }
+}
+
+/// SIGKILL the process group led by `pid` (npm and everything it spawned).
+fn kill_group(pid: u32) {
+    #[cfg(unix)]
+    if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 /// Free bytes on the filesystem holding `path` (its closest existing
@@ -423,6 +500,82 @@ fn valid_version(version: &str) -> bool {
     !version.is_empty() && !version.contains('/') && !version.contains("..")
 }
 
+/// `x.y.z[-prerelease][+build]` split into its numeric core (missing
+/// components read as `0`) and its prerelease identifiers, if any. Build
+/// metadata (`+...`) never affects comparisons and is dropped.
+fn split_version(version: &str) -> (Vec<u64>, Option<String>) {
+    let version = version.trim().trim_start_matches('v');
+    let version = version.split('+').next().unwrap_or(version);
+    let (core, prerelease) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre.to_string())),
+        None => (version, None),
+    };
+    let parts = core
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect();
+    (parts, prerelease)
+}
+
+/// Compares two prerelease suffixes identifier by identifier: a numeric
+/// identifier compares numerically, anything else lexically, and a longer
+/// list outranks a prefix of itself (semver's own precedence rule).
+fn compare_prerelease(a: &str, b: &str) -> Ordering {
+    let mut left = a.split('.');
+    let mut right = b.split('.');
+    loop {
+        return match (left.next(), right.next()) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(x), Some(y)) => match (x.parse::<u64>(), y.parse::<u64>()) {
+                (Ok(x), Ok(y)) => match x.cmp(&y) {
+                    Ordering::Equal => continue,
+                    order => order,
+                },
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => match x.cmp(y) {
+                    Ordering::Equal => continue,
+                    order => order,
+                },
+            },
+        };
+    }
+}
+
+/// Numeric semver comparison of two versions (`x.y.z`, with a `-prerelease`
+/// suffix always sorting below its plain release: `1.0.0-beta` < `1.0.0`).
+/// Used by [`Adapters::update_available`] so "Actualizar a…" never offers a
+/// version that is not actually newer than what is installed, whichever of
+/// the two version sources (the catalog Cincel ships, or what "Buscar
+/// actualizaciones" fetched) it comes from.
+fn compare_versions(a: &str, b: &str) -> Ordering {
+    let (core_a, pre_a) = split_version(a);
+    let (core_b, pre_b) = split_version(b);
+    let len = core_a.len().max(core_b.len());
+    for index in 0..len {
+        let x = core_a.get(index).copied().unwrap_or(0);
+        let y = core_b.get(index).copied().unwrap_or(0);
+        match x.cmp(&y) {
+            Ordering::Equal => {}
+            order => return order,
+        }
+    }
+    match (pre_a, pre_b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => compare_prerelease(&a, &b),
+    }
+}
+
+/// Whether `candidate` is strictly newer than `installed`, per
+/// [`compare_versions`].
+fn is_newer_version(candidate: &str, installed: &str) -> bool {
+    compare_versions(candidate, installed) == Ordering::Greater
+}
+
 impl Adapters {
     /// Manager under `paths`, installing with npm and downloading over HTTPS.
     #[must_use]
@@ -491,6 +644,11 @@ impl Adapters {
         self.paths.agents_dir().join(agent_id).join(version)
     }
 
+    /// In-process lock key of one agent's install directory ([`WorkLock`]).
+    fn agent_lock(&self, agent_id: &str) -> String {
+        format!("agent:{}", self.paths.agents_dir().join(agent_id).display())
+    }
+
     fn current_file(&self, agent_id: &str) -> PathBuf {
         self.paths.agents_dir().join(agent_id).join("current")
     }
@@ -516,9 +674,11 @@ impl Adapters {
             .map(|install| install.version)
     }
 
-    /// The registry's version when it differs from the installed one (the
-    /// "Actualizar" button). `None` when up to date, not installed, or the
-    /// registry does not publish the agent.
+    /// The registry's version when it is numerically newer than the
+    /// installed one (the "Actualizar" button, [`compare_versions`]). `None`
+    /// when up to date, older (the catalog Cincel ships can lag behind an
+    /// adapter installed through a fresher "Buscar actualizaciones" check),
+    /// not installed, or the registry does not publish the agent.
     #[must_use]
     pub fn update_available(&self, registry: &AgentRegistry, kind: AgentKind) -> Option<String> {
         let installed = self.installed(kind.agent_id())?;
@@ -526,7 +686,7 @@ impl Adapters {
             AdapterSource::Npm { .. } => registry_version(registry, kind).ok()?.0,
             AdapterSource::Binary => binary_plan(registry, kind, &self.platform).ok()?.version,
         };
-        (latest != installed).then_some(latest)
+        is_newer_version(&latest, &installed).then_some(latest)
     }
 
     /// The registry's binary distribution of `kind` for this machine (what
@@ -540,8 +700,16 @@ impl Adapters {
     }
 
     /// Put `staging` in place as `<agent_id>/<version>`, point `current` at
-    /// it and drop older versions and leftovers.
-    fn commit(&self, agent_id: &str, version: &str, staging: &Path) -> Result<()> {
+    /// it and drop older versions and leftovers, except `keep` (the version
+    /// a live connection may still be running, D13). Installs of one agent
+    /// never overlap inside the process ([`WorkLock`]).
+    fn commit(
+        &self,
+        agent_id: &str,
+        version: &str,
+        staging: &Path,
+        keep: Option<&str>,
+    ) -> Result<()> {
         let agent_root = self.paths.agents_dir().join(agent_id);
         let final_dir = self.install_dir(agent_id, version);
         if final_dir.exists() {
@@ -552,7 +720,7 @@ impl Adapters {
         if let Ok(entries) = std::fs::read_dir(&agent_root) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if entry.path().is_dir() && name != version {
+                if entry.path().is_dir() && name != version && Some(name.as_str()) != keep {
                     let _ = std::fs::remove_dir_all(entry.path());
                 }
             }
@@ -573,12 +741,13 @@ impl Adapters {
 
     /// Install the npm adapter of `kind` at `version` (with the registry's
     /// extra `args`) using the private runtime. Older versions are removed
-    /// afterwards.
+    /// afterwards. Cancelling kills `npm install` and removes the staging
+    /// directory.
     ///
     /// # Errors
     ///
-    /// [`ConnectionsError::InstallFailed`] (also for a binary agent) or I/O
-    /// errors.
+    /// [`ConnectionsError::InstallFailed`] (also for a binary agent),
+    /// [`ConnectionsError::Cancelled`] or I/O errors.
     pub fn install(
         &self,
         kind: AgentKind,
@@ -586,6 +755,22 @@ impl Adapters {
         args: &[String],
         node: &NodePaths,
         progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
+    ) -> Result<AdapterInstall> {
+        let _lock = WorkLock::acquire(&self.agent_lock(kind.agent_id()), cancel)?;
+        self.install_npm(kind, version, args, node, None, progress, cancel)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_npm(
+        &self,
+        kind: AgentKind,
+        version: &str,
+        args: &[String],
+        node: &NodePaths,
+        keep: Option<&str>,
+        progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
     ) -> Result<AdapterInstall> {
         let agent_id = kind.agent_id();
         let Some(package) = kind.npm_package() else {
@@ -600,6 +785,7 @@ impl Adapters {
                 message: format!("versión inválida `{version}`"),
             });
         }
+        cancel.check()?;
         let cache = self.paths.npm_cache_dir();
         std::fs::create_dir_all(&cache).map_err(io_err(&cache))?;
         let npmrc = self.paths.data_dir.join("npmrc");
@@ -614,14 +800,13 @@ impl Adapters {
         progress(AdapterProgress::Installing {
             package: spec.clone(),
         });
-        if let Err(error) = self
+        let installed = self
             .installer
-            .install(node, &spec, &staging, &cache, &npmrc)
-        {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-        let bin = match package_bin(&staging, kind) {
+            .install(node, &spec, &staging, &cache, &npmrc, cancel)
+            .map_err(|error| or_cancelled(cancel, error))
+            .and_then(|()| cancel.check())
+            .and_then(|()| package_bin(&staging, kind));
+        let bin = match installed {
             Ok(bin) => bin,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&staging);
@@ -640,7 +825,8 @@ impl Adapters {
         };
         if let Err(error) =
             write_atomic(&staging.join(MARKER), &serde_json::to_vec_pretty(&install)?)
-                .and_then(|()| self.commit(agent_id, version, &staging))
+                .and_then(|()| cancel.check())
+                .and_then(|()| self.commit(agent_id, version, &staging, keep))
         {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(error);
@@ -655,18 +841,34 @@ impl Adapters {
     /// disk-space check, resumable download (`Range`) with retries into
     /// `<cache>/downloads`, SHA-256 when published, unpack into a staging
     /// directory, `chmod +x` of the `cmd`, then rename into place. The
-    /// archive is deleted once unpacked.
+    /// archive is deleted once unpacked. Cancelling (during the download,
+    /// a retry pause, the check or the unpacking) removes the `.part` and
+    /// the staging directory.
     ///
     /// # Errors
     ///
     /// [`ConnectionsError::NotEnoughSpace`], [`ConnectionsError::Network`],
     /// [`ConnectionsError::ChecksumMismatch`], [`ConnectionsError::Extract`],
-    /// [`ConnectionsError::InstallFailed`], I/O errors.
+    /// [`ConnectionsError::InstallFailed`], [`ConnectionsError::Cancelled`],
+    /// I/O errors.
     pub fn install_binary(
         &self,
         kind: AgentKind,
         plan: &BinaryPlan,
         progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
+    ) -> Result<AdapterInstall> {
+        let _lock = WorkLock::acquire(&self.agent_lock(kind.agent_id()), cancel)?;
+        self.install_binary_locked(kind, plan, None, progress, cancel)
+    }
+
+    fn install_binary_locked(
+        &self,
+        kind: AgentKind,
+        plan: &BinaryPlan,
+        keep: Option<&str>,
+        progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
     ) -> Result<AdapterInstall> {
         let agent_id = kind.agent_id();
         let archive_name = plan.archive_name();
@@ -687,6 +889,7 @@ impl Adapters {
                 file: archive_name.clone(),
                 message: "formato desconocido (se esperaba .zip o .tar.gz)".to_string(),
             })?;
+        cancel.check()?;
 
         create_private_dir(&self.paths.data_dir)?;
         create_private_dir(&self.paths.cache_dir)?;
@@ -710,46 +913,11 @@ impl Adapters {
         self.check_space(kind, &[&downloads, &agents], needed)?;
 
         let verifiable = plan.verifiable();
-        let mut last_error = None;
-        let mut downloaded = false;
-        for attempt in 1..=self.attempts {
-            if attempt > 1 {
-                progress(AdapterProgress::Retrying {
-                    attempt,
-                    reason: last_error
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                });
-                if !self.retry_delay.is_zero() {
-                    std::thread::sleep(self.retry_delay);
-                }
+        if let Err(error) = self.download_verified(plan, &part, verifiable, progress, cancel) {
+            if matches!(error, ConnectionsError::Cancelled) {
+                let _ = std::fs::remove_file(&part);
             }
-            if let Err(error) = self.download(plan, &part, verifiable, progress) {
-                last_error = Some(error);
-                continue;
-            }
-            if let Some(expected) = &plan.sha256 {
-                progress(AdapterProgress::Verifying);
-                let actual = sha256_file(&part)?;
-                if !actual.eq_ignore_ascii_case(expected) {
-                    // A corrupt partial file must not be resumed again.
-                    let _ = std::fs::remove_file(&part);
-                    last_error = Some(ConnectionsError::ChecksumMismatch {
-                        file: archive_name.clone(),
-                        expected: expected.clone(),
-                        actual,
-                    });
-                    continue;
-                }
-            }
-            downloaded = true;
-            break;
-        }
-        if !downloaded {
-            return Err(
-                last_error.unwrap_or_else(|| ConnectionsError::Network("sin intentos".to_string()))
-            );
+            return Err(error);
         }
 
         progress(AdapterProgress::Extracting);
@@ -760,10 +928,18 @@ impl Adapters {
             self.check_space(kind, &[&agents], unpacked)?;
         }
         let staging = self.staging_dir(agent_id, &plan.version)?;
-        let result = unpack(format, &part, &staging)
-            .map_err(|message| ConnectionsError::Extract {
-                file: archive_name.clone(),
-                message,
+        let result = cancel
+            .check()
+            .and_then(|()| {
+                unpack(format, &part, &staging, cancel).map_err(|message| {
+                    or_cancelled(
+                        cancel,
+                        ConnectionsError::Extract {
+                            file: archive_name.clone(),
+                            message,
+                        },
+                    )
+                })
             })
             .and_then(|()| {
                 let program = staging.join(&cmd);
@@ -787,7 +963,8 @@ impl Adapters {
             })
             .and_then(|install| {
                 write_atomic(&staging.join(MARKER), &serde_json::to_vec_pretty(&install)?)?;
-                self.commit(agent_id, &plan.version, &staging)?;
+                cancel.check()?;
+                self.commit(agent_id, &plan.version, &staging, keep)?;
                 Ok(install)
             });
         match result {
@@ -800,13 +977,82 @@ impl Adapters {
             }
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&staging);
-                // An archive that does not unpack is useless to resume.
-                if matches!(error, ConnectionsError::Extract { .. }) {
+                // An archive that does not unpack is useless to resume, and a
+                // cancelled install leaves nothing behind.
+                if matches!(
+                    error,
+                    ConnectionsError::Extract { .. } | ConnectionsError::Cancelled
+                ) {
                     let _ = std::fs::remove_file(&part);
                 }
                 Err(error)
             }
         }
+    }
+
+    /// The download attempts of [`Adapters::install_binary`]: resumable
+    /// download plus the SHA-256 check, retried.
+    fn download_verified(
+        &self,
+        plan: &BinaryPlan,
+        part: &Path,
+        verifiable: bool,
+        progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let mut last_error = None;
+        for attempt in 1..=self.attempts {
+            cancel.check()?;
+            if attempt > 1 {
+                progress(AdapterProgress::Retrying {
+                    attempt,
+                    reason: last_error
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                });
+                cancel.sleep(self.retry_delay)?;
+            }
+            let report = |done: u64, total: Option<u64>| AdapterProgress::Downloading {
+                version: plan.version.clone(),
+                done,
+                total,
+                verifiable,
+            };
+            // One report per MB is plenty for a 333 MB bar.
+            match download_part(
+                self.downloader.as_ref(),
+                &plan.archive,
+                part,
+                cancel,
+                1_000_000,
+                &mut |done, total| progress(report(done, total)),
+            ) {
+                Ok(()) => {}
+                Err(ConnectionsError::Cancelled) => return Err(ConnectionsError::Cancelled),
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            }
+            if let Some(expected) = &plan.sha256 {
+                cancel.check()?;
+                progress(AdapterProgress::Verifying);
+                let actual = sha256_file(part)?;
+                if !actual.eq_ignore_ascii_case(expected) {
+                    // A corrupt partial file must not be resumed again.
+                    let _ = std::fs::remove_file(part);
+                    last_error = Some(ConnectionsError::ChecksumMismatch {
+                        file: plan.archive_name(),
+                        expected: expected.clone(),
+                        actual,
+                    });
+                    continue;
+                }
+            }
+            return Ok(());
+        }
+        Err(last_error.unwrap_or_else(|| ConnectionsError::Network("sin intentos".to_string())))
     }
 
     fn check_space(&self, kind: AgentKind, dirs: &[&Path], needed: u64) -> Result<()> {
@@ -828,80 +1074,27 @@ impl Adapters {
         Ok(())
     }
 
-    fn download(
-        &self,
-        plan: &BinaryPlan,
-        part: &Path,
-        verifiable: bool,
-        progress: &mut dyn FnMut(AdapterProgress),
-    ) -> Result<()> {
-        let offset = std::fs::metadata(part).map_or(0, |meta| meta.len());
-        let body = self.downloader.open(&plan.archive, offset)?;
-        let mut file = if body.resumed && offset > 0 {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(part)
-                .map_err(io_err(part))?
-        } else {
-            std::fs::File::create(part).map_err(io_err(part))?
-        };
-        let mut done = if body.resumed { offset } else { 0 };
-        let total = body.total;
-        let report = |done: u64| AdapterProgress::Downloading {
-            version: plan.version.clone(),
-            done,
-            total,
-            verifiable,
-        };
-        progress(report(done));
-        let mut reader = body.reader;
-        let mut buffer = vec![0u8; 256 * 1024];
-        let mut reported = done;
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|error| ConnectionsError::Network(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            file.write_all(&buffer[..read]).map_err(io_err(part))?;
-            done += read as u64;
-            // One report per MB is plenty for a 333 MB bar.
-            if done - reported >= 1_000_000 {
-                reported = done;
-                progress(report(done));
-            }
-        }
-        file.flush().map_err(io_err(part))?;
-        if reported != done {
-            progress(report(done));
-        }
-        if let Some(total) = total
-            && done < total
-        {
-            return Err(ConnectionsError::Network(format!(
-                "descarga incompleta ({done} de {total} bytes)"
-            )));
-        }
-        Ok(())
-    }
-
     /// Install the registry's version of `kind` unless one is already
     /// installed. Offline (`registry` is `None`), whatever is installed is
-    /// used. `node` is only needed by npm adapters.
+    /// used. `node` is only needed by npm adapters. A second call for the
+    /// same agent waits (cancellably) for a running one to finish, then
+    /// sees what it installed.
     ///
     /// # Errors
     ///
     /// [`ConnectionsError::AdapterMissing`] offline with nothing installed,
     /// [`ConnectionsError::RuntimeMissing`] for an npm adapter without
-    /// `node`, [`ConnectionsError::NotInRegistry`], install errors.
+    /// `node`, [`ConnectionsError::NotInRegistry`],
+    /// [`ConnectionsError::Cancelled`], install errors.
     pub fn ensure(
         &self,
         registry: Option<&AgentRegistry>,
         kind: AgentKind,
         node: Option<&NodePaths>,
         progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
     ) -> Result<AdapterInstall> {
+        let _lock = WorkLock::acquire(&self.agent_lock(kind.agent_id()), cancel)?;
         let installed = self.installed_adapter(kind.agent_id());
         let Some(registry) = registry else {
             return installed
@@ -912,15 +1105,121 @@ impl Adapters {
             // ("Actualizar", see `update_available`).
             return Ok(installed);
         }
+        self.install_registry_version(registry, kind, node, None, progress, cancel)
+    }
+
+    /// "Actualizar a X.Y.Z": install the registry's version of `kind` (npm
+    /// or binary) in staging next to the installed one and move `current`
+    /// to it. The previously installed version is **kept** on disk, since a
+    /// live connection may still be running it (D13); [`Adapters::prune_unused`]
+    /// removes it once nothing uses it (the workspace calls it at start-up
+    /// and when a connection stops). Other stale versions are removed. When
+    /// the registry's version is already installed, returns it unchanged.
+    /// Cancellable like [`Adapters::install`] / [`Adapters::install_binary`];
+    /// a cancelled update leaves the installed version untouched.
+    ///
+    /// # Errors
+    ///
+    /// [`ConnectionsError::RuntimeMissing`] for an npm adapter without
+    /// `node`, [`ConnectionsError::NotInRegistry`],
+    /// [`ConnectionsError::Cancelled`], install errors.
+    pub fn update(
+        &self,
+        registry: &AgentRegistry,
+        kind: AgentKind,
+        node: Option<&NodePaths>,
+        progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
+    ) -> Result<AdapterInstall> {
+        let _lock = WorkLock::acquire(&self.agent_lock(kind.agent_id()), cancel)?;
+        let installed = self.installed_adapter(kind.agent_id());
+        let latest = match kind.source() {
+            AdapterSource::Npm { .. } => registry_version(registry, kind)?.0,
+            AdapterSource::Binary => self.binary_plan(registry, kind)?.version,
+        };
+        if let Some(installed) = installed.as_ref()
+            && installed.version == latest
+        {
+            progress(AdapterProgress::Done {
+                version: latest.clone(),
+            });
+            return Ok(installed.clone());
+        }
+        let keep = installed.as_ref().map(|install| install.version.as_str());
+        self.install_registry_version(registry, kind, node, keep, progress, cancel)
+    }
+
+    /// Remove every installed version that is neither `current` nor listed
+    /// in `in_use` (`(agent_id, version)` pairs of live connections), plus
+    /// staging directories left by crashed installs of other processes.
+    /// Returns the removed `(agent_id, version)` pairs. Call it at start-up
+    /// (before anything runs, with an empty `in_use`) and when a connection
+    /// stops. Agents with an install in progress in this process are
+    /// skipped.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors removing a directory.
+    pub fn prune_unused(&self, in_use: &[(&str, &str)]) -> Result<Vec<(String, String)>> {
+        let mut removed = Vec::new();
+        let Ok(agents) = std::fs::read_dir(self.paths.agents_dir()) else {
+            return Ok(removed);
+        };
+        for agent in agents.flatten() {
+            let agent_id = agent.file_name().to_string_lossy().into_owned();
+            if !agent.path().is_dir() || agent_id.starts_with('.') {
+                continue;
+            }
+            // Only when no install of this agent is running here.
+            let Ok(_lock) = WorkLock::try_acquire(&self.agent_lock(&agent_id)) else {
+                continue;
+            };
+            let current = self.installed(&agent_id);
+            let Ok(versions) = std::fs::read_dir(agent.path()) else {
+                continue;
+            };
+            for version in versions.flatten() {
+                let name = version.file_name().to_string_lossy().into_owned();
+                if !version.path().is_dir() {
+                    continue;
+                }
+                let stale = if name.starts_with('.') {
+                    foreign_staging(&name)
+                } else {
+                    current.as_deref() != Some(name.as_str())
+                        && !in_use
+                            .iter()
+                            .any(|(id, used)| *id == agent_id && *used == name)
+                };
+                // Without a valid `current`, only leftovers go.
+                if stale && (current.is_some() || name.starts_with('.')) {
+                    std::fs::remove_dir_all(version.path()).map_err(io_err(version.path()))?;
+                    removed.push((agent_id.clone(), name));
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Install the registry's version of `kind` (lock held by the caller).
+    fn install_registry_version(
+        &self,
+        registry: &AgentRegistry,
+        kind: AgentKind,
+        node: Option<&NodePaths>,
+        keep: Option<&str>,
+        progress: &mut dyn FnMut(AdapterProgress),
+        cancel: &CancelToken,
+    ) -> Result<AdapterInstall> {
         match kind.source() {
             AdapterSource::Npm { .. } => {
                 let node = node.ok_or(ConnectionsError::RuntimeMissing)?;
                 let (version, args) = registry_version(registry, kind)?;
-                self.install(kind, &version, &args, node, progress)
+                self.install_npm(kind, &version, &args, node, keep, progress, cancel)
             }
             AdapterSource::Binary => {
                 let plan = self.binary_plan(registry, kind)?;
-                self.install_binary(kind, &plan, progress)
+                self.install_binary_locked(kind, &plan, keep, progress, cancel)
             }
         }
     }
@@ -1085,18 +1384,31 @@ fn zip_unpacked_size(archive: &Path) -> std::result::Result<u64, String> {
 }
 
 /// Unpack `archive` into `dest`, streaming from disk (a 1 GB archive never
-/// sits in memory) and never writing outside `dest`.
-fn unpack(format: ArchiveFormat, archive: &Path, dest: &Path) -> std::result::Result<(), String> {
+/// sits in memory) and never writing outside `dest`. `cancel` is checked
+/// before every entry and every read, so even one huge entry stops promptly.
+fn unpack(
+    format: ArchiveFormat,
+    archive: &Path,
+    dest: &Path,
+    cancel: &CancelToken,
+) -> std::result::Result<(), String> {
     match format {
-        ArchiveFormat::Zip => unpack_zip(archive, dest),
-        ArchiveFormat::TarGz => unpack_tar_gz(archive, dest),
+        ArchiveFormat::Zip => unpack_zip(archive, dest, cancel),
+        ArchiveFormat::TarGz => unpack_tar_gz(archive, dest, cancel),
     }
 }
 
-fn unpack_zip(archive: &Path, dest: &Path) -> std::result::Result<(), String> {
+fn unpack_zip(
+    archive: &Path,
+    dest: &Path,
+    cancel: &CancelToken,
+) -> std::result::Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|error| error.to_string())?;
     let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(|error| error.to_string())?;
     for index in 0..zip.len() {
+        if cancel.is_cancelled() {
+            return Err(CancelToken::io_error().to_string());
+        }
         let mut entry = zip.by_index(index).map_err(|error| error.to_string())?;
         let Some(relative) = entry.enclosed_name() else {
             continue;
@@ -1110,7 +1422,11 @@ fn unpack_zip(archive: &Path, dest: &Path) -> std::result::Result<(), String> {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let mut out = std::fs::File::create(&target).map_err(|error| error.to_string())?;
-        std::io::copy(&mut entry, &mut out).map_err(|error| error.to_string())?;
+        let mut reader = CancelReader {
+            inner: &mut entry,
+            token: cancel,
+        };
+        std::io::copy(&mut reader, &mut out).map_err(|error| error.to_string())?;
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
@@ -1124,11 +1440,21 @@ fn unpack_zip(archive: &Path, dest: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn unpack_tar_gz(archive: &Path, dest: &Path) -> std::result::Result<(), String> {
+fn unpack_tar_gz(
+    archive: &Path,
+    dest: &Path,
+    cancel: &CancelToken,
+) -> std::result::Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|error| error.to_string())?;
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(BufReader::new(file)));
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(BufReader::new(CancelReader {
+        inner: file,
+        token: cancel,
+    })));
     tar.set_preserve_permissions(true);
     for entry in tar.entries().map_err(|error| error.to_string())? {
+        if cancel.is_cancelled() {
+            return Err(CancelToken::io_error().to_string());
+        }
         let mut entry = entry.map_err(|error| error.to_string())?;
         // `unpack_in` refuses paths that would land outside `dest`.
         entry.unpack_in(dest).map_err(|error| error.to_string())?;
@@ -1259,5 +1585,80 @@ mod tests {
         if cfg!(unix) {
             assert!(free_space(&missing).is_some_and(|bytes| bytes > 0));
         }
+    }
+
+    #[test]
+    fn version_comparison_is_numeric_and_treats_prerelease_as_lower() {
+        assert!(is_newer_version("0.84.0", "0.81.2"));
+        assert!(!is_newer_version("0.81.2", "0.84.0"));
+        assert!(!is_newer_version("0.81.2", "0.81.2"));
+        // A double-digit component must not be compared lexically.
+        assert!(is_newer_version("1.10.0", "1.9.0"));
+        // A prerelease always sorts below its own release.
+        assert!(!is_newer_version("1.0.0-beta.1", "1.0.0"));
+        assert!(is_newer_version("1.0.0", "1.0.0-beta.1"));
+        // Two prereleases compare identifier by identifier, numerically.
+        assert!(is_newer_version("1.0.0-beta.10", "1.0.0-beta.9"));
+        assert!(!is_newer_version("1.0.0-beta.9", "1.0.0-beta.10"));
+    }
+
+    /// Writes a finished install directly (no installer, no network) so
+    /// [`Adapters::installed`] and [`Adapters::update_available`] see it.
+    fn fake_install(paths: &CincelPaths, agent_id: &str, version: &str) {
+        let dir = paths.agents_dir().join(agent_id).join(version);
+        std::fs::create_dir_all(&dir).expect("install dir");
+        std::fs::write(dir.join("bin.js"), b"").expect("bin");
+        let install = AdapterInstall {
+            agent_id: agent_id.to_string(),
+            distribution: InstallKind::Npm,
+            package: "paquete".to_string(),
+            version: version.to_string(),
+            bin: PathBuf::from("bin.js"),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            verifiable: true,
+        };
+        std::fs::write(
+            dir.join(MARKER),
+            serde_json::to_vec(&install).expect("marker"),
+        )
+        .expect("write marker");
+        std::fs::write(
+            paths.agents_dir().join(agent_id).join("current"),
+            version.as_bytes(),
+        )
+        .expect("write current");
+    }
+
+    #[test]
+    fn update_available_never_offers_a_lower_catalog_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = CincelPaths::under(dir.path());
+        fake_install(&paths, "claude-acp", "0.84.0");
+        let adapters = Adapters::new(paths);
+        // REGISTRY publishes claude-acp 0.81.2, older than what is installed.
+        let registry = AgentRegistry::parse(REGISTRY).expect("parse");
+        assert_eq!(
+            adapters.update_available(&registry, AgentKind::Claude),
+            None,
+            "0.81.2 no es más nuevo que 0.84.0: no se ofrece"
+        );
+    }
+
+    #[test]
+    fn update_available_offers_a_higher_catalog_version() {
+        const NEWER_REGISTRY: &str = r#"{"version":"1.0.0","agents":[
+          {"id":"claude-acp","name":"Claude","version":"0.84.0",
+           "distribution":{"npx":{"package":"@agentclientprotocol/claude-agent-acp@0.84.0"}}}
+        ]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = CincelPaths::under(dir.path());
+        fake_install(&paths, "claude-acp", "0.81.2");
+        let adapters = Adapters::new(paths);
+        let registry = AgentRegistry::parse(NEWER_REGISTRY).expect("parse");
+        assert_eq!(
+            adapters.update_available(&registry, AgentKind::Claude),
+            Some("0.84.0".to_string())
+        );
     }
 }

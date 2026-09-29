@@ -85,7 +85,7 @@ pub struct ReviewView {
     /// The agent is writing this file: pill and bar show a spinner and every
     /// review control is disabled (editing the text is still allowed).
     pub turn_active: bool,
-    /// Pending hunks in this file (the `M` of `N/M cambios`).
+    /// Pending hunks in this file (the `M` of `cambio N de M`).
     pub pending_in_file: usize,
     /// Pending hunks in the other files of the review.
     pub pending_in_other_files: usize,
@@ -93,6 +93,11 @@ pub struct ReviewView {
     /// When it changes, or after a decision with `jump_to_next_on_decide`, the
     /// editor moves the cursor there and scrolls it into view.
     pub current_index: Option<usize>,
+    /// The file is decided only as a whole (a file the agent deleted): the
+    /// floating bar leads with "✓ Aceptar archivo" / "✗ Rechazar archivo"
+    /// ([`ReviewAction::AcceptFile`] / [`ReviewAction::RejectFile`]) before
+    /// the turn's "Aceptar todo" / "Rechazar todo".
+    pub file_actions: bool,
 }
 
 /// A decision or a navigation request, emitted as
@@ -121,6 +126,12 @@ pub enum ReviewAction {
     AcceptFile,
     /// Reject every hunk of the file.
     RejectFile,
+    /// Accept every pending change of the agent's turn, in every file (the
+    /// bar's "Aceptar todo", same as `workspace::accept_turn`).
+    AcceptTurn,
+    /// Reject every pending change of the agent's turn, in every file (the
+    /// bar's "Rechazar todo"; the host asks for confirmation first).
+    RejectTurn,
     /// Go to the next pending hunk (`Alt+J`, `F7`).
     NextHunk,
     /// Go to the previous pending hunk (`Alt+K`, `Shift+F7`).
@@ -145,6 +156,8 @@ impl ReviewAction {
                 | Self::RejectLine { .. }
                 | Self::AcceptFile
                 | Self::RejectFile
+                | Self::AcceptTurn
+                | Self::RejectTurn
                 | Self::UndoLastReject
         )
     }

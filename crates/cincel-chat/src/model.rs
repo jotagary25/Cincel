@@ -56,7 +56,7 @@ pub struct ChatConnection {
     pub agent_id: String,
     /// The label the user chose ("Claude · personal").
     pub label: String,
-    /// The muted identity line ("gary@… · Max"), when the agent reported one.
+    /// The muted identity line ("ana@… · Max"), when the agent reported one.
     pub identity: Option<String>,
     /// Already formatted "Usado hace 2 h", so this crate needs no clock.
     pub last_used: String,
@@ -74,6 +74,11 @@ pub enum ConnectionBanner {
         id: String,
         /// Its label.
         label: String,
+        /// Why the agent asked for authentication (`AgentEvent::AuthRequired`'s
+        /// `message`), already redacted and clipped to 240 characters by the
+        /// workspace (`docs/specs/07-etapa5-productividad.md` §10.1). `None`
+        /// when the agent gave no reason.
+        reason: Option<String>,
     },
     /// "«X» no está disponible" with "Reparar".
     Unavailable {
@@ -103,6 +108,21 @@ impl ConnectionBanner {
     pub fn connection_id(&self) -> &str {
         match self {
             ConnectionBanner::Expired { id, .. } | ConnectionBanner::Unavailable { id, .. } => id,
+        }
+    }
+
+    /// "El agente dijo: «motivo»", under the main sentence
+    /// (`docs/specs/07-etapa5-productividad.md` §10.1). `None` when there is
+    /// nothing to show: an `Unavailable` banner (its reason is already the
+    /// main sentence), or an `Expired` one the agent gave no reason for.
+    #[must_use]
+    pub fn reason_text(&self) -> Option<String> {
+        match self {
+            ConnectionBanner::Expired {
+                reason: Some(reason),
+                ..
+            } => Some(format!("El agente dijo: «{reason}»")),
+            _ => None,
         }
     }
 }

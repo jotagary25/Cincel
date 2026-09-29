@@ -35,6 +35,18 @@
 //! (`"slow"` waits 1.5 s first) and pushes a status update on success;
 //! `logout` writes `FAKE_LOGOUT_MARKER` (when set) and pushes `kind: none`.
 //!
+//! With `FAKE_AUTH_REQUIRED` set, `session/new`, `session/load` and
+//! `session/resume` fail with `auth_required` (-32000) whose `message` is the
+//! variable's value (it may be empty) and whose `data` is
+//! `FAKE_AUTH_REQUIRED_DATA` (parsed as JSON, or a plain string) when set;
+//! with `FAKE_AUTH_LOGGED_OUT_DETAIL` also set, a logged-out
+//! `_auth/status_update` carrying that `detail` is pushed first.
+//!
+//! With `FAKE_SHELL_EDITS` set, the default scenario is replaced by edits made
+//! straight on disk with a single `execute` tool call that names no path
+//! (see `shell_edits_turn` for the format): the review has to find them on
+//! its own.
+//!
 //! `session/load` replays two canned messages before responding; `session/load`
 //! and `session/resume` are both advertised as supported so the client can
 //! exercise them.
@@ -161,7 +173,10 @@ async fn main() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: NewSessionRequest, responder, _cx| {
+            async move |request: NewSessionRequest, responder, cx: ConnectionTo<_>| {
+                if let Some(error) = scripted_auth_required(&cx)? {
+                    return responder.respond_with_error(error);
+                }
                 let session_id = next_session_id();
                 if let Ok(mut sessions) = sessions_new.lock() {
                     sessions.insert(
@@ -178,6 +193,9 @@ async fn main() -> agent_client_protocol::Result<()> {
         )
         .on_receive_request(
             async move |request: LoadSessionRequest, responder, cx: ConnectionTo<_>| {
+                if let Some(error) = scripted_auth_required(&cx)? {
+                    return responder.respond_with_error(error);
+                }
                 let session_id = request.session_id.clone();
                 if let Ok(mut sessions) = sessions_load.lock() {
                     sessions.insert(
@@ -200,7 +218,10 @@ async fn main() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: ResumeSessionRequest, responder, _cx| {
+            async move |request: ResumeSessionRequest, responder, cx: ConnectionTo<_>| {
+                if let Some(error) = scripted_auth_required(&cx)? {
+                    return responder.respond_with_error(error);
+                }
                 if let Ok(mut sessions) = sessions_resume.lock() {
                     sessions.insert(
                         request.session_id.0.to_string(),
@@ -323,6 +344,30 @@ fn send_auth_status(
         "_auth/status_update",
         serde_json::json!({ "authStatus": status }),
     )?)
+}
+
+/// The `auth_required` error `FAKE_AUTH_REQUIRED` asks for (see the module
+/// docs), after pushing the logged-out status update when requested.
+fn scripted_auth_required(
+    cx: &ConnectionTo<agent_client_protocol::Client>,
+) -> agent_client_protocol::Result<Option<agent_client_protocol::Error>> {
+    let Ok(message) = std::env::var("FAKE_AUTH_REQUIRED") else {
+        return Ok(None);
+    };
+    if let Ok(detail) = std::env::var("FAKE_AUTH_LOGGED_OUT_DETAIL") {
+        cx.send_notification(UntypedMessage::new(
+            "_auth/status_update",
+            serde_json::json!({ "authStatus": {
+                "kind": "none", "label": "Not logged in", "detail": detail
+            } }),
+        )?)?;
+    }
+    let mut error = agent_client_protocol::Error::new(-32000, message);
+    if let Ok(data) = std::env::var("FAKE_AUTH_REQUIRED_DATA") {
+        let data = serde_json::from_str(&data).unwrap_or(serde_json::Value::String(data));
+        error = error.data(data);
+    }
+    Ok(Some(error))
 }
 
 fn extract_report_request_id(meta: &Option<Meta>) -> Option<String> {
@@ -525,8 +570,89 @@ async fn run_turn(
                 () = tokio::time::sleep(std::time::Duration::from_secs(30)) => StopReason::EndTurn,
             }
         }
-        _ => default_turn(cx, &session_id, &state.cwd).await,
+        _ => match std::env::var("FAKE_SHELL_EDITS") {
+            Ok(spec) if !spec.is_empty() => {
+                shell_edits_turn(cx, &session_id, &state.cwd, &spec).await
+            }
+            _ => default_turn(cx, &session_id, &state.cwd).await,
+        },
     }
+}
+
+/// `FAKE_SHELL_EDITS`: the agent changes files straight on disk, the way a
+/// `python3 - <<'EOF'` or a `sed -i` run by its shell tool would, and only
+/// reports one `execute` tool call that names no path.
+///
+/// The variable is a list of `ruta=contenido` items separated by `;`, paths
+/// relative to the session cwd:
+///
+/// * `ruta=contenido` overwrites the file;
+/// * `ruta=@contenido` creates it (parent folders included);
+/// * `ruta=` deletes it;
+/// * `ruta=>destino` renames it (a real `mv`).
+///
+/// In the content, `\n` stands for a newline and `\t` for a tab.
+async fn shell_edits_turn(
+    cx: &ConnectionTo<agent_client_protocol::Client>,
+    session_id: &SessionId,
+    cwd: &std::path::Path,
+    spec: &str,
+) -> StopReason {
+    const TOOL_CALL_ID: &str = "shell-1";
+    let tool_call = ToolCall::new(TOOL_CALL_ID, "python3 - <<'EOF'")
+        .kind(ToolKind::Execute)
+        .status(ToolCallStatus::InProgress);
+    if cx
+        .send_notification(SessionNotification::new(
+            session_id.clone(),
+            SessionUpdate::ToolCall(tool_call),
+        ))
+        .is_err()
+    {
+        return StopReason::Cancelled;
+    }
+    apply_shell_edits(cwd, spec);
+    let completed = ToolCallUpdate::new(
+        TOOL_CALL_ID,
+        ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+    );
+    let _ = cx.send_notification(SessionNotification::new(
+        session_id.clone(),
+        SessionUpdate::ToolCallUpdate(completed),
+    ));
+    send_text(cx, session_id, "Listo: cambié los archivos con un script.").await;
+    StopReason::EndTurn
+}
+
+/// Applies a `FAKE_SHELL_EDITS` list (see [`shell_edits_turn`]).
+fn apply_shell_edits(cwd: &std::path::Path, spec: &str) {
+    for item in spec.split(';') {
+        let item = item.trim();
+        let Some((path, value)) = item.split_once('=') else {
+            continue;
+        };
+        let path = cwd.join(path.trim());
+        let outcome = if value.is_empty() {
+            std::fs::remove_file(&path)
+        } else if let Some(destination) = value.strip_prefix('>') {
+            std::fs::rename(&path, cwd.join(destination.trim()))
+        } else if let Some(content) = value.strip_prefix('@') {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&path, unescape(content))
+        } else {
+            std::fs::write(&path, unescape(value))
+        };
+        if let Err(error) = outcome {
+            eprintln!("FAKE_SHELL_EDITS: {}: {error}", path.display());
+        }
+    }
+}
+
+/// `\n` and `\t` of a `FAKE_SHELL_EDITS` content.
+fn unescape(content: &str) -> String {
+    content.replace("\\n", "\n").replace("\\t", "\t")
 }
 
 /// The original Etapa 0 scripted turn: two chunks, an `edit` tool call with a

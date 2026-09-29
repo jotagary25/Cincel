@@ -71,6 +71,16 @@ pub fn settings(cx: &App) -> Settings {
         .unwrap_or_default()
 }
 
+/// The keymap in force: the built-in JSONC layered with the user's
+/// `keymap.json` (`docs/specs/07-etapa5-productividad.md` §5.2, the
+/// shortcuts modal). Falls back to the built-in one alone when nothing has
+/// been installed yet.
+pub fn keymap(cx: &App) -> cincel_settings::Keymap {
+    cx.try_global::<AppSettings>()
+        .map(|state| state.config.keymap.clone())
+        .unwrap_or_default()
+}
+
 /// Records what the desktop's appearance is and re-applies the theme when it
 /// changed, which is how `theme.mode = "system"` follows the desktop.
 ///

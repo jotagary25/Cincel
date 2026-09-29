@@ -227,12 +227,22 @@ pub struct Theme {
     /// `status.ok`.
     #[serde(rename = "status.ok")]
     pub status_ok: Rgba,
+    /// `git.added`: an added line in the editor's git gutter
+    /// (`docs/specs/07-etapa5-productividad.md` §6.2).
+    #[serde(rename = "git.added")]
+    pub git_added: Rgba,
+    /// `git.modified`: a modified line in the editor's git gutter.
+    #[serde(rename = "git.modified")]
+    pub git_modified: Rgba,
+    /// `git.deleted`: the mark for a deletion in the editor's git gutter.
+    #[serde(rename = "git.deleted")]
+    pub git_deleted: Rgba,
     /// The twelve syntax colors.
     pub syntax: SyntaxTheme,
 }
 
 /// The dotted names of the twenty-one color tokens, in spec order.
-pub const COLOR_KEYS: [&str; 21] = [
+pub const COLOR_KEYS: [&str; 24] = [
     "bg.app",
     "bg.editor",
     "bg.surface",
@@ -254,6 +264,9 @@ pub const COLOR_KEYS: [&str; 21] = [
     "status.error",
     "status.warning",
     "status.ok",
+    "git.added",
+    "git.modified",
+    "git.deleted",
 ];
 
 impl Default for Theme {
@@ -292,6 +305,11 @@ impl Theme {
             status_error: red,
             status_warning: yellow,
             status_ok: green,
+            // `07-etapa5-productividad.md` §6.1: added/modified/deleted in
+            // the git gutter, distinct from `diff.gutter.*` (the agent's).
+            git_added: green,
+            git_modified: Rgba::hex(0x61afef),
+            git_deleted: red,
             syntax: SyntaxTheme::one_dark(),
         }
     }
@@ -331,6 +349,10 @@ impl Theme {
             status_error: red,
             status_warning: yellow,
             status_ok: green,
+            // `07-etapa5-productividad.md` §6.2: light values fixed by spec.
+            git_added: green,
+            git_modified: Rgba::hex(0x4078f2),
+            git_deleted: red,
             syntax: SyntaxTheme::one_light(),
         }
     }
@@ -474,6 +496,9 @@ impl Theme {
             "status.error" => &mut self.status_error,
             "status.warning" => &mut self.status_warning,
             "status.ok" => &mut self.status_ok,
+            "git.added" => &mut self.git_added,
+            "git.modified" => &mut self.git_modified,
+            "git.deleted" => &mut self.git_deleted,
             _ => return None,
         })
     }
@@ -638,6 +663,52 @@ mod tests {
         assert_eq!(theme.status_ok, Rgba::hex(0x98c379));
         assert!((theme.diff_deleted_bg.alpha_f32() - 0.18).abs() < 0.005);
         assert!((theme.diff_added_word.alpha_f32() - 0.38).abs() < 0.005);
+    }
+
+    /// `07-etapa5-productividad.md` §6.1: the git margin's own colors.
+    #[test]
+    fn git_gutter_tokens_match_the_spec_values() {
+        let dark = Theme::cincel_dark();
+        assert_eq!(dark.git_added, Rgba::hex(0x98c379));
+        assert_eq!(dark.git_modified, Rgba::hex(0x61afef));
+        assert_eq!(dark.git_deleted, Rgba::hex(0xe06c75));
+
+        let light = Theme::cincel_light();
+        assert_eq!(light.git_added, Rgba::hex(0x50a14f));
+        assert_eq!(light.git_modified, Rgba::hex(0x4078f2));
+        assert_eq!(light.git_deleted, Rgba::hex(0xe45649));
+    }
+
+    /// A user theme silently inherits the git tokens of the built-in theme
+    /// of its own appearance when it does not set them (`07-etapa5-productividad.md`
+    /// §6.2): no issue, just the built-in value.
+    #[test]
+    fn a_user_theme_without_git_tokens_inherits_them_with_no_issue() {
+        let loaded = Theme::parse(r##"{ "name": "Mío", "bg.app": "#000000" }"##);
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert_eq!(loaded.value.git_added, Theme::cincel_dark().git_added);
+        assert_eq!(loaded.value.git_modified, Theme::cincel_dark().git_modified);
+        assert_eq!(loaded.value.git_deleted, Theme::cincel_dark().git_deleted);
+
+        let light = Theme::parse(r#"{ "name": "Claro", "dark": false }"#);
+        assert!(light.is_clean(), "{:?}", light.issues);
+        assert_eq!(light.value.git_added, Theme::cincel_light().git_added);
+        assert_eq!(light.value.git_modified, Theme::cincel_light().git_modified);
+        assert_eq!(light.value.git_deleted, Theme::cincel_light().git_deleted);
+    }
+
+    /// A theme that does set the git tokens overrides them, same as any
+    /// other color.
+    #[test]
+    fn a_theme_can_override_the_git_tokens() {
+        let loaded = Theme::parse(
+            r##"{ "name": "Mío", "git.added": "#111111", "git.modified": "#222222",
+                 "git.deleted": "#333333" }"##,
+        );
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert_eq!(loaded.value.git_added, Rgba::hex(0x111111));
+        assert_eq!(loaded.value.git_modified, Rgba::hex(0x222222));
+        assert_eq!(loaded.value.git_deleted, Rgba::hex(0x333333));
     }
 
     #[test]

@@ -23,6 +23,7 @@ use gpui_kit::div;
 use gpui_kit::prelude::*;
 
 use crate::center::TabContent;
+use crate::focus::FocusZone;
 use crate::project::{Project, ProjectOptions};
 use crate::toast::{ToastKind, Toasts};
 use crate::tree_panel::FilesPanel;
@@ -269,6 +270,15 @@ fn ctrl_shift_e_toggles_the_tree_panel(cx: &mut TestAppContext) {
     });
     assert!(open_before, "el árbol arranca abierto");
 
+    // The focus starts outside the tree, so the first press only focuses it
+    // (`07-etapa5-productividad.md` §7.1, rule 3); the second one, from
+    // inside, collapses it.
+    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.run_until_parked();
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Files));
+    assert!(workspace.read_with(cx, |workspace, cx| {
+        workspace.is_dock_open(DockPlacement::Right, cx)
+    }));
     cx.simulate_keystrokes("ctrl-shift-e");
     cx.run_until_parked();
     let open_after = workspace.read_with(cx, |workspace, cx| {
@@ -712,6 +722,10 @@ fn ctrl_w_keeps_closing_tabs(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-w");
     cx.run_until_parked();
     assert_eq!(center.read_with(cx, |center, _| center.tabs().len()), 0);
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Center));
+    // First press focuses the tree, the second collapses it (§7.1).
+    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.run_until_parked();
     cx.simulate_keystrokes("ctrl-shift-e");
     cx.run_until_parked();
     assert!(
@@ -802,6 +816,11 @@ fn the_layout_of_a_project_is_saved_and_restored(cx: &mut TestAppContext) {
     files.update(cx, |files, cx| {
         files.open_for_test(Path::new("src/main.rs"), true, cx)
     });
+    cx.run_until_parked();
+    // From the editor the first press focuses the chat, the second one
+    // collapses it (§7.1).
+    cx.simulate_keystrokes("ctrl-shift-a");
+    cx.run_until_parked();
     cx.simulate_keystrokes("ctrl-shift-a");
     cx.run_until_parked();
     workspace.read_with(cx, |workspace, cx| workspace.save_layout(cx));
@@ -1064,27 +1083,74 @@ fn the_keymap_binds_every_workspace_command(cx: &mut TestAppContext) {
         conversion.skipped
     );
     assert!(!conversion.bindings.is_empty());
+
+    // The global commands of `07-etapa5-productividad.md` §11.1 resolve to
+    // registered actions with their default keys, even the ones whose
+    // feature lands in a later sub-stage.
+    for (keystroke, command) in [
+        ("ctrl-l", "workspace::focus_next_zone"),
+        ("ctrl-p", "workspace::toggle_file_finder"),
+        ("ctrl-,", "workspace::open_settings"),
+        ("f1", "workspace::show_shortcuts"),
+        ("ctrl-n", "workspace::new_file"),
+        ("ctrl-q", "workspace::quit"),
+        ("ctrl-shift-a", "workspace::toggle_chat"),
+        ("ctrl-shift-e", "workspace::toggle_tree"),
+    ] {
+        let expected = gpui::Keystroke::parse(keystroke).unwrap();
+        assert!(
+            conversion.bindings.iter().any(|binding| {
+                binding.action().name() == command
+                    && binding.predicate().is_none()
+                    && binding.keystrokes().len() == 1
+                    && binding.keystrokes()[0].key() == expected.key.as_str()
+                    && binding.keystrokes()[0].modifiers() == &expected.modifiers
+            }),
+            "{keystroke} debería ser {command}"
+        );
+    }
+    // `workspace::open_connections` and `workspace::focus_chat` exist without
+    // a default key.
+    for command in ["workspace::open_connections", "workspace::focus_chat"] {
+        assert!(
+            cx.update(|cx| crate::keymap::resolve_action(command, cx))
+                .is_some(),
+            "{command} debería estar registrado"
+        );
+        assert!(
+            !conversion
+                .bindings
+                .iter()
+                .any(|binding| binding.action().name() == command),
+            "{command} no debería tener atajo por defecto"
+        );
+    }
 }
 
+/// `workspace::focus_chat` lost `Ctrl+L` (§9.2, D9) but still works for a
+/// user keymap that binds it.
 #[gpui::test]
-fn ctrl_l_focuses_the_chat_composer(cx: &mut TestAppContext) {
+fn focus_chat_still_focuses_the_chat_composer(cx: &mut TestAppContext) {
     init_test(cx);
     let dir = sample_project();
     let (workspace, cx) = workspace_window(dir.path(), cx);
 
-    // Move the keyboard elsewhere first, so the assertion is meaningful.
-    let files = workspace.read_with(cx, |workspace, _| workspace.files().clone());
-    files.update(cx, |files, cx| {
-        files.open_for_test(Path::new("Cargo.toml"), true, cx)
+    // Move the keyboard elsewhere first, so the assertion is meaningful, and
+    // collapse the chat: the command opens it.
+    open_pinned(&workspace, "Cargo.toml", cx);
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_dock(DockPlacement::Left, window, cx)
+        })
     });
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("ctrl-l");
+    cx.dispatch_action(crate::actions::FocusChat);
     cx.run_until_parked();
 
     // Typing now must land in the composer, not in whatever had the keyboard
-    // before: proof `Ctrl+L` moved the focus all the way to the input, not
-    // just to the panel.
+    // before: proof the command moved the focus all the way to the input,
+    // not just to the panel.
     cx.simulate_input("hola");
     cx.run_until_parked();
     let chat = workspace.read_with(cx, |workspace, _| workspace.chat().clone());
@@ -1096,7 +1162,7 @@ fn ctrl_l_focuses_the_chat_composer(cx: &mut TestAppContext) {
     });
     assert!(
         dock_open,
-        "Ctrl+L debería abrir el dock del chat si estaba colapsado"
+        "workspace::focus_chat debería abrir el dock del chat si estaba colapsado"
     );
 }
 
@@ -1445,4 +1511,387 @@ fn resizing_the_right_dock_rewraps_the_editor(cx: &mut TestAppContext) {
         frames[0].wrap_rows,
         frames[1].wrap_rows
     );
+}
+
+// ------------------------------------------------------------------------
+// Focus zones: `07-etapa5-productividad.md` §7 (Ctrl+Shift+A / Ctrl+Shift+E)
+// and §9 (the Ctrl+L wheel).
+
+/// The zone that holds the keyboard.
+fn zone(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<FocusZone> {
+    cx.update(|window, cx| workspace.read(cx).focus_zone(window, cx))
+}
+
+/// Whether the editor of the active tab has the keyboard.
+fn editor_has_focus(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        use gpui::Focusable as _;
+        let center = workspace.read(cx).center().read(cx);
+        center
+            .active_tab()
+            .is_some_and(|tab| tab.editor().read(cx).focus_handle(cx).is_focused(window))
+    })
+}
+
+/// Whether the chat's composer has the keyboard.
+fn composer_has_focus(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        use gpui::Focusable as _;
+        let chat = workspace.read(cx).chat().read(cx);
+        chat.composer().read(cx).focus_handle(cx).is_focused(window)
+    })
+}
+
+fn dock_open(
+    workspace: &Entity<Workspace>,
+    placement: DockPlacement,
+    cx: &mut VisualTestContext,
+) -> bool {
+    workspace.read_with(cx, |workspace, cx| workspace.is_dock_open(placement, cx))
+}
+
+/// Collapses the dock at `placement` without touching the focus.
+fn collapse(workspace: &Entity<Workspace>, placement: DockPlacement, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            if workspace.is_dock_open(placement, cx) {
+                workspace.toggle_dock(placement, window, cx);
+            }
+        })
+    });
+    cx.run_until_parked();
+}
+
+fn press(keys: &str, cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes(keys);
+    cx.run_until_parked();
+}
+
+/// §7.5: chat hidden + `Ctrl+Shift+A` → visible, cursor in the composer.
+#[gpui::test]
+fn ctrl_shift_a_opens_the_hidden_chat_with_the_cursor_in_the_composer(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    collapse(&workspace, DockPlacement::Left, cx);
+    assert!(editor_has_focus(&workspace, cx));
+
+    press("ctrl-shift-a", cx);
+    assert!(dock_open(&workspace, DockPlacement::Left, cx));
+    assert!(composer_has_focus(&workspace, cx));
+    cx.simulate_input("hola");
+    cx.run_until_parked();
+    let chat = workspace.read_with(cx, |workspace, _| workspace.chat().clone());
+    assert_eq!(chat.read_with(cx, |chat, cx| chat.input_text(cx)), "hola");
+}
+
+/// §7.5: typing in the composer + `Ctrl+Shift+A` → chat hidden, cursor in
+/// the active editor.
+#[gpui::test]
+fn ctrl_shift_a_from_the_composer_hides_the_chat_and_returns_to_the_editor(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    press("ctrl-shift-a", cx);
+    assert!(composer_has_focus(&workspace, cx));
+    cx.simulate_input("borrador");
+    cx.run_until_parked();
+
+    press("ctrl-shift-a", cx);
+    assert!(!dock_open(&workspace, DockPlacement::Left, cx));
+    assert!(editor_has_focus(&workspace, cx));
+}
+
+/// §7.5: with the conversation list open (and clicked), `Ctrl+Shift+A` hides
+/// the chat: the popover counts as inside the panel.
+#[gpui::test]
+fn ctrl_shift_a_with_the_conversation_list_open_hides_the_chat(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    let chat = workspace.read_with(cx, |workspace, _| workspace.chat().clone());
+    chat.update(cx, |chat, cx| {
+        chat.toggle_popover(cincel_chat::Popover::Conversations, cx)
+    });
+    cx.run_until_parked();
+    // A click inside the popover is what gives it the keyboard.
+    let popover = cx
+        .debug_bounds("chat-popover")
+        .expect("el popover se pinta");
+    cx.simulate_click(popover.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.popover().clone()),
+        cincel_chat::Popover::Conversations,
+        "el clic no cierra la lista"
+    );
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Chat));
+
+    press("ctrl-shift-a", cx);
+    assert!(!dock_open(&workspace, DockPlacement::Left, cx));
+    assert!(editor_has_focus(&workspace, cx));
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.popover().clone()),
+        cincel_chat::Popover::Closed
+    );
+}
+
+/// §7.5: chat visible, cursor in the editor + `Ctrl+Shift+A` → focus in the
+/// composer, the chat stays visible.
+#[gpui::test]
+fn ctrl_shift_a_from_the_editor_focuses_the_visible_chat(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    assert!(dock_open(&workspace, DockPlacement::Left, cx));
+    assert!(editor_has_focus(&workspace, cx));
+
+    press("ctrl-shift-a", cx);
+    assert!(dock_open(&workspace, DockPlacement::Left, cx));
+    assert!(composer_has_focus(&workspace, cx));
+}
+
+/// §7.5: tree hidden + `Ctrl+Shift+E` → visible, focus on the selected row
+/// (or the first), and the arrows move it.
+#[gpui::test]
+fn ctrl_shift_e_opens_the_hidden_tree_on_the_first_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    collapse(&workspace, DockPlacement::Right, cx);
+    let files = workspace.read_with(cx, |workspace, _| workspace.files().clone());
+    let selected = |cx: &mut VisualTestContext| {
+        files.read_with(cx, |files, cx| files.tree_state().read(cx).selected_index())
+    };
+    assert_eq!(selected(cx), None);
+
+    press("ctrl-shift-e", cx);
+    assert!(dock_open(&workspace, DockPlacement::Right, cx));
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Files));
+    assert_eq!(selected(cx), Some(0), "sin selección, la primera fila");
+
+    press("down", cx);
+    assert_eq!(selected(cx), Some(1), "las flechas mueven la selección");
+
+    // Closing and reopening keeps the selection instead of resetting it.
+    press("ctrl-shift-e", cx);
+    assert!(!dock_open(&workspace, DockPlacement::Right, cx));
+    assert!(editor_has_focus(&workspace, cx));
+    press("ctrl-shift-e", cx);
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Files));
+    assert_eq!(selected(cx), Some(1));
+}
+
+/// §7.5: with the connections modal open, neither shortcut does anything.
+#[gpui::test]
+fn the_panel_shortcuts_do_nothing_with_the_connections_modal_open(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    collapse(&workspace, DockPlacement::Right, cx);
+    let modal = workspace.read_with(cx, |workspace, cx| {
+        workspace.agents().read(cx).modal().clone()
+    });
+    cx.update(|window, cx| modal.update(cx, |modal, cx| modal.open_delete(window, cx)));
+    cx.run_until_parked();
+    assert!(workspace.read_with(cx, |workspace, cx| workspace.is_modal_open(cx)));
+    let focused_before = cx.update(|window, cx| window.focused(cx));
+
+    press("ctrl-shift-a", cx);
+    press("ctrl-shift-e", cx);
+    press("ctrl-l", cx);
+    assert!(
+        dock_open(&workspace, DockPlacement::Left, cx),
+        "el chat sigue igual"
+    );
+    assert!(
+        !dock_open(&workspace, DockPlacement::Right, cx),
+        "el árbol sigue oculto"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.focused(cx)),
+        focused_before,
+        "el foco no se movió"
+    );
+    assert!(modal.read_with(cx, |modal, _| modal.is_open()));
+}
+
+/// §7.6: without tabs, closing a panel gives the keyboard to the tab area.
+#[gpui::test]
+fn closing_a_panel_without_tabs_focuses_the_tab_area(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    press("ctrl-shift-a", cx);
+    assert!(composer_has_focus(&workspace, cx));
+
+    press("ctrl-shift-a", cx);
+    assert!(!dock_open(&workspace, DockPlacement::Left, cx));
+    let center_focused = cx.update(|window, cx| {
+        use gpui::Focusable as _;
+        workspace
+            .read(cx)
+            .center()
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    });
+    assert!(center_focused, "el área de pestañas se queda el foco");
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Center));
+}
+
+/// §7.3: a tab in Markdown preview gets the keyboard back on its preview,
+/// the only thing of it on screen.
+#[gpui::test]
+fn closing_a_panel_returns_to_the_markdown_preview(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    std::fs::write(dir.path().join("LEEME.md"), "# Hola\n").unwrap();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "LEEME.md", cx);
+    press("ctrl-shift-v", cx);
+    let preview = workspace.read_with(cx, |workspace, cx| {
+        match &workspace
+            .center()
+            .read(cx)
+            .active_tab()
+            .expect("pestaña")
+            .content
+        {
+            TabContent::MarkdownPreview(_, preview) => preview.clone(),
+            TabContent::Editor(_) => panic!("la pestaña debería estar en vista previa"),
+        }
+    });
+
+    press("ctrl-shift-a", cx);
+    press("ctrl-shift-a", cx);
+    assert!(!dock_open(&workspace, DockPlacement::Left, cx));
+    let preview_focused = cx.update(|window, cx| {
+        use gpui::Focusable as _;
+        preview.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(preview_focused);
+}
+
+/// §9.3: the three zones visible, focus in the editor: `Ctrl+L` → tree →
+/// chat → editor.
+#[gpui::test]
+fn ctrl_l_cycles_editor_tree_chat(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Center));
+
+    press("ctrl-l", cx);
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Files));
+    press("ctrl-l", cx);
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Chat));
+    assert!(composer_has_focus(&workspace, cx));
+    press("ctrl-l", cx);
+    assert!(editor_has_focus(&workspace, cx));
+    // The wheel never opened or closed anything.
+    assert!(dock_open(&workspace, DockPlacement::Left, cx));
+    assert!(dock_open(&workspace, DockPlacement::Right, cx));
+}
+
+/// §9.3: with the chat hidden, `Ctrl+L` goes editor → tree → editor and the
+/// chat stays hidden.
+#[gpui::test]
+fn ctrl_l_skips_the_hidden_chat(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    collapse(&workspace, DockPlacement::Left, cx);
+
+    press("ctrl-l", cx);
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Files));
+    press("ctrl-l", cx);
+    assert!(editor_has_focus(&workspace, cx));
+    assert!(!dock_open(&workspace, DockPlacement::Left, cx));
+
+    // With both side panels hidden the editor keeps the keyboard.
+    collapse(&workspace, DockPlacement::Right, cx);
+    press("ctrl-l", cx);
+    assert!(editor_has_focus(&workspace, cx));
+    assert!(!dock_open(&workspace, DockPlacement::Right, cx));
+}
+
+/// §9.3: from the chat's composer, `Ctrl+L` moves on to the editor (no
+/// `Chat` binding keeps it in the chat, D8).
+#[gpui::test]
+fn ctrl_l_leaves_the_composer_for_the_editor(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    press("ctrl-shift-a", cx);
+    assert!(composer_has_focus(&workspace, cx));
+
+    press("ctrl-l", cx);
+    assert!(editor_has_focus(&workspace, cx));
+}
+
+/// §9.3: `Ctrl+Shift+L` in the editor still selects the line.
+#[gpui::test]
+fn ctrl_shift_l_still_selects_the_line(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    let center = open_pinned(&workspace, "src/main.rs", cx);
+    assert!(editor_has_focus(&workspace, cx));
+
+    press("ctrl-shift-l", cx);
+    let selected = center.read_with(cx, |center, cx| {
+        center
+            .active_tab()
+            .expect("pestaña")
+            .editor()
+            .read(cx)
+            .selected_text()
+    });
+    assert!(selected.starts_with("fn main() {"), "{selected:?}");
+    assert_eq!(zone(&workspace, cx), Some(FocusZone::Center));
+}
+
+/// §9.3: with a modal open (today the review panel and the connections
+/// modal; the file finder joins in E5-F), `Ctrl+L` does not move the focus.
+#[gpui::test]
+fn ctrl_l_does_nothing_with_a_modal_open(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    open_pinned(&workspace, "src/main.rs", cx);
+    press("ctrl-shift-r", cx);
+    assert!(workspace.read_with(cx, |workspace, cx| {
+        workspace.review().read(cx).is_panel_open()
+    }));
+    assert!(workspace.read_with(cx, |workspace, cx| workspace.is_modal_open(cx)));
+
+    press("ctrl-l", cx);
+    assert!(editor_has_focus(&workspace, cx));
+    press("ctrl-shift-a", cx);
+    assert!(editor_has_focus(&workspace, cx));
+}
+
+/// §9.1: from outside every zone, `Ctrl+L` goes to the chat.
+#[gpui::test]
+fn ctrl_l_from_outside_every_zone_goes_to_the_chat(cx: &mut TestAppContext) {
+    init_test(cx);
+    let dir = sample_project();
+    let (workspace, cx) = workspace_window(dir.path(), cx);
+    // The workspace root holds the keyboard at startup.
+    assert_eq!(zone(&workspace, cx), None);
+
+    press("ctrl-l", cx);
+    assert!(composer_has_focus(&workspace, cx));
 }

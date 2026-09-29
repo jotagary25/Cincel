@@ -6,16 +6,29 @@
 //! place that talks to it. It follows the host protocol documented in
 //! `cincel-review`:
 //!
-//! 1. **Base.** Captured on the first contact of a turn with a path: an
-//!    `fs/read_text_file` (from the open buffer, before answering), an
-//!    `fs/write_text_file` (before applying it), the first `tool_call` of kind
-//!    `edit`/`delete`/`move` naming the path, or `file_created` for a path that
-//!    did not exist.
+//! 0. **The photo** (v2, 2026-09-28: the base comes from the photo of the
+//!    project; the tools are only a hint). `begin_prompt` takes a
+//!    [`cincel_project::ProjectSnapshot`] of every file before the prompt
+//!    goes out (`review_snapshot.rs`). Whatever changes on disk inside the
+//!    project until the turn ends is the agent's, whatever it used: the
+//!    watcher's [`FilesChanged`] batches, for any path, open or not, and the
+//!    end-of-turn sweep of the whole photo against the disk. A path not in
+//!    review takes the photo's copy as its base (`file_created` if it was not
+//!    there). What Cincel itself writes meanwhile ([`HostWrote`]: a
+//!    `Ctrl+S`, a new file, a reject) refreshes the photo and is never the
+//!    agent's; other programs' changes are.
+//! 1. **Base.** Otherwise captured on the first contact of a turn with a
+//!    path (the hints): an `fs/read_text_file` (from the open buffer, before
+//!    answering), an `fs/write_text_file` (before applying it), the first
+//!    `tool_call` of kind `edit`/`delete`/`move` naming the path, or
+//!    `file_created` for a path that did not exist. When the disk already
+//!    differs from the photo, the photo is the base.
 //! 2. **Truth from disk.** After every completed edit tool call, every
-//!    `agentFileChangeReport` and every watcher reload of a tracked path, the
+//!    `agentFileChangeReport`, every watcher batch and the final sweep, the
 //!    file is re-read from disk into its buffer (minimal edits) and reported
 //!    with `file_written` / `file_deleted` / `file_created`. The `diff` the
-//!    agent sends is never used.
+//!    agent sends is never used. Files that are not UTF-8 are reviewed as a
+//!    whole next to the store ("archivo binario cambiado por el agente").
 //! 3. **Buffer events.** Every buffer in review is subscribed to; its events
 //!    are queued by the subscription and drained on the main thread, right
 //!    after each operation of this module (so the snapshot is the one right
@@ -55,12 +68,17 @@ use cincel_review::{
 };
 use cincel_text::{BufferEvent, BufferSnapshot, EditSource, Point, Rope, SubscriptionId};
 use gpui::{
-    AnyWindowHandle, App, Context, Entity, SharedString, Subscription, Task, WeakEntity, Window,
+    AnyWindowHandle, App, Context, Entity, FocusHandle, SharedString, Subscription, Task,
+    WeakEntity, Window,
 };
 use parking_lot::Mutex;
 
 use crate::center::{CenterEvent, CenterPanel};
-use crate::project::{Project, ProjectEvent};
+use crate::project::{FilesChanged, HostWrote, Project, ProjectEvent};
+
+/// The photo of the project and the binary files (`review_snapshot.rs`).
+#[path = "review_snapshot.rs"]
+mod photo;
 
 /// Debounce of the background recompute (`03-arquitectura.md` §4.3).
 pub const RECOMPUTE_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -95,6 +113,40 @@ pub struct FileSummary {
     pub file_level: bool,
     /// Pending hunks (0 for file-level files).
     pub hunks: usize,
+    /// A file that is not UTF-8 ("archivo binario cambiado por el agente"):
+    /// only whole-file decisions, no diff.
+    pub binary: bool,
+    /// A file the photo kept no copy of: it can only be accepted.
+    pub no_copy: bool,
+}
+
+/// What the tree says next to a binary file the agent changed.
+pub const BINARY_LABEL: &str = "archivo binario cambiado por el agente";
+/// What the tree says next to a file the agent changed whose previous
+/// content Cincel did not keep (over `review.max_file_size_kb` or
+/// `review.snapshot_max_total_mb`).
+pub const NO_COPY_LABEL: &str = "cambiado por el agente, sin copia previa";
+/// The tooltip of a file the agent deleted, in the tree.
+pub const DELETED_TOOLTIP: &str = "Borrado por el agente · pendiente";
+/// Id of the single hunk the tab of a file the agent deleted shows: its whole
+/// previous content as read-only phantom rows. The store numbers its hunks
+/// from 1 upwards, so this one never names a real hunk.
+pub const DELETED_FILE_HUNK: u64 = u64::MAX;
+/// The only phantom row of a deleted binary file (there is no text to show).
+pub const DELETED_BINARY_LINE: &str = "(archivo binario borrado por el agente: sin vista previa)";
+/// The only phantom row of a deleted file the photo kept no copy of.
+pub const DELETED_NO_COPY_LINE: &str = "(borrado por el agente: Cincel no guardó una copia previa)";
+
+/// The tree's label for a file reviewed outside the store (binary or
+/// without a copy), instead of `+N −M`.
+pub fn outside_label(file: &FileSummary) -> Option<&'static str> {
+    if file.no_copy {
+        Some(NO_COPY_LABEL)
+    } else if file.binary {
+        Some(BINARY_LABEL)
+    } else {
+        None
+    }
 }
 
 /// Everything the painting code reads about the review.
@@ -142,6 +194,39 @@ impl ReviewSummary {
 /// `+N −M`, the way tabs, tree and panel print stats.
 pub fn stats_label(added: u32, removed: u32) -> String {
     format!("+{added} −{removed}")
+}
+
+/// The tree's counter of a file in review: `+N` for a file the agent
+/// created, `−N` for one it deleted (N: its lines), `+N −M` otherwise.
+pub fn tree_stats_label(file: &FileSummary) -> String {
+    match file.state {
+        FileState::Created => format!("+{}", file.added),
+        FileState::Deleted => format!("−{}", file.removed),
+        FileState::Modified => stats_label(file.added, file.removed),
+    }
+}
+
+/// `count` followed by the word for what is counted, singular or plural
+/// ("1 archivo", "3 cambios").
+pub fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+/// The tree's root line: files with pending changes, pending changes (hunks,
+/// plus one per file reviewed as a whole — what the floating bar's "cambio N
+/// de M" counts inside one file) and pending lines, each with its word:
+/// "1 archivo · 3 cambios · +0 −36".
+pub fn totals_label(files: usize, changes: usize, (added, removed): (u32, u32)) -> String {
+    format!(
+        "{} · {} · {}",
+        count_label(files, "archivo", "archivos"),
+        count_label(changes, "cambio", "cambios"),
+        stats_label(added, removed)
+    )
 }
 
 /// An answer of the "«x» tiene cambios sin guardar" dialog.
@@ -194,6 +279,8 @@ pub struct PanelRow {
     pub deleted: bool,
     /// Reviewable only as a whole file (too large for inline hunks).
     pub too_large: bool,
+    /// Not UTF-8: reviewable only as a whole file, without a diff.
+    pub binary: bool,
 }
 
 /// A buffer the review listens to.
@@ -215,6 +302,17 @@ enum Deferred {
     },
     Capture,
     Reread,
+}
+
+/// The "¿Rechazar todo el turno?" confirmation the floating bar's "Rechazar
+/// todo" opens (`crate::review_close` paints it).
+struct RejectTurnPrompt {
+    /// Pending decisions of the turn.
+    changes: usize,
+    /// Files of the turn with something pending.
+    files: usize,
+    /// Where the keyboard was (the editor), given back on either answer.
+    previous_focus: Option<FocusHandle>,
 }
 
 /// A pending "cambios sin guardar" question.
@@ -273,11 +371,24 @@ pub struct Review {
     cycle: BTreeSet<PathBuf>,
     panel_open: bool,
     prompts: VecDeque<DirtyPrompt>,
+    /// The bar's "Rechazar todo" waiting for its confirmation.
+    reject_turn_prompt: Option<RejectTurnPrompt>,
+    /// Keyboard focus of that confirmation (`Esc` cancels it).
+    reject_turn_focus: FocusHandle,
     recompute_dirty: BTreeSet<PathBuf>,
     recompute_scheduled: bool,
     persist_scheduled: bool,
     limits: Limits,
+    /// The photo of the project of the running turn.
+    photo: Option<photo::PhotoState>,
+    /// Files that are not UTF-8 the agent changed, created or deleted.
+    binaries: BTreeMap<PathBuf, photo::BinaryChange>,
+    /// Takes the photo on the background executor even for an inert project
+    /// (a test of the prompt waiting for it).
+    photo_in_background: bool,
     project_subscription: Option<Subscription>,
+    /// [`FilesChanged`] and [`HostWrote`] of the open project.
+    photo_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
     _wake_task: Task<()>,
 }
@@ -332,11 +443,17 @@ impl Review {
             cycle: BTreeSet::new(),
             panel_open: false,
             prompts: VecDeque::new(),
+            reject_turn_prompt: None,
+            reject_turn_focus: cx.focus_handle(),
             recompute_dirty: BTreeSet::new(),
             recompute_scheduled: false,
             persist_scheduled: false,
             limits: Limits::from_settings(&settings),
+            photo: None,
+            binaries: BTreeMap::new(),
+            photo_in_background: false,
             project_subscription: None,
+            photo_subscriptions: Vec::new(),
             _subscriptions: vec![subscription],
             _wake_task: wake_task,
         }
@@ -398,8 +515,12 @@ impl Review {
         self.cycle.clear();
         self.panel_open = false;
         self.prompts.clear();
+        self.reject_turn_prompt = None;
         self.recompute_dirty.clear();
+        self.photo = None;
+        self.binaries.clear();
         self.project_subscription = None;
+        self.photo_subscriptions.clear();
         self.project = project.clone();
 
         if let Some(project) = project {
@@ -410,6 +531,14 @@ impl Review {
                     this.on_disk_changes(changes, cx);
                 }
             }));
+            self.photo_subscriptions = vec![
+                cx.subscribe(&project, |this, _, event: &FilesChanged, cx| {
+                    this.on_files_changed(&event.0, cx);
+                }),
+                cx.subscribe(&project, |this, _, event: &HostWrote, _cx| {
+                    this.on_host_wrote(&event.0);
+                }),
+            ];
             self.load(cx);
         }
         self.refresh(None, cx);
@@ -493,8 +622,16 @@ impl Review {
     /// starts a new turn. Returns the turn id (for
     /// `EditSource::Agent { turn_id }`) and the feedback to attach to
     /// `AgentCommand::Prompt`.
+    ///
+    /// It also starts the photo of the project the turn is reviewed against
+    /// (`review_snapshot.rs`); the prompt must wait for
+    /// [`Self::photo_waiter`] before it goes out.
     pub fn begin_prompt(&mut self, cx: &mut Context<Self>) -> (u64, Option<String>) {
         self.flush(None, cx);
+        if self.active_turn.is_some() {
+            self.sweep_photo(cx);
+        }
+        self.photo = None;
         if let Some(turn) = self.active_turn.take() {
             self.store.end_turn(turn);
             self.reportable.push(turn);
@@ -514,6 +651,7 @@ impl Review {
         self.store.begin_turn(turn);
         self.active_turn = Some(turn);
         self.latest_turn = Some(turn);
+        self.start_photo(turn, cx);
         self.refresh(None, cx);
         (turn.0, (!notes.is_empty()).then(|| notes.join("\n")))
     }
@@ -521,8 +659,16 @@ impl Review {
     /// The agent's turn ended (`AgentEvent::TurnEnded` with any stop
     /// reason, or the process died). Nothing is accepted: what the turn left
     /// waits for the user in the editor.
+    ///
+    /// First the whole photo is compared with the disk and whatever the
+    /// watcher did not report joins the review; only then is the photo
+    /// dropped.
     pub fn end_turn(&mut self, cx: &mut Context<Self>) {
         self.flush(None, cx);
+        if self.active_turn.is_some() {
+            self.sweep_photo(cx);
+        }
+        self.photo = None;
         let Some(turn) = self.active_turn.take() else {
             return;
         };
@@ -766,6 +912,17 @@ impl Review {
         self.flush(None, cx);
         let exists = path.is_file();
         let source = self.turn_source();
+        if self.store.file(path).is_none() && self.ready_snapshot().is_some() {
+            if self.absent_before.remove(path) && exists {
+                // A tool call named it before it existed (v1's rule, kept
+                // for paths the photo does not cover, such as ignored ones).
+                self.track_created(path, cx);
+                return true;
+            }
+            // The photo knows what the file was before the turn, however the
+            // agent changed it.
+            return self.adopt_change(path, cx);
+        }
         if self.store.file(path).is_none() {
             if !exists {
                 self.absent_before.remove(path);
@@ -864,6 +1021,19 @@ impl Review {
         };
         self.flush(None, cx);
         let snapshot = handle.lock().snapshot();
+        let dirty = handle.lock().is_dirty();
+        if !dirty && let Some(before) = self.photo_text(path) {
+            let before = photo::normalize(&before);
+            if before != snapshot.text() {
+                // The agent already changed it by other means: the base is
+                // the photo, and the difference is the agent's.
+                self.store.capture_base_text(path, &before);
+                let tracked = self.store.file_written(path, &snapshot, self.turn_source());
+                self.note(path, tracked);
+                tracing::debug!(path = %path.display(), "base tomada de la foto");
+                return;
+            }
+        }
         if self.store.capture_base(path, &snapshot) {
             tracing::debug!(path = %path.display(), "base capturada");
         }
@@ -1146,6 +1316,9 @@ impl Review {
         };
         match project.update(cx, |project, cx| project.save(path, cx)) {
             Ok(()) => {
+                // `HostWrote` arrives after this update; the photo has to
+                // know now (a capture may follow right away).
+                self.on_host_wrote(path);
                 if let Some(center) = self.center.upgrade() {
                     center.update(cx, |center, cx| center.note_saved(path, cx));
                 }
@@ -1270,6 +1443,20 @@ impl Review {
         if action.is_decision() && self.store.turn_active(path) {
             return;
         }
+        // The single hunk of a deleted file's tab stands for the file.
+        let action = match action {
+            ReviewAction::AcceptHunk(DELETED_FILE_HUNK) => ReviewAction::AcceptFile,
+            ReviewAction::RejectHunk(DELETED_FILE_HUNK) => ReviewAction::RejectFile,
+            ReviewAction::AcceptLine {
+                hunk: DELETED_FILE_HUNK,
+                ..
+            } => ReviewAction::AcceptFile,
+            ReviewAction::RejectLine {
+                hunk: DELETED_FILE_HUNK,
+                ..
+            } => ReviewAction::RejectFile,
+            other => other,
+        };
         match action {
             ReviewAction::AcceptHunk(id) => {
                 if let Err(error) = self.store.accept_hunk(HunkId(id)) {
@@ -1307,6 +1494,8 @@ impl Review {
             }
             ReviewAction::AcceptFile => self.accept_file(path, cx),
             ReviewAction::RejectFile => self.reject_file(path, cx),
+            ReviewAction::AcceptTurn => self.accept_turn(cx),
+            ReviewAction::RejectTurn => self.request_reject_turn(window, cx),
             ReviewAction::NextHunk => self.navigate(
                 Nav::Next,
                 Some((path.to_path_buf(), origin.unwrap_or(0))),
@@ -1353,6 +1542,10 @@ impl Review {
     /// Accepts every pending change of `path`.
     pub fn accept_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.flush(None, cx);
+        if self.binaries.contains_key(path) {
+            self.accept_binary(path, cx);
+            return;
+        }
         if self.store.turn_active(path) {
             return;
         }
@@ -1365,6 +1558,10 @@ impl Review {
     /// Rejects every pending change of `path`.
     pub fn reject_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.flush(None, cx);
+        if self.binaries.contains_key(path) {
+            self.reject_binary(path, cx);
+            return;
+        }
         if self.store.turn_active(path) {
             return;
         }
@@ -1382,10 +1579,11 @@ impl Review {
     /// something pending.
     fn target_turn(&self) -> Option<TurnId> {
         if let Some(turn) = self.latest_turn
-            && self
+            && (self
                 .store
                 .files()
                 .any(|file| file.turn_id == turn && file.has_pending_work())
+                || self.binaries.values().any(|change| change.turn == turn))
         {
             return Some(turn);
         }
@@ -1393,6 +1591,7 @@ impl Review {
             .files()
             .filter(|file| file.has_pending_work())
             .map(|file| file.turn_id)
+            .chain(self.binaries.values().map(|change| change.turn))
             .max()
     }
 
@@ -1408,6 +1607,7 @@ impl Review {
             return;
         };
         self.store.accept_turn(turn);
+        self.decide_binaries(Some(turn), true, cx);
         self.all_decided(cx);
     }
 
@@ -1424,8 +1624,105 @@ impl Review {
         };
         let reverts = self.store.reject_turn(turn);
         self.apply_reverts(reverts, cx);
+        self.decide_binaries(Some(turn), false, cx);
         self.offer_undo("Turno rechazado", cx);
         self.all_decided(cx);
+    }
+
+    /// `(pending decisions, files)` of the turn `accept_turn` /
+    /// `reject_turn` would decide.
+    pub fn turn_counts(&self) -> (usize, usize) {
+        let Some(turn) = self.target_turn() else {
+            return (0, 0);
+        };
+        let binaries = self
+            .binaries
+            .values()
+            .filter(|change| change.turn == turn)
+            .count();
+        self.store
+            .files()
+            .filter(|file| file.turn_id == turn && file.has_pending_work())
+            .fold((binaries, binaries), |(changes, files), file| {
+                (changes + self.decisions(file), files + 1)
+            })
+    }
+
+    /// `(pending decisions, files)` over the whole review, every turn: what
+    /// closing the window or the project asks about (`crate::review_close`).
+    pub fn pending_counts(&self) -> (usize, usize) {
+        let binaries = self.binaries.len();
+        self.store
+            .files()
+            .filter(|file| file.has_pending_work())
+            .fold((binaries, binaries), |(changes, files), file| {
+                (changes + self.decisions(file), files + 1)
+            })
+    }
+
+    /// The floating bar's "Rechazar todo": the whole turn goes, so it asks
+    /// first ("Rechazar N cambios en M archivos" / "Cancelar"). The answer is
+    /// [`Self::confirm_reject_turn`] or [`Self::cancel_reject_turn`].
+    pub fn request_reject_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush(None, cx);
+        if self.active_turn.is_some() {
+            crate::toast::info_keyed("review", "El agente todavía está editando", cx);
+            return;
+        }
+        let (changes, files) = self.turn_counts();
+        if changes == 0 {
+            crate::toast::info_keyed("review", "No hay cambios pendientes", cx);
+            return;
+        }
+        let previous_focus = self
+            .reject_turn_prompt
+            .take()
+            .and_then(|prompt| prompt.previous_focus)
+            .or_else(|| window.focused(cx));
+        self.reject_turn_prompt = Some(RejectTurnPrompt {
+            changes,
+            files,
+            previous_focus,
+        });
+        window.focus(&self.reject_turn_focus, cx);
+        cx.notify();
+    }
+
+    /// `(changes, files)` the "Rechazar todo" confirmation asks about, while
+    /// it is up.
+    pub fn reject_turn_prompt(&self) -> Option<(usize, usize)> {
+        self.reject_turn_prompt
+            .as_ref()
+            .map(|prompt| (prompt.changes, prompt.files))
+    }
+
+    /// The focus handle of the "Rechazar todo" confirmation.
+    pub fn reject_turn_focus(&self) -> &FocusHandle {
+        &self.reject_turn_focus
+    }
+
+    /// The confirmation's "Rechazar N cambios en M archivos": the same as
+    /// `workspace::reject_turn`, undo toast included (`Alt+Shift+U`).
+    pub fn confirm_reject_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.reject_turn_prompt.take() else {
+            return;
+        };
+        if let Some(previous) = &prompt.previous_focus {
+            window.focus(previous, cx);
+        }
+        self.reject_turn(cx);
+        cx.notify();
+    }
+
+    /// The confirmation's "Cancelar" (`Esc`): nothing is decided.
+    pub fn cancel_reject_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.reject_turn_prompt.take() else {
+            return;
+        };
+        if let Some(previous) = &prompt.previous_focus {
+            window.focus(previous, cx);
+        }
+        cx.notify();
     }
 
     /// "Aceptar todo" of the review panel.
@@ -1436,6 +1733,7 @@ impl Review {
             return;
         }
         self.store.accept_all();
+        self.decide_binaries(None, true, cx);
         self.all_decided(cx);
     }
 
@@ -1447,7 +1745,12 @@ impl Review {
             return;
         }
         let reverts = self.store.reject_all();
+        let binaries = !self.binaries.is_empty();
+        self.decide_binaries(None, false, cx);
         if reverts.is_empty() {
+            if binaries {
+                self.all_decided(cx);
+            }
             return;
         }
         self.apply_reverts(reverts, cx);
@@ -1529,6 +1832,7 @@ impl Review {
                             continue;
                         }
                     }
+                    self.on_host_wrote(&path);
                     if let Some(watched) = self.buffers.remove(&path) {
                         watched.handle.lock().unsubscribe(watched.subscription);
                     }
@@ -1570,6 +1874,7 @@ impl Review {
                 );
                 return;
             }
+            self.on_host_wrote(path);
         }
         if self.store.file(path).is_some()
             && let Some(handle) = self.ensure_buffer(path, cx)
@@ -1693,12 +1998,12 @@ impl Review {
         };
         let path = location.path.clone();
         center.update(cx, |center, cx| center.open_file(&path, true, window, cx));
-        let Some(editor) = center
+        let Some((editor, deleted_review)) = center
             .read(cx)
             .tabs()
             .iter()
             .find(|tab| tab.path == path)
-            .map(|tab| tab.editor().clone())
+            .map(|tab| (tab.editor().clone(), tab.deleted_review))
         else {
             return;
         };
@@ -1719,7 +2024,7 @@ impl Review {
             }
             _ => {
                 self.current.remove(&path);
-                let view = self.view_for(&path);
+                let view = self.view_for_tab(&path, deleted_review);
                 editor.update(cx, |editor, cx| {
                     editor.set_review(view, cx);
                     editor.set_cursor(Point::new(location.row, 0), cx);
@@ -1757,9 +2062,23 @@ impl Review {
         };
         let mut paths: BTreeSet<PathBuf> = self.cycle.clone();
         paths.extend(self.store.pending_files());
+        paths.extend(self.binaries.keys().cloned());
         paths
             .into_iter()
             .map(|path| {
+                if let Some(change) = self.binaries.get(&path) {
+                    return PanelRow {
+                        relative: relative(&path),
+                        added: 0,
+                        removed: 0,
+                        state: PanelState::Pending,
+                        created: change.state == FileState::Created,
+                        deleted: change.state == FileState::Deleted,
+                        too_large: !change.restorable(),
+                        binary: change.binary,
+                        path,
+                    };
+                }
                 let pending = self
                     .store
                     .file(&path)
@@ -1782,6 +2101,7 @@ impl Review {
                         !matches!(file.status, FileStatus::Deleted { .. })
                             && self.is_file_level(file)
                     }),
+                    binary: false,
                     path,
                 }
             })
@@ -1843,7 +2163,11 @@ impl Review {
 
     /// Pending decisions over the whole review (what the status bar counts).
     pub fn pending_count(&self) -> usize {
-        self.store.files().map(|file| self.decisions(file)).sum()
+        self.store
+            .files()
+            .map(|file| self.decisions(file))
+            .sum::<usize>()
+            + self.binaries.len()
     }
 
     /// The [`ReviewView`] of `path`, as the editor paints it.
@@ -1886,34 +2210,126 @@ impl Review {
             hunks,
             turn_active,
             current_index,
+            file_actions: false,
         }
+    }
+
+    /// The view of the tab of `path`: the tab of a file the agent deleted
+    /// (`deleted_review`, an empty read-only buffer) shows the whole previous
+    /// content as one hunk of phantom rows; any other tab gets
+    /// [`Self::view_for`].
+    pub fn view_for_tab(&mut self, path: &Path, deleted_review: bool) -> ReviewView {
+        if deleted_review && let Some(view) = self.deleted_view(path) {
+            return view;
+        }
+        self.view_for(path)
+    }
+
+    /// The single "archivo borrado" hunk of a pending deletion: every line
+    /// the file had, red and read-only, decided as a whole file
+    /// (`file_actions`). `None` when `path` is not a pending deletion.
+    fn deleted_view(&mut self, path: &Path) -> Option<ReviewView> {
+        let (lines, turn, turn_active) = if let Some(file) = self.store.file(path) {
+            let FileStatus::Deleted { previous } = &file.status else {
+                return None;
+            };
+            let lines = rope_lines(previous);
+            let turn_active = self.active_turn.is_some() && self.store.turn_active(path);
+            (lines, file.turn_id, turn_active)
+        } else {
+            let change = self
+                .binaries
+                .get(path)
+                .filter(|change| change.state == FileState::Deleted)?;
+            let line = if change.binary {
+                DELETED_BINARY_LINE
+            } else {
+                DELETED_NO_COPY_LINE
+            };
+            let turn_active = self.active_turn == Some(change.turn);
+            (vec![line.to_string()], change.turn, turn_active)
+        };
+        self.pushed.remove(path);
+        let total = self.pending_count();
+        let rows = lines.len() as u32;
+        Some(ReviewView {
+            hunks: vec![ReviewHunkView {
+                id: DELETED_FILE_HUNK,
+                base_rows: 0..rows,
+                deleted_lines: lines,
+                buffer_rows: 0..0,
+                kind: ReviewHunkKind::Deleted,
+                word_diffs: None,
+                lines: Vec::new(),
+                from_previous_turn: self.latest_turn.is_some_and(|latest| latest != turn),
+            }],
+            turn_active,
+            pending_in_file: 1,
+            pending_in_other_files: total.saturating_sub(1),
+            current_index: Some(0),
+            file_actions: true,
+        })
+    }
+
+    /// Whether `path` is a deletion still waiting for a decision (text or
+    /// binary).
+    pub fn is_pending_deletion(&self, path: &Path) -> bool {
+        self.store
+            .file(path)
+            .is_some_and(|file| matches!(file.status, FileStatus::Deleted { .. }))
+            || self
+                .binaries
+                .get(path)
+                .is_some_and(|change| change.state == FileState::Deleted)
     }
 
     /// Rebuilds the summary and pushes fresh views to the editors: of `path`
     /// only, or of every tab.
+    ///
+    /// A tab whose kind no longer matches the review (a file the agent
+    /// deleted shown as a normal editor, or the read-only tab of a deletion
+    /// that was just decided) is swapped once this update is over
+    /// ([`CenterPanel::sync_deleted_reviews`], which needs the window).
     fn refresh(&mut self, path: Option<&Path>, cx: &mut Context<Self>) {
         self.refresh_summary(cx);
         if let Some(center) = self.center.upgrade() {
-            let editors: Vec<(PathBuf, Entity<EditorView>)> = center
+            let editors: Vec<(PathBuf, Entity<EditorView>, bool)> = center
                 .read(cx)
                 .tabs()
                 .iter()
                 .filter(|tab| path.is_none_or(|path| tab.path == path))
-                .map(|tab| (tab.path.clone(), tab.editor().clone()))
+                .map(|tab| (tab.path.clone(), tab.editor().clone(), tab.deleted_review))
                 .collect();
-            for (path, editor) in editors {
-                let view = self.view_for(&path);
+            for (path, editor, deleted_review) in editors {
+                let view = self.view_for_tab(&path, deleted_review);
                 editor.update(cx, |editor, cx| editor.set_review(view, cx));
             }
             center.update(cx, |_, cx| cx.notify());
+            if center.read(cx).deleted_reviews_out_of_sync(cx) {
+                self.sync_center_later(cx);
+            }
         }
         self.schedule_recompute(cx);
         cx.notify();
     }
 
+    /// Runs [`CenterPanel::sync_deleted_reviews`] once the current update is
+    /// over (swapping a tab moves the focus, which needs the window).
+    fn sync_center_later(&self, cx: &mut Context<Self>) {
+        let (Some(window), Some(center)) = (self.window, self.center.upgrade()) else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                center.update(cx, |center, cx| center.sync_deleted_reviews(window, cx))
+            });
+        });
+    }
+
     fn refresh_summary(&mut self, cx: &App) {
         let pending_files = self.store.pending_files();
         self.cycle.extend(pending_files.iter().cloned());
+        self.cycle.extend(self.binaries.keys().cloned());
         let mut files = BTreeMap::new();
         let mut total = (0, 0);
         for path in &pending_files {
@@ -1940,6 +2356,22 @@ impl Review {
                     } else {
                         file.pending_hunks().count()
                     },
+                    binary: false,
+                    no_copy: false,
+                },
+            );
+        }
+        for (path, change) in &self.binaries {
+            files.insert(
+                path.clone(),
+                FileSummary {
+                    added: 0,
+                    removed: 0,
+                    state: change.state,
+                    file_level: true,
+                    hunks: 0,
+                    binary: change.binary,
+                    no_copy: !change.restorable(),
                 },
             );
         }
@@ -2020,6 +2452,15 @@ fn line_text(rope: &Rope, row: u32) -> String {
         Some(stripped) => stripped.to_owned(),
         None => line,
     }
+}
+
+/// Every line of `rope`, without newlines; the empty row after a trailing
+/// newline is not a line (the count the tree's `−N` shows).
+fn rope_lines(rope: &Rope) -> Vec<String> {
+    rope.to_string()
+        .split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line).to_owned())
+        .collect()
 }
 
 fn file_name(path: &Path) -> String {

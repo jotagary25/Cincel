@@ -125,6 +125,11 @@ pub enum ConnectionsError {
     #[error("no se pudo iniciar el inicio de sesión: {0}")]
     LoginSpawn(String),
 
+    /// The operation was cancelled through its
+    /// [`CancelToken`](crate::CancelToken); partial files were removed.
+    #[error("Cancelado")]
+    Cancelled,
+
     /// The ACP layer failed.
     #[error(transparent)]
     Acp(#[from] cincel_acp::AcpError),

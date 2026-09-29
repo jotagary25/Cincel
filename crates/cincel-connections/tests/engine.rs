@@ -22,10 +22,10 @@ use std::time::{Duration, Instant};
 
 use cincel_acp::{AgentCommand, AgentConnection, AgentEvent, AgentRegistry, LaunchSpec};
 use cincel_connections::{
-    AcpIdentityProbe, AdapterProgress, Adapters, AgentKind, CincelPaths, ConnectionStatus,
-    Connections, ConnectionsError, Downloader, IdentityProbe, InstallKind, LoginEvent, LogoutStep,
-    NodePaths, NodeVersion, PackageInstaller, PrepareProgress, ProbeOutcome, RangeBody, Runtime,
-    RuntimeProgress, disconnect,
+    AcpIdentityProbe, AdapterProgress, Adapters, AgentKind, CancelToken, CincelPaths,
+    ConnectionStatus, Connections, ConnectionsError, Downloader, IdentityProbe, InstallKind,
+    LoginEvent, LogoutStep, NodePaths, NodeVersion, PackageInstaller, PrepareProgress,
+    ProbeOutcome, RangeBody, Runtime, RuntimeProgress, disconnect,
 };
 
 const FAKE_AGENT: &str = env!("CARGO_BIN_EXE_cincel-connections-fake-agent");
@@ -88,12 +88,17 @@ fn tar_entry(builder: &mut tar::Builder<Vec<u8>>, path: &str, body: &[u8], mode:
 
 /// A Node-like tar.xz: what the runtime keeps plus things it must drop.
 fn node_tarball(adapter_script: &str) -> Vec<u8> {
-    let top = format!("node-{VERSION}-{PLATFORM}");
+    node_tarball_with(VERSION, FAKE_NODE, adapter_script)
+}
+
+/// [`node_tarball`] for another version and fake `node` script.
+fn node_tarball_with(version: &str, node_script: &str, adapter_script: &str) -> Vec<u8> {
+    let top = format!("node-{version}-{PLATFORM}");
     let mut builder = tar::Builder::new(Vec::new());
     tar_entry(
         &mut builder,
         &format!("{top}/bin/node"),
-        FAKE_NODE.as_bytes(),
+        node_script.as_bytes(),
         0o755,
     );
     tar_entry(
@@ -358,7 +363,7 @@ fn env() -> Env {
     }
 }
 
-fn runtime(env: &Env, downloader: MemDownloader) -> Runtime {
+fn runtime(env: &Env, downloader: impl Downloader + 'static) -> Runtime {
     Runtime::new(env.paths.clone())
         .with_downloader(Box::new(downloader))
         .with_base_url(BASE)
@@ -367,7 +372,7 @@ fn runtime(env: &Env, downloader: MemDownloader) -> Runtime {
 }
 
 fn connections(env: &Env, code: &str) -> Connections {
-    let archive = node_tarball(&fake_adapter_script("gary@example.com", &env.marker, code));
+    let archive = node_tarball(&fake_adapter_script("ana@example.com", &env.marker, code));
     Connections::new(env.paths.clone()).with_runtime(runtime(env, MemDownloader::node(&archive)))
 }
 
@@ -375,7 +380,7 @@ fn prepared(env: &Env, kind: AgentKind) -> (Connections, NodePaths) {
     let connections = connections(env, "CODIGO-1");
     let registry = registry();
     let (node, _) = connections
-        .prepare(Some(&registry), kind, &mut |_| {})
+        .prepare(Some(&registry), kind, &mut |_| {}, &CancelToken::new())
         .expect("prepare");
     (connections, node.expect("los adaptadores npm usan Node"))
 }
@@ -401,7 +406,7 @@ fn runtime_downloads_verifies_extracts_and_strips() {
     assert!(runtime.installed().is_none());
     let mut phases = Vec::new();
     let node = runtime
-        .ensure(&mut |step| phases.push(step))
+        .ensure(&mut |step| phases.push(step), &CancelToken::new())
         .expect("ensure");
     assert_eq!(node.version, VERSION);
     assert!(node.is_complete());
@@ -440,11 +445,13 @@ fn installed_runtime_is_reused_without_network() {
     let env = env();
     let archive = node_tarball("#!/bin/sh\n");
     runtime(&env, MemDownloader::node(&archive))
-        .ensure(&mut |_| {})
+        .ensure(&mut |_| {}, &CancelToken::new())
         .expect("first install");
     // A downloader with nothing to serve: any request would fail.
     let offline = runtime(&env, MemDownloader::default());
-    let node = offline.ensure(&mut |_| {}).expect("offline reuse");
+    let node = offline
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect("offline reuse");
     assert_eq!(node.version, VERSION);
 }
 
@@ -457,7 +464,7 @@ fn interrupted_download_is_resumed_with_a_range_request() {
     let runtime = runtime(&env, downloader);
     let mut phases = Vec::new();
     runtime
-        .ensure(&mut |step| phases.push(step))
+        .ensure(&mut |step| phases.push(step), &CancelToken::new())
         .expect("ensure");
     assert!(
         phases
@@ -486,7 +493,9 @@ fn network_failures_are_retried() {
     let downloader = MemDownloader::node(&archive);
     downloader.fail_opens.store(2, Ordering::SeqCst);
     let runtime = runtime(&env, downloader);
-    runtime.ensure(&mut |_| {}).expect("third attempt works");
+    runtime
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect("third attempt works");
 }
 
 #[test]
@@ -499,7 +508,9 @@ fn checksum_mismatch_is_fatal_and_leaves_nothing_installed() {
         b"archivo corrupto".to_vec(),
     );
     let runtime = runtime(&env, downloader);
-    let error = runtime.ensure(&mut |_| {}).expect_err("sha mismatch");
+    let error = runtime
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect_err("sha mismatch");
     assert!(
         matches!(error, ConnectionsError::ChecksumMismatch { .. }),
         "{error}"
@@ -519,7 +530,7 @@ fn offline_without_runtime_reports_network_error() {
     let env = env();
     let runtime = runtime(&env, MemDownloader::default());
     assert!(matches!(
-        runtime.ensure(&mut |_| {}),
+        runtime.ensure(&mut |_| {}, &CancelToken::new()),
         Err(ConnectionsError::Network(_))
     ));
 }
@@ -530,7 +541,9 @@ fn exact_version_skips_index_json() {
     let archive = node_tarball("#!/bin/sh\n");
     let downloader = MemDownloader::node(&archive);
     let runtime = runtime(&env, downloader).with_version(NodeVersion::parse("24.1.0"));
-    let node = runtime.ensure(&mut |_| {}).expect("ensure");
+    let node = runtime
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect("ensure");
     assert_eq!(node.version, VERSION);
 }
 
@@ -600,7 +613,12 @@ fn binary_install_downloads_unpacks_and_marks_it_unverifiable_without_sha256() {
     assert!(!plan.verifiable());
     let mut steps = Vec::new();
     let install = adapters
-        .install_binary(AgentKind::Antigravity, &plan, &mut |step| steps.push(step))
+        .install_binary(
+            AgentKind::Antigravity,
+            &plan,
+            &mut |step| steps.push(step),
+            &CancelToken::new(),
+        )
         .expect("install");
     assert_eq!(install.distribution, InstallKind::Binary);
     assert_eq!(install.version, AGY_VERSION);
@@ -678,6 +696,7 @@ fn binary_install_checks_a_published_sha256() {
             AgentKind::Antigravity,
             &agy_plan(AGY_ZIP, Some(sha256_hex(&archive))),
             &mut |step| steps.push(step),
+            &CancelToken::new(),
         )
         .expect("install");
     assert!(install.verifiable);
@@ -690,6 +709,7 @@ fn binary_install_checks_a_published_sha256() {
             AgentKind::Antigravity,
             &agy_plan(AGY_ZIP, Some("0".repeat(64))),
             &mut |_| {},
+            &CancelToken::new(),
         )
         .expect_err("suma distinta");
     assert!(
@@ -712,6 +732,7 @@ fn interrupted_binary_download_is_resumed_with_a_range_request() {
             AgentKind::Antigravity,
             &agy_plan(AGY_ZIP, None),
             &mut |step| steps.push(step),
+            &CancelToken::new(),
         )
         .expect("install");
     let retry_at = steps
@@ -739,6 +760,7 @@ fn binary_install_refuses_to_start_without_disk_space() {
             AgentKind::Antigravity,
             &agy_plan(AGY_ZIP, None),
             &mut |_| {},
+            &CancelToken::new(),
         )
         .expect_err("sin espacio");
     match &error {
@@ -773,6 +795,7 @@ fn binary_install_also_checks_the_unpacked_size_of_the_zip() {
             AgentKind::Antigravity,
             &agy_plan(AGY_ZIP, None),
             &mut |_| {},
+            &CancelToken::new(),
         )
         .expect_err("sin espacio para descomprimir");
     assert!(
@@ -800,6 +823,7 @@ fn binary_install_unpacks_tar_gz_archives_too() {
             AgentKind::Antigravity,
             &agy_plan(AGY_TGZ, None),
             &mut |_| {},
+            &CancelToken::new(),
         )
         .expect("install");
     let server = adapters
@@ -817,6 +841,7 @@ fn a_corrupt_archive_fails_and_leaves_nothing_installed() {
             AgentKind::Antigravity,
             &agy_plan(AGY_ZIP, None),
             &mut |_| {},
+            &CancelToken::new(),
         )
         .expect_err("zip roto");
     assert!(matches!(error, ConnectionsError::Extract { .. }), "{error}");
@@ -861,6 +886,7 @@ impl PackageInstaller for FailingInstaller {
         _prefix: &Path,
         _cache: &Path,
         _npmrc: &Path,
+        _cancel: &CancelToken,
     ) -> cincel_connections::Result<()> {
         Err(ConnectionsError::InstallFailed {
             package: package_spec.to_string(),
@@ -874,17 +900,29 @@ fn failed_adapter_install_leaves_nothing_behind() {
     let env = env();
     let archive = node_tarball("#!/bin/sh\n");
     let node = runtime(&env, MemDownloader::node(&archive))
-        .ensure(&mut |_| {})
+        .ensure(&mut |_| {}, &CancelToken::new())
         .expect("runtime");
     let adapters = Adapters::new(env.paths.clone()).with_installer(Box::new(FailingInstaller));
     let mut steps = Vec::new();
     let error = adapters
-        .install(AgentKind::Codex, "1.13.1", &[], &node, &mut |step| {
-            steps.push(step)
-        })
+        .install(
+            AgentKind::Codex,
+            "1.13.1",
+            &[],
+            &node,
+            &mut |step| steps.push(step),
+            &CancelToken::new(),
+        )
         .expect_err("falla");
     assert!(matches!(
-        adapters.install(AgentKind::Antigravity, "1.2.1", &[], &node, &mut |_| {}),
+        adapters.install(
+            AgentKind::Antigravity,
+            "1.2.1",
+            &[],
+            &node,
+            &mut |_| {},
+            &CancelToken::new()
+        ),
         Err(ConnectionsError::InstallFailed { .. })
     ));
     assert!(matches!(error, ConnectionsError::InstallFailed { .. }));
@@ -905,20 +943,25 @@ fn offline_prepare_uses_what_is_installed_or_explains_what_is_missing() {
     let env = env();
     let fresh = connections(&env, "X");
     assert!(matches!(
-        fresh.prepare(None, AgentKind::Claude, &mut |_| {}),
+        fresh.prepare(None, AgentKind::Claude, &mut |_| {}, &CancelToken::new()),
         Err(ConnectionsError::RuntimeMissing)
     ));
     let (connections, _) = prepared(&env, AgentKind::Claude);
     let mut progress = Vec::new();
     connections
-        .prepare(None, AgentKind::Claude, &mut |step| progress.push(step))
+        .prepare(
+            None,
+            AgentKind::Claude,
+            &mut |step| progress.push(step),
+            &CancelToken::new(),
+        )
         .expect("offline con todo instalado");
     assert!(progress.iter().all(|step| !matches!(
         step,
         PrepareProgress::Runtime(RuntimeProgress::Downloading { .. })
     )));
     assert!(matches!(
-        connections.prepare(None, AgentKind::Codex, &mut |_| {}),
+        connections.prepare(None, AgentKind::Codex, &mut |_| {}, &CancelToken::new()),
         Err(ConnectionsError::AdapterMissing(_))
     ));
 }
@@ -942,7 +985,12 @@ fn status_is_computed_from_profile_runtime_and_adapter() {
         ConnectionStatus::Unavailable { .. }
     ));
     connections
-        .prepare(Some(&registry()), AgentKind::Claude, &mut |_| {})
+        .prepare(
+            Some(&registry()),
+            AgentKind::Claude,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
         .expect("prepare");
     assert_eq!(connections.status(&saved), ConnectionStatus::SessionExpired);
     std::fs::write(pending.profile.credentials_file(), "{\"t\":1}").expect("creds");
@@ -993,7 +1041,7 @@ fn new_connection_login_finalize_and_launch_end_to_end() {
     // Identity confirmed by spawning the adapter and reading
     // `_auth/status_update`.
     let identity = identity.expect("identidad informada por el agente");
-    assert_eq!(identity.email.as_deref(), Some("gary@example.com"));
+    assert_eq!(identity.email.as_deref(), Some("ana@example.com"));
     assert_eq!(identity.plan.as_deref(), Some("max"));
     assert!(
         pending.profile.has_credentials(),
@@ -1037,7 +1085,7 @@ fn new_connection_login_finalize_and_launch_end_to_end() {
             .expect("timeout")
         });
     agent.shutdown();
-    assert_eq!(email.as_deref(), Some("gary@example.com"));
+    assert_eq!(email.as_deref(), Some("ana@example.com"));
 }
 
 #[test]
@@ -1369,9 +1417,12 @@ fn antigravity_prepares_without_node_and_reports_the_download() {
     assert!(!connections.is_ready(AgentKind::Antigravity));
     let mut steps = Vec::new();
     let (node, install) = connections
-        .prepare(Some(&registry()), AgentKind::Antigravity, &mut |step| {
-            steps.push(step)
-        })
+        .prepare(
+            Some(&registry()),
+            AgentKind::Antigravity,
+            &mut |step| steps.push(step),
+            &CancelToken::new(),
+        )
         .expect("prepare");
     assert!(node.is_none(), "Antigravity no necesita Node");
     assert!(
@@ -1395,7 +1446,12 @@ fn antigravity_prepares_without_node_and_reports_the_download() {
     assert!(connections.is_ready(AgentKind::Antigravity));
     // Offline afterwards: what is installed is enough.
     connections
-        .prepare(None, AgentKind::Antigravity, &mut |_| {})
+        .prepare(
+            None,
+            AgentKind::Antigravity,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
         .expect("offline");
 }
 
@@ -1418,7 +1474,12 @@ fn antigravity_status_needs_no_node() {
         other => panic!("se esperaba Unavailable: {other:?}"),
     }
     connections
-        .prepare(Some(&registry()), AgentKind::Antigravity, &mut |_| {})
+        .prepare(
+            Some(&registry()),
+            AgentKind::Antigravity,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
         .expect("prepare");
     assert_eq!(connections.status(&saved), ConnectionStatus::SessionExpired);
     let token = pending.profile.credentials_file();
@@ -1432,7 +1493,12 @@ fn antigravity_login_finalize_launch_relogin_and_disconnect_end_to_end() {
     let env = env();
     let connections = agy_connections(&env);
     connections
-        .prepare(Some(&registry()), AgentKind::Antigravity, &mut |_| {})
+        .prepare(
+            Some(&registry()),
+            AgentKind::Antigravity,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
         .expect("prepare");
     let pending = connections
         .store()
@@ -1539,7 +1605,12 @@ fn antigravity_login_cancel_removes_the_pending_profile() {
     let env = env();
     let connections = agy_connections_with(&env, &fake_agy_script_with_delay(&env.marker, 60_000));
     connections
-        .prepare(Some(&registry()), AgentKind::Antigravity, &mut |_| {})
+        .prepare(
+            Some(&registry()),
+            AgentKind::Antigravity,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
         .expect("prepare");
     let pending = connections
         .store()
@@ -1626,6 +1697,7 @@ fn real_antigravity_archive_installs_and_initializes() {
                     last_percent = Some(done * 100 / total);
                 }
             },
+            &CancelToken::new(),
         )
         .expect("install");
     assert_eq!(last_percent, Some(100));
@@ -1671,4 +1743,687 @@ fn real_antigravity_archive_installs_and_initializes() {
     agent.shutdown();
     assert_eq!(title.as_deref(), Some("antigravity-acp"));
     assert!(!profile.has_credentials());
+}
+
+// ------------------------------------------------ cancel (spec 07 §10.3)
+
+/// A download that trickles zeros: `per_mb` per MB, read by read (so the
+/// 64 KiB reads of the engine see a steady stream).
+struct SlowDownloader {
+    files: HashMap<String, Vec<u8>>,
+    size: u64,
+    per_mb: Duration,
+}
+
+struct SlowReader {
+    left: u64,
+    per_mb: Duration,
+}
+
+impl std::io::Read for SlowReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = (buf.len() as u64).min(self.left);
+        if count == 0 {
+            return Ok(0);
+        }
+        std::thread::sleep(self.per_mb.mul_f64(count as f64 / 1_000_000.0));
+        buf[..count as usize].fill(0);
+        self.left -= count;
+        Ok(count as usize)
+    }
+}
+
+impl Downloader for SlowDownloader {
+    fn get_bytes(&self, url: &str) -> cincel_connections::Result<Vec<u8>> {
+        self.files
+            .get(url)
+            .cloned()
+            .ok_or_else(|| ConnectionsError::Network(format!("404 {url}")))
+    }
+
+    fn open(&self, _url: &str, offset: u64) -> cincel_connections::Result<RangeBody> {
+        Ok(RangeBody {
+            resumed: offset > 0,
+            total: Some(self.size),
+            reader: Box::new(SlowReader {
+                left: self.size - offset,
+                per_mb: self.per_mb,
+            }),
+        })
+    }
+}
+
+/// 1 MB every 100 ms, 50 MB in total: never finishes within a test.
+fn slow(files: HashMap<String, Vec<u8>>) -> SlowDownloader {
+    SlowDownloader {
+        files,
+        size: 50_000_000,
+        per_mb: Duration::from_millis(100),
+    }
+}
+
+/// Names in `dir` (empty when it does not exist).
+fn names_in(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// No `.part`, decompressed tarball or staging directory anywhere.
+fn assert_no_leftovers(env: &Env) {
+    let downloads = names_in(&env.paths.downloads_dir());
+    assert!(downloads.is_empty(), "descargas a medias: {downloads:?}");
+    let runtime = names_in(&env.paths.runtime_dir());
+    assert!(
+        runtime.iter().all(|name| !name.starts_with('.')),
+        "staging del runtime: {runtime:?}"
+    );
+    for agent in names_in(&env.paths.agents_dir()) {
+        let inside = names_in(&env.paths.agents_dir().join(&agent));
+        assert!(
+            inside.iter().all(|name| !name.starts_with('.')),
+            "staging de {agent}: {inside:?}"
+        );
+    }
+}
+
+/// Run `work` on a thread, cancel `token` after `after`, and return the
+/// result plus how long the thread took to finish once cancelled.
+fn cancel_after<T: Send>(
+    token: &CancelToken,
+    after: Duration,
+    work: impl FnOnce() -> T + Send,
+) -> (T, Duration) {
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(work);
+        std::thread::sleep(after);
+        let cancelled_at = Instant::now();
+        token.cancel();
+        let result = handle.join().expect("join");
+        (result, cancelled_at.elapsed())
+    })
+}
+
+#[test]
+fn cancelling_a_node_download_stops_within_500_ms_and_leaves_nothing() {
+    let env = env();
+    let archive = node_tarball("#!/bin/sh\n");
+    let runtime = runtime(&env, slow(MemDownloader::node(&archive).files));
+    let token = CancelToken::new();
+    let downloaded = Mutex::new(0u64);
+    let (result, took) = cancel_after(&token, Duration::from_millis(300), || {
+        runtime.ensure(
+            &mut |step| {
+                if let RuntimeProgress::Downloading { done, .. } = step {
+                    *downloaded.lock().expect("lock") = done;
+                }
+            },
+            &token,
+        )
+    });
+    assert!(
+        matches!(result, Err(ConnectionsError::Cancelled)),
+        "{result:?}"
+    );
+    assert!(took < Duration::from_millis(500), "tardó {took:?}");
+    assert!(*downloaded.lock().expect("lock") > 0, "la descarga empezó");
+    assert!(runtime.installed().is_none());
+    assert_no_leftovers(&env);
+}
+
+#[test]
+fn cancelling_a_binary_download_stops_within_500_ms_and_leaves_nothing() {
+    let env = env();
+    let mut files = HashMap::new();
+    files.insert(AGY_ZIP.to_string(), Vec::new());
+    let adapters = Adapters::new(env.paths.clone())
+        .with_downloader(Box::new(slow(files)))
+        .with_platform(AGY_PLATFORM)
+        .with_free_space(|_| Some(u64::MAX));
+    let token = CancelToken::new();
+    let (result, took) = cancel_after(&token, Duration::from_millis(300), || {
+        adapters.install_binary(
+            AgentKind::Antigravity,
+            &agy_plan(AGY_ZIP, None),
+            &mut |_| {},
+            &token,
+        )
+    });
+    assert!(
+        matches!(result, Err(ConnectionsError::Cancelled)),
+        "{result:?}"
+    );
+    assert!(took < Duration::from_millis(500), "tardó {took:?}");
+    assert!(adapters.installed("antigravity-acp").is_none());
+    assert_no_leftovers(&env);
+}
+
+/// A fake node whose `npm install` records its pid and the pid of a child
+/// `sleep`, then waits for it (as long as nobody kills the group).
+fn sleeping_npm(root: &Path) -> String {
+    format!(
+        "#!/bin/sh\nif [ \"$2\" = \"install\" ]; then\n  echo $$ > '{root}/npm.pid'\n  sleep 30 &\n  echo $! > '{root}/sleep.pid'\n  wait\n  exit 0\nfi\nexec /bin/sh \"$@\"\n",
+        root = root.display()
+    )
+}
+
+/// Whether `pid` is a live (non-zombie) process.
+fn alive(pid: i32) -> bool {
+    if Path::new("/proc/self").exists() {
+        return std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            !stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+        });
+    }
+    rustix::process::Pid::from_raw(pid)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+}
+
+fn read_pid(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+#[test]
+fn cancelling_npm_install_kills_its_process_group() {
+    let env = env();
+    let archive = node_tarball_with(VERSION, &sleeping_npm(&env.root), "#!/bin/sh\n");
+    let node = runtime(&env, MemDownloader::node(&archive))
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect("runtime");
+    let adapters = Adapters::new(env.paths.clone());
+    let token = CancelToken::new();
+    let (npm_pid, sleep_pid) = (env.root.join("npm.pid"), env.root.join("sleep.pid"));
+    let (result, took, pids) = std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            adapters.install(AgentKind::Codex, "1.13.1", &[], &node, &mut |_| {}, &token)
+        });
+        let deadline = Instant::now() + TIMEOUT;
+        let pids = loop {
+            if let (Some(npm), Some(sleep)) = (read_pid(&npm_pid), read_pid(&sleep_pid)) {
+                break (npm, sleep);
+            }
+            assert!(Instant::now() < deadline, "npm falso no arrancó");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let cancelled_at = Instant::now();
+        token.cancel();
+        let result = handle.join().expect("join");
+        (result, cancelled_at.elapsed(), pids)
+    });
+    assert!(
+        matches!(result, Err(ConnectionsError::Cancelled)),
+        "{result:?}"
+    );
+    assert!(took < Duration::from_millis(500), "tardó {took:?}");
+    let (npm, sleep) = pids;
+    assert!(!alive(npm), "el proceso npm sigue vivo");
+    // The orphaned `sleep` is reaped by init: give it a moment.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive(sleep) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive(sleep), "el grupo de procesos de npm sigue vivo");
+    assert!(adapters.installed("codex-acp").is_none());
+    assert_no_leftovers(&env);
+}
+
+#[test]
+fn cancelling_while_unpacking_node_cleans_up() {
+    let env = env();
+    let archive = node_tarball("#!/bin/sh\n");
+    let runtime = runtime(&env, MemDownloader::node(&archive));
+    let token = CancelToken::new();
+    let result = runtime.ensure(
+        &mut |step| {
+            if step == RuntimeProgress::Extracting {
+                token.cancel();
+            }
+        },
+        &token,
+    );
+    assert!(
+        matches!(result, Err(ConnectionsError::Cancelled)),
+        "{result:?}"
+    );
+    assert!(runtime.installed().is_none());
+    assert!(!env.paths.runtime_dir().join("current").exists());
+    assert_no_leftovers(&env);
+}
+
+#[test]
+fn cancelling_while_unpacking_a_binary_cleans_up() {
+    let env = env();
+    let archive = agy_zip(&fake_agy_script(&env.marker));
+    let adapters = agy_adapters(&env, agy_downloader(&archive));
+    let token = CancelToken::new();
+    let result = adapters.install_binary(
+        AgentKind::Antigravity,
+        &agy_plan(AGY_ZIP, None),
+        &mut |step| {
+            if step == AdapterProgress::Extracting {
+                token.cancel();
+            }
+        },
+        &token,
+    );
+    assert!(
+        matches!(result, Err(ConnectionsError::Cancelled)),
+        "{result:?}"
+    );
+    assert!(adapters.installed("antigravity-acp").is_none());
+    assert!(
+        !adapters
+            .install_dir("antigravity-acp", AGY_VERSION)
+            .exists()
+    );
+    assert_no_leftovers(&env);
+}
+
+#[test]
+fn cancelling_a_retry_pause_returns_promptly() {
+    let env = env();
+    let archive = node_tarball("#!/bin/sh\n");
+    let downloader = MemDownloader::node(&archive);
+    downloader.fail_opens.store(10, Ordering::SeqCst);
+    let runtime = runtime(&env, downloader).with_retry(3, Duration::from_secs(20));
+    let token = CancelToken::new();
+    let (result, took) = cancel_after(&token, Duration::from_millis(200), || {
+        runtime.ensure(&mut |_| {}, &token)
+    });
+    assert!(
+        matches!(result, Err(ConnectionsError::Cancelled)),
+        "{result:?}"
+    );
+    assert!(took < Duration::from_millis(500), "tardó {took:?}");
+    assert_no_leftovers(&env);
+}
+
+#[test]
+fn prepare_with_a_cancelled_token_does_nothing() {
+    let env = env();
+    let connections = connections(&env, "X");
+    let token = CancelToken::new();
+    token.cancel();
+    assert!(matches!(
+        connections.prepare(Some(&registry()), AgentKind::Claude, &mut |_| {}, &token),
+        Err(ConnectionsError::Cancelled)
+    ));
+    assert!(connections.runtime().installed().is_none());
+    assert!(names_in(&env.paths.downloads_dir()).is_empty());
+}
+
+#[test]
+fn a_second_download_waits_for_the_cancelled_one_to_unwind() {
+    let env = env();
+    let archive = node_tarball("#!/bin/sh\n");
+    let runtime = runtime(&env, slow(MemDownloader::node(&archive).files));
+    let (first, second) = (CancelToken::new(), CancelToken::new());
+    let second_started = Mutex::new(None);
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| runtime.ensure(&mut |_| {}, &first));
+        std::thread::sleep(Duration::from_millis(150));
+        let b = scope.spawn(|| {
+            runtime.ensure(
+                &mut |_| {
+                    second_started
+                        .lock()
+                        .expect("lock")
+                        .get_or_insert_with(Instant::now);
+                },
+                &second,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            second_started.lock().expect("lock").is_none(),
+            "la segunda descarga no espera a la primera"
+        );
+        first.cancel();
+        let a = a.join().expect("join a");
+        let first_done = Instant::now();
+        assert!(matches!(a, Err(ConnectionsError::Cancelled)), "{a:?}");
+        std::thread::sleep(Duration::from_millis(150));
+        second.cancel();
+        let b = b.join().expect("join b");
+        assert!(matches!(b, Err(ConnectionsError::Cancelled)), "{b:?}");
+        let started = second_started.lock().expect("lock").expect("empezó");
+        assert!(
+            started + Duration::from_millis(100) >= first_done,
+            "la segunda empezó antes de que terminara la primera"
+        );
+    });
+    assert_no_leftovers(&env);
+}
+
+// ------------------------------------------------ updates (spec 07 §10.4)
+
+fn claude_registry(version: &str) -> AgentRegistry {
+    AgentRegistry::parse(&format!(
+        r#"{{"version":"1.0.0","agents":[{{"id":"claude-acp","name":"Claude","version":"{version}",
+           "distribution":{{"npx":{{"package":"@agentclientprotocol/claude-agent-acp@{version}"}}}}}}]}}"#
+    ))
+    .expect("registry")
+}
+
+#[test]
+fn adapter_update_keeps_the_version_in_use_until_pruned() {
+    let env = env();
+    let (connections, node) = prepared(&env, AgentKind::Claude);
+    let adapters = connections.adapters();
+    let newer = claude_registry("0.82.0");
+    assert_eq!(
+        adapters
+            .update_available(&newer, AgentKind::Claude)
+            .as_deref(),
+        Some("0.82.0")
+    );
+    let mut steps = Vec::new();
+    let install = adapters
+        .update(
+            &newer,
+            AgentKind::Claude,
+            Some(&node),
+            &mut |step| steps.push(step),
+            &CancelToken::new(),
+        )
+        .expect("update");
+    assert_eq!(install.version, "0.82.0");
+    assert_eq!(
+        steps.last(),
+        Some(&AdapterProgress::Done {
+            version: "0.82.0".to_string()
+        })
+    );
+    assert_eq!(adapters.installed("claude-acp").as_deref(), Some("0.82.0"));
+    let old = adapters.install_dir("claude-acp", "0.81.2");
+    assert!(old.is_dir(), "la versión en uso sigue en disco");
+    let launch = adapters
+        .launch_spec("claude-acp", Some(&node))
+        .expect("launch");
+    assert!(launch.args[0].contains("/0.82.0/"), "{launch:?}");
+    assert_eq!(adapters.update_available(&newer, AgentKind::Claude), None);
+
+    // A live connection still runs 0.81.2: nothing goes.
+    assert!(
+        adapters
+            .prune_unused(&[("claude-acp", "0.81.2")])
+            .expect("prune")
+            .is_empty()
+    );
+    assert!(old.is_dir());
+    // Next start (nothing running): the old version goes.
+    assert_eq!(
+        adapters.prune_unused(&[]).expect("prune"),
+        vec![("claude-acp".to_string(), "0.81.2".to_string())]
+    );
+    assert!(!old.exists());
+    assert!(adapters.install_dir("claude-acp", "0.82.0").is_dir());
+
+    // Updating to what is installed is a no-op.
+    let again = adapters
+        .update(
+            &newer,
+            AgentKind::Claude,
+            Some(&node),
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .expect("no-op");
+    assert_eq!(again, install);
+}
+
+#[test]
+fn a_cancelled_update_leaves_the_installed_version_alone() {
+    let env = env();
+    let (connections, node) = prepared(&env, AgentKind::Claude);
+    let token = CancelToken::new();
+    token.cancel();
+    assert!(matches!(
+        connections.adapters().update(
+            &claude_registry("0.82.0"),
+            AgentKind::Claude,
+            Some(&node),
+            &mut |_| {},
+            &token,
+        ),
+        Err(ConnectionsError::Cancelled)
+    ));
+    assert_eq!(
+        connections.adapters().installed("claude-acp").as_deref(),
+        Some("0.81.2")
+    );
+}
+
+#[test]
+fn binary_update_keeps_the_old_version_until_pruned() {
+    let env = env();
+    let script = fake_agy_script(&env.marker);
+    let newer_zip = "mem://agy/agy-acp-server-1.3.0-linux-x86_64.zip";
+    let mut files = HashMap::new();
+    files.insert(AGY_ZIP.to_string(), agy_zip(&script));
+    files.insert(newer_zip.to_string(), agy_zip(&script));
+    let adapters = agy_adapters(
+        &env,
+        MemDownloader {
+            files,
+            ..MemDownloader::default()
+        },
+    );
+    adapters
+        .ensure(
+            Some(&registry()),
+            AgentKind::Antigravity,
+            None,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .expect("install 1.2.1");
+    let newer = AgentRegistry::parse(&format!(
+        r#"{{"version":"1.0.0","agents":[{{"id":"antigravity-acp","name":"Google Antigravity","version":"1.3.0",
+           "distribution":{{"binary":{{"linux-x86_64":{{"archive":"{newer_zip}",
+             "cmd":"./agy_acp_server.par","args":["--uid="],"sha256":null}}}}}}}}]}}"#
+    ))
+    .expect("registry");
+    assert_eq!(
+        adapters
+            .update_available(&newer, AgentKind::Antigravity)
+            .as_deref(),
+        Some("1.3.0")
+    );
+    let install = adapters
+        .update(
+            &newer,
+            AgentKind::Antigravity,
+            None,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .expect("update");
+    assert_eq!(install.version, "1.3.0");
+    assert_eq!(
+        adapters.installed("antigravity-acp").as_deref(),
+        Some("1.3.0")
+    );
+    assert!(adapters.install_dir("antigravity-acp", "1.2.1").is_dir());
+    assert_eq!(
+        adapters.prune_unused(&[]).expect("prune"),
+        vec![("antigravity-acp".to_string(), "1.2.1".to_string())]
+    );
+    assert!(!adapters.install_dir("antigravity-acp", "1.2.1").exists());
+    assert!(names_in(&env.paths.downloads_dir()).is_empty());
+}
+
+/// nodejs.org with the given `(version, lts)` releases in `index.json`, and
+/// SHASUMS + archive for the ones in `archives`.
+fn node_dist(
+    releases: &[(&str, serde_json::Value)],
+    archives: &[(&str, Vec<u8>)],
+) -> MemDownloader {
+    let mut files = HashMap::new();
+    let index: Vec<_> = releases
+        .iter()
+        .map(|(version, lts)| serde_json::json!({ "version": version, "lts": lts, "files": [PLATFORM] }))
+        .collect();
+    files.insert(
+        format!("{BASE}index.json"),
+        serde_json::to_vec(&index).expect("json"),
+    );
+    for (version, archive) in archives {
+        let name = format!("node-{version}-{PLATFORM}.tar.xz");
+        files.insert(
+            format!("{BASE}{version}/SHASUMS256.txt"),
+            format!("{}  {name}\n", sha256_hex(archive)).into_bytes(),
+        );
+        files.insert(format!("{BASE}{version}/{name}"), archive.clone());
+    }
+    MemDownloader {
+        files,
+        ..MemDownloader::default()
+    }
+}
+
+const NEWER_NODE: &str = "v24.2.0";
+
+#[test]
+fn node_update_offers_the_new_lts_and_keeps_the_old_runtime_until_pruned() {
+    let env = env();
+    let archive = node_tarball("#!/bin/sh\n");
+    runtime(&env, MemDownloader::node(&archive))
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect("v24.1.0");
+    let newer = node_tarball_with(NEWER_NODE, FAKE_NODE, "#!/bin/sh\n");
+    let dist = node_dist(
+        &[
+            ("v25.0.0", serde_json::json!(false)),
+            (NEWER_NODE, serde_json::json!("Krypton")),
+            (VERSION, serde_json::json!("Krypton")),
+        ],
+        &[(NEWER_NODE, newer)],
+    );
+    let runtime = runtime(&env, dist);
+    assert_eq!(
+        runtime.update_available().expect("check").as_deref(),
+        Some(NEWER_NODE),
+        "la LTS más nueva, no la 25 (no LTS)"
+    );
+    let mut steps = Vec::new();
+    let node = runtime
+        .update(&mut |step| steps.push(step), &CancelToken::new())
+        .expect("update");
+    assert_eq!(node.version, NEWER_NODE);
+    assert_eq!(steps.last(), Some(&RuntimeProgress::Done));
+    assert_eq!(runtime.installed(), Some(node));
+    let old = env.paths.runtime_dir().join(format!("node-{VERSION}"));
+    assert!(old.is_dir(), "el Node en uso sigue en disco");
+    assert_eq!(runtime.update_available().expect("check"), None);
+    assert_eq!(
+        runtime.prune_old().expect("prune"),
+        vec![format!("node-{VERSION}")]
+    );
+    assert!(!old.exists());
+    assert!(runtime.installed().is_some());
+    assert_no_leftovers(&env);
+}
+
+#[test]
+fn pinned_node_version_never_offers_an_update() {
+    let env = env();
+    let archive = node_tarball("#!/bin/sh\n");
+    runtime(&env, MemDownloader::node(&archive))
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect("v24.1.0");
+    // Pinned: no network at all (this downloader would fail every request).
+    let pinned = runtime(&env, MemDownloader::default()).with_version(NodeVersion::parse("24.1.0"));
+    assert_eq!(pinned.update_available().expect("check"), None);
+    // Same setting with a newer release published: still nothing.
+    let dist = node_dist(
+        &[
+            (NEWER_NODE, serde_json::json!("Krypton")),
+            (VERSION, serde_json::json!("Krypton")),
+        ],
+        &[],
+    );
+    let pinned = runtime(&env, dist).with_version(NodeVersion::parse("v24.1.0"));
+    assert_eq!(pinned.update_available().expect("check"), None);
+}
+
+#[test]
+fn node_major_policy_follows_its_line() {
+    let env = env();
+    let archive = node_tarball("#!/bin/sh\n");
+    runtime(&env, MemDownloader::node(&archive))
+        .ensure(&mut |_| {}, &CancelToken::new())
+        .expect("v24.1.0");
+    let releases = [
+        ("v25.1.0", serde_json::json!(false)),
+        (NEWER_NODE, serde_json::json!(false)),
+        (VERSION, serde_json::json!("Krypton")),
+        ("v22.9.0", serde_json::json!("Jod")),
+    ];
+    let line_24 = runtime(&env, node_dist(&releases, &[])).with_version(NodeVersion::parse("24"));
+    assert_eq!(
+        line_24.update_available().expect("check").as_deref(),
+        Some(NEWER_NODE)
+    );
+    let line_25 = runtime(&env, node_dist(&releases, &[])).with_version(NodeVersion::parse("25"));
+    assert_eq!(
+        line_25.update_available().expect("check").as_deref(),
+        Some("v25.1.0")
+    );
+    // LTS policy: v24.1.0 is already the newest LTS >= 22 here.
+    let lts = runtime(&env, node_dist(&releases, &[]));
+    assert_eq!(lts.update_available().expect("check"), None);
+    // Offline: the check fails instead of pretending there is nothing new.
+    assert!(matches!(
+        runtime(&env, MemDownloader::default()).update_available(),
+        Err(ConnectionsError::Network(_))
+    ));
+}
+
+#[test]
+fn startup_prune_removes_old_runtimes_and_adapters() {
+    let env = env();
+    let (connections, node) = prepared(&env, AgentKind::Claude);
+    connections
+        .adapters()
+        .update(
+            &claude_registry("0.82.0"),
+            AgentKind::Claude,
+            Some(&node),
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .expect("update");
+    // A stale runtime and a crashed staging directory of another process.
+    let stale_runtime = env.paths.runtime_dir().join("node-v22.1.0");
+    std::fs::create_dir_all(stale_runtime.join("bin")).expect("mkdir");
+    let crashed = env.paths.agents_dir().join("claude-acp/.0.9.0.tmp-1");
+    std::fs::create_dir_all(&crashed).expect("mkdir");
+    // With a live connection, only adapters not in use go (runtimes stay).
+    let report = connections
+        .prune_unused(&[("claude-acp", "0.81.2")])
+        .expect("prune");
+    assert!(report.runtimes.is_empty(), "{report:?}");
+    assert_eq!(
+        report.adapters,
+        vec![("claude-acp".to_string(), ".0.9.0.tmp-1".to_string())]
+    );
+    assert!(stale_runtime.is_dir());
+    let report = connections.prune_unused(&[]).expect("prune");
+    assert_eq!(report.runtimes, vec!["node-v22.1.0".to_string()]);
+    assert_eq!(
+        report.adapters,
+        vec![("claude-acp".to_string(), "0.81.2".to_string())]
+    );
+    assert!(connections.is_ready(AgentKind::Claude));
+    assert_eq!(
+        connections.prune_unused(&[]).expect("again"),
+        Default::default()
+    );
 }

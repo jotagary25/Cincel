@@ -32,9 +32,9 @@
 use std::sync::Arc;
 
 use cincel_connections::{
-    AdapterProgress, AgentKind, Connection, ConnectionStatus, Connections, ConnectionsError,
-    DisconnectReport, Identity, LoginEvent, LoginFailure, LoginSession, LogoutStep,
-    PendingConnection, PrepareProgress, RuntimeProgress, suggest_label,
+    AdapterProgress, AgentKind, CancelToken, Connection, ConnectionStatus, Connections,
+    ConnectionsError, DisconnectReport, Identity, LoginEvent, LoginFailure, LoginSession,
+    LogoutStep, PendingConnection, PrepareProgress, RuntimeProgress, suggest_label,
 };
 use gpui::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle,
@@ -288,7 +288,31 @@ pub enum Mode {
 /// A message from the preparation thread.
 enum PrepareMessage {
     Progress(PrepareProgress),
-    Done(Result<(), String>),
+    Done(Result<(), PrepareFailure>),
+}
+
+/// What `PrepareMessage::Done` carries on failure: the user's own
+/// "Cancelar" (`docs/specs/07-etapa5-productividad.md` §10.3) is never shown
+/// as "Algo salió mal", so it gets its own variant instead of a message
+/// string.
+enum PrepareFailure {
+    /// `ConnectionsError::Cancelled`: the flow already went back to "Elegí
+    /// un agente" (or the modal closed) when "Cancelar" was pressed.
+    Cancelled,
+    /// Any other error, already formatted by [`prepare_error_message`].
+    Message(String),
+}
+
+/// What `on_prepare_message` does once "Preparando…" is done.
+enum PrepareOutcome {
+    /// Runtime and adapter ready: start the login.
+    Ready,
+    /// The user's own "Cancelar" (or an equivalent same-generation
+    /// `Cancelled`): back to "Elegí un agente" (or the modal closes),
+    /// exactly like the button.
+    Cancelled,
+    /// Anything else: "Algo salió mal" with the given message.
+    Failed(String),
 }
 
 /// The connection modals.
@@ -302,6 +326,10 @@ pub struct ConnectionsModal {
     confirm_close: bool,
     /// The running login; dropping it cancels it.
     session: Option<LoginSession>,
+    /// The "Preparando…" download/install in flight, if any; cancelling it
+    /// really stops the thread (`docs/specs/07-etapa5-productividad.md`
+    /// §10.3), unlike the `CancelToken::new()` placeholders of Etapa 4.
+    prepare_cancel: Option<CancelToken>,
     /// Foreground tasks draining the current flow's threads.
     tasks: Vec<Task<()>>,
     /// Bumped whenever the flow changes, so a late message from an older
@@ -361,6 +389,7 @@ impl ConnectionsModal {
             mode: Mode::Closed,
             confirm_close: false,
             session: None,
+            prepare_cancel: None,
             tasks: Vec::new(),
             generation: 0,
             code_input,
@@ -423,6 +452,15 @@ impl ConnectionsModal {
         self.session
             .as_ref()
             .map(|session| session.events().clone())
+    }
+
+    /// The token of "Preparando…"'s in-flight download/install, if any
+    /// (`docs/specs/07-etapa5-productividad.md` §10.3): lets a test check
+    /// that "Cancelar" sets the *real* token the background thread holds,
+    /// not a throwaway one.
+    #[cfg(all(test, feature = "test-support"))]
+    pub(crate) fn prepare_cancel_for_test(&self) -> Option<CancelToken> {
+        self.prepare_cancel.clone()
     }
 
     // ------------------------------------------------------------ opening
@@ -549,7 +587,16 @@ impl ConnectionsModal {
         cx.notify();
     }
 
+    /// Stops whatever background work the current flow has running: a
+    /// login (pty session) and/or the "Preparando…" download/install
+    /// thread. Called by every path that resets or closes the modal, so
+    /// cancelling "Preparando…" ("Cancelar", `Esc` confirmed, closing the
+    /// modal) really stops the download instead of letting it finish
+    /// unattended (`docs/specs/07-etapa5-productividad.md` §10.3).
     fn cancel_session(&mut self) {
+        if let Some(token) = self.prepare_cancel.take() {
+            token.cancel();
+        }
         if let Some(session) = self.session.take() {
             session.cancel();
             // Dropping it joins the login thread, which kills the process
@@ -623,6 +670,12 @@ impl ConnectionsModal {
         };
         self.generation += 1;
         let generation = self.generation;
+        // A real token: "Cancelar" (`cancel_session`, called from every
+        // reset/close path) sets it, the download/install loops check it
+        // and unwind for real (`docs/specs/07-etapa5-productividad.md`
+        // §10.3), unlike the `CancelToken::new()` placeholders of Etapa 4.
+        let cancel = CancelToken::new();
+        self.prepare_cancel = Some(cancel.clone());
         cx.notify();
 
         if !self.background {
@@ -630,9 +683,9 @@ impl ConnectionsModal {
             let mut steps = Vec::new();
             let result = self
                 .connections
-                .prepare(None, kind, &mut |step| steps.push(step))
+                .prepare(None, kind, &mut |step| steps.push(step), &cancel)
                 .map(|_| ())
-                .map_err(|error| prepare_error_message(&error));
+                .map_err(prepare_failure);
             for step in steps {
                 self.on_prepare_message(generation, PrepareMessage::Progress(step), window, cx);
             }
@@ -642,6 +695,7 @@ impl ConnectionsModal {
 
         let (sender, receiver) = async_channel::unbounded::<PrepareMessage>();
         let connections = self.connections.clone();
+        let cancel_for_thread = cancel.clone();
         let spawned = std::thread::Builder::new()
             .name("cincel-prepare".to_string())
             .spawn(move || {
@@ -649,11 +703,16 @@ impl ConnectionsModal {
                 // is installed is used.
                 let registry = cincel_acp::AgentRegistry::load().ok();
                 let result = connections
-                    .prepare(registry.as_ref(), kind, &mut |step| {
-                        let _ = sender.send_blocking(PrepareMessage::Progress(step));
-                    })
+                    .prepare(
+                        registry.as_ref(),
+                        kind,
+                        &mut |step| {
+                            let _ = sender.send_blocking(PrepareMessage::Progress(step));
+                        },
+                        &cancel_for_thread,
+                    )
                     .map(|_| ())
-                    .map_err(|error| prepare_error_message(&error));
+                    .map_err(prepare_failure);
                 let _ = sender.send_blocking(PrepareMessage::Done(result));
             });
         if let Err(error) = spawned {
@@ -684,6 +743,7 @@ impl ConnectionsModal {
         if generation != self.generation {
             return;
         }
+        let is_done = matches!(message, PrepareMessage::Done(_));
         let Some(flow) = self.flow_mut() else {
             return;
         };
@@ -734,14 +794,26 @@ impl ConnectionsModal {
                         flow.step = Step::Repaired;
                         None
                     }
-                    Purpose::New | Purpose::Relogin(_) => Some(Ok(())),
+                    Purpose::New | Purpose::Relogin(_) => Some(PrepareOutcome::Ready),
                 }
             }
-            PrepareMessage::Done(Err(message)) => Some(Err(message)),
+            // Same-generation `Cancelled`: only the inline test path
+            // reaches this (the real thread's late result is discarded by
+            // the `generation` guard above, since `cancel_login` bumps it
+            // before the thread can unwind). Treated exactly like the
+            // button: never "Algo salió mal".
+            PrepareMessage::Done(Err(PrepareFailure::Cancelled)) => Some(PrepareOutcome::Cancelled),
+            PrepareMessage::Done(Err(PrepareFailure::Message(text))) => {
+                Some(PrepareOutcome::Failed(text))
+            }
         };
+        if is_done {
+            self.prepare_cancel = None;
+        }
         match next {
-            Some(Ok(())) => self.start_login(window, cx),
-            Some(Err(message)) => self.fail(message, cx),
+            Some(PrepareOutcome::Ready) => self.start_login(window, cx),
+            Some(PrepareOutcome::Failed(message)) => self.fail(message, cx),
+            Some(PrepareOutcome::Cancelled) => self.cancel_login(window, cx),
             None => cx.notify(),
         }
     }
@@ -993,8 +1065,10 @@ impl ConnectionsModal {
         cx.notify();
     }
 
-    /// "Cancelar" while the login runs: kills its process group; a new
-    /// profile is removed and the flow goes back to "Elegí un agente".
+    /// "Cancelar": kills the login's process group, or stops the
+    /// "Preparando…" download/install thread for real
+    /// (`docs/specs/07-etapa5-productividad.md` §10.3); a new profile is
+    /// removed and the flow goes back to "Elegí un agente".
     pub fn cancel_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_session();
         self.discard_pending();
@@ -1444,6 +1518,17 @@ fn adapter_bar(step: &AdapterProgress, name: &str) -> Bar {
 }
 
 /// What to say when preparing (or starting the login) failed.
+/// Turns a `prepare` error into what `PrepareMessage::Done` carries:
+/// `Cancelled` on its own variant (never shown as "Algo salió mal",
+/// `docs/specs/07-etapa5-productividad.md` §10.3), anything else formatted
+/// by [`prepare_error_message`].
+fn prepare_failure(error: ConnectionsError) -> PrepareFailure {
+    match error {
+        ConnectionsError::Cancelled => PrepareFailure::Cancelled,
+        other => PrepareFailure::Message(prepare_error_message(&other)),
+    }
+}
+
 fn prepare_error_message(error: &ConnectionsError) -> String {
     match error {
         ConnectionsError::Network(detail) => format!(
@@ -2410,7 +2495,7 @@ fn progress_row(
         .into_any_element()
 }
 
-/// "gary@example.com (Claude Max)" for the "Listo" line.
+/// "ana@example.com (Claude Max)" for the "Listo" line.
 fn identity_sentence(identity: &Identity) -> Option<String> {
     match (&identity.email, &identity.plan) {
         (Some(email), Some(plan)) => Some(format!("{email} ({plan})")),
@@ -2555,13 +2640,13 @@ mod tests {
     #[test]
     fn the_done_line_names_the_account() {
         let identity = Identity {
-            email: Some("gary@example.com".into()),
+            email: Some("ana@example.com".into()),
             plan: Some("Claude Max".into()),
             organization: None,
         };
         assert_eq!(
             identity_sentence(&identity).as_deref(),
-            Some("gary@example.com (Claude Max)")
+            Some("ana@example.com (Claude Max)")
         );
         assert_eq!(identity_sentence(&Identity::default()), None);
     }

@@ -70,9 +70,26 @@ Los `FsRead`/`FsWrite` son peticiones del agente que la UI contesta desde el `Bu
  ReviewStore.changed ──────────────────────────► cincel-editor (DiffTransformMap) y cincel-workspace (árbol, panel, barra)
 ```
 
+**v2 (2026-09-28): la base viene de la foto del proyecto; las herramientas son solo una pista.** La regla del producto es una sola: Cincel se guarda cómo está cada archivo de la carpeta antes de mandar el mensaje; todo lo que cambie en disco dentro del proyecto hasta que el agente termina es del agente, sin importar con qué lo hizo (Edit, un script, un comando, otro programa), y se revisa en el editor igual que siempre: rojo y verde, aceptar y rechazar por segmento y por línea. Lo único que no es del agente es lo que el propio Cincel escribe durante el turno (un `Ctrl+S` del usuario, el autoguardado, un archivo nuevo creado desde Cincel, un rechazo).
+
+```
+ prompt ─► Review::begin_prompt ─► foto del proyecto (fondo) ─► recién entonces sale el prompt
+             (mismo recorrido y exclusiones que el árbol; texto hasta review.max_file_size_kb;
+              binarios: hash + bytes; por encima de review.snapshot_max_total_mb: solo hash)
+ durante el turno:
+   watcher (notify, cualquier ruta del proyecto, abierta o no) ─► FilesChanged ─► Review
+     ruta sin seguimiento: base = copia de la foto (capture_base_text / file_created si no estaba)
+     luego file_written / file_deleted con lo que hay en disco (renombrar = borrar + crear)
+   pistas (fs/read, fs/write, tool_call edit/delete/move) ─► capturan base antes, como antes
+   Cincel guarda (Ctrl+S, autoguardado, nuevo archivo, rechazo) ─► HostWrote ─► la foto se actualiza
+ TurnEnded ─► repaso: toda la foto contra el disco (tamaño/mtime; contenido si difieren o si el
+              mtime es reciente) ─► suma lo que el watcher no avisó ─► se libera la foto
+```
+
 Reglas:
-1. La **base** de un archivo se fija en el primer contacto del turno: `fs/read_text_file`, `oldText` del primer `diff` del tool call, o lectura de disco al ver el primer `tool_call` de tipo `edit` con ese path en `locations`. Si el archivo está abierto con cambios sin guardar del usuario, se pregunta (guardar / descartar / mantener) antes de que el agente lo toque; si no se puede preguntar (permiso ya concedido), se guarda.
-2. Los `diff` que manda el agente son **señal de interfaz**, no fuente de verdad. La verdad son los bytes en disco releídos al completarse cada tool call de edición (y al llegar el `agentFileChangeReport` del final del turno, si el agente lo soporta) y las notificaciones del watcher.
+0. **La foto.** `Review::begin_prompt` saca la foto (`cincel_project::ProjectSnapshot`) en el ejecutor de fondo y el prompt se envía cuando está lista; si tarda más de 1 s, el chat muestra "Preparando la revisión…". Presupuesto: 5 000 archivos / 50 MB en menos de 1 s. Cada turno saca su foto; un archivo que ya está en revisión conserva su base original hasta que el usuario decide (la foto nueva no lo re-basa). Archivos no UTF-8: "archivo binario cambiado por el agente", solo por archivo, rechazar = restaurar los bytes. Archivos sin copia (más grandes que `review.max_file_size_kb` o por encima del tope total): la base sale del buffer si estaba abierto al sacar la foto; si no, solo se puede aceptar. Los cambios hechos por otros programas durante el turno se atribuyen al agente.
+1. La **base** de un archivo se fija en el primer contacto del turno: la copia de la foto (si el buffer no tiene cambios sin guardar), `fs/read_text_file`, `oldText` del primer `diff` del tool call, o lectura de disco al ver el primer `tool_call` de tipo `edit` con ese path en `locations`. Si el archivo está abierto con cambios sin guardar del usuario, se pregunta (guardar / descartar / mantener) antes de que el agente lo toque; si no se puede preguntar (permiso ya concedido), se guarda. Si el agente lo cambió por otra vía (sin pista), la base es la foto y los cambios sin guardar del usuario se suman a la base.
+2. Los `diff` que manda el agente son **señal de interfaz**, no fuente de verdad. La verdad son los bytes en disco releídos al completarse cada tool call de edición (y al llegar el `agentFileChangeReport` del final del turno, si el agente lo soporta), las notificaciones del watcher y el repaso final contra la foto.
 3. Los hunks se recalculan en el ejecutor de fondo con debounce de 50 ms cada vez que cambia el buffer o la base, descartando resultados de versiones viejas.
 4. Aceptar = mover la base. Rechazar = editar el buffer con el texto de la base y guardar. Ninguna otra operación toca disco.
 

@@ -7,8 +7,8 @@
 //! implementing a foreign trait (`Panel`) for a foreign type
 //! (`cincel_chat::ChatPanel`), so [`ChatDock`] wraps it instead of
 //! reimplementing it: it renders the whole wrapped entity as its single
-//! child and forwards the focus handle to it, so `Ctrl+L`
-//! (`workspace::focus_chat`) can still move the keyboard straight to the
+//! child and forwards the focus handle to it, so `Ctrl+Shift+A` and the focus
+//! wheel (`crate::focus`) can still move the keyboard straight to the
 //! composer via [`cincel_chat::ChatPanel::focus_input`].
 
 use cincel_chat::ChatPanel;

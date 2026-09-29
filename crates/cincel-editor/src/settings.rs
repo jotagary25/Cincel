@@ -79,6 +79,7 @@ pub struct EditorSettings {
     pub line_height: f32,
     /// After accepting or rejecting a hunk, move the cursor to the next pending
     /// one when the host sends the new review (`review.jump_to_next_on_decide`).
+    /// Off by default, like the setting.
     pub jump_to_next_on_decide: bool,
     /// Gutter and other code-editor furniture ([`EditorChrome::Full`] by
     /// default).
@@ -114,7 +115,7 @@ impl Default for EditorSettings {
             ],
             font_size: 14.,
             line_height: 1.5,
-            jump_to_next_on_decide: true,
+            jump_to_next_on_decide: false,
             chrome: EditorChrome::Full,
             auto_height: None,
             prose_font_family: None,

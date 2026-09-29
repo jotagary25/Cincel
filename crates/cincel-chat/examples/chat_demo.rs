@@ -315,7 +315,7 @@ fn main() {
                                 id: "c-claude".into(),
                                 agent_id: "claude-acp".into(),
                                 label: "Claude · personal".into(),
-                                identity: Some("gary@… · Max".into()),
+                                identity: Some("ana@… · Max".into()),
                                 last_used: "Usado hace 2 h".into(),
                                 badge: ConnectionBadge::Connected,
                             },

@@ -39,7 +39,7 @@ pub(crate) const FAKE_AGY_URL: &str = "https://accounts.google.com/o/oauth2/v2/a
 /// The code the fake login expects to be pasted back.
 pub(crate) const FAKE_LOGIN_CODE: &str = "CODIGO-1";
 /// The email the fake agent reports through `_auth/status_update`.
-pub(crate) const FAKE_EMAIL: &str = "gary@example.com";
+pub(crate) const FAKE_EMAIL: &str = "ana@example.com";
 /// The version the fake runtime pretends to be.
 const FAKE_NODE_VERSION: &str = "v24.1.0";
 /// The version the fake adapters pretend to be.
@@ -104,6 +104,23 @@ impl FakeEnv {
             paths,
             connections,
         }
+    }
+
+    /// Like [`FakeEnv::new`], with `vars` set in the environment of the fake
+    /// Claude agent (for instance `FAKE_SHELL_EDITS`, the scripted edits
+    /// made straight on disk). Values are single-quoted in the adapter
+    /// script, so they may hold anything but a single quote.
+    pub(crate) fn with_agent_env(vars: &[(&str, &str)]) -> Self {
+        let env = Self::new();
+        let exports: String = vars
+            .iter()
+            .map(|(name, value)| {
+                assert!(!value.contains('\''), "sin comillas simples: {value}");
+                format!("{name}='{value}' ")
+            })
+            .collect();
+        write_fake_adapter_with(&env.paths, "claude-acp", &exports);
+        env
     }
 
     /// An engine over the same directory but with nothing installed: what a
@@ -180,6 +197,12 @@ fn write_fake_runtime(paths: &CincelPaths) {
 }
 
 fn write_fake_adapter(paths: &CincelPaths, agent_id: &str) {
+    write_fake_adapter_with(paths, agent_id, "");
+}
+
+/// [`write_fake_adapter`] with `exports` (`NAME='value' …`) in front of the
+/// agent's `exec`.
+fn write_fake_adapter_with(paths: &CincelPaths, agent_id: &str, exports: &str) {
     let login = helper_binary("cincel-connections-fake-login");
     let agent = helper_binary("cincel-acp-fake-agent");
     let login = login.display();
@@ -191,13 +214,13 @@ fn write_fake_adapter(paths: &CincelPaths, agent_id: &str) {
         format!(
             "#!/bin/sh\nif [ \"$1\" = \"--cli\" ]; then\n  exec {login} --url '{FAKE_LOGIN_URL}' \
              --expect {FAKE_LOGIN_CODE} --creds-var CLAUDE_CONFIG_DIR\nfi\n\
-             FAKE_AUTH_EMAIL={FAKE_EMAIL} exec {agent} \"$@\"\n"
+             {exports}FAKE_AUTH_EMAIL={FAKE_EMAIL} exec {agent} \"$@\"\n"
         )
     } else {
         format!(
             "#!/bin/sh\nif [ \"$1\" = \"cli\" ]; then\n  exec {login} --url \
              'https://auth.openai.com/oauth/authorize?state=s3cr3t' --creds-var CODEX_HOME \
-             --creds-file auth.json\nfi\nFAKE_AUTH_EMAIL={FAKE_EMAIL} exec {agent} \"$@\"\n"
+             --creds-file auth.json\nfi\n{exports}FAKE_AUTH_EMAIL={FAKE_EMAIL} exec {agent} \"$@\"\n"
         )
     };
     let dir = paths.agents_dir().join(agent_id).join(FAKE_ADAPTER_VERSION);

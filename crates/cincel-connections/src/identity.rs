@@ -237,11 +237,11 @@ mod tests {
     #[test]
     fn claude_status_json_is_parsed() {
         let out = parse_claude_status(
-            r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"gary@example.com","orgName":"Org","subscriptionType":"max"}"#,
+            r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"ana@example.com","orgName":"Org","subscriptionType":"max"}"#,
         );
         assert_eq!(out.logged_in, Some(true));
         let identity = out.identity.expect("identity");
-        assert_eq!(identity.email.as_deref(), Some("gary@example.com"));
+        assert_eq!(identity.email.as_deref(), Some("ana@example.com"));
         assert_eq!(identity.plan.as_deref(), Some("max"));
         assert_eq!(identity.organization.as_deref(), Some("Org"));
         let logged_out = parse_claude_status(r#"{"loggedIn":false}"#);

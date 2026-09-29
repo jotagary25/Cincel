@@ -362,6 +362,67 @@ fn a_command_card_folds_when_it_works_and_opens_when_it_fails(cx: &mut TestAppCo
     });
 }
 
+/// § correcciones: un comando con saltos de línea (`python3 - <<'EOF'`) no
+/// debe pintar sus líneas extra por fuera de la fila — la fila mantiene su
+/// alto de una sola línea, y el comando completo (con sus propios saltos)
+/// solo se ve al desplegar la tarjeta.
+#[gpui::test]
+fn a_multiline_command_stays_one_line_until_expanded(cx: &mut TestAppContext) {
+    let command = "python3 - <<'EOF'\nprint(1)\nprint(2)\nprint(3)\nprint(4)\nEOF";
+    assert_eq!(command.lines().count(), 6, "el fixture tiene 6 líneas");
+    let (panel, mut visual, _) = open_with_session(cx);
+    panel.update(&mut visual, |panel, cx| {
+        panel.handle_event(
+            update(SessionUpdate::ToolCall(
+                ToolCall::new("t1", command).kind(ToolKind::Execute),
+            )),
+            cx,
+        );
+        panel.handle_event(
+            update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "t1",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .content(vec![ToolCallContent::Content(Content::new(
+                        ContentBlock::Text(TextContent::new("1\n2\n3\n4")),
+                    ))]),
+            ))),
+            cx,
+        );
+        match &panel.entries()[0] {
+            Entry::ToolCall(call) => assert!(!call.expanded, "una orden que salió bien se pliega"),
+            other => panic!("se esperaba ToolCall, llegó {other:?}"),
+        }
+    });
+    visual.run_until_parked();
+
+    let row_collapsed = visual
+        .debug_bounds("command-row-0")
+        .expect("la fila del comando se pintó");
+    assert!(
+        visual.debug_bounds("command-full-0").is_none(),
+        "plegada, el comando completo no se pinta todavía"
+    );
+
+    panel.update(&mut visual, |panel, cx| panel.toggle_entry(0, cx));
+    visual.run_until_parked();
+
+    let row_expanded = visual
+        .debug_bounds("command-row-0")
+        .expect("la fila sigue pintada al desplegar");
+    assert_eq!(
+        row_collapsed.size.height, row_expanded.size.height,
+        "la fila del comando mantiene su alto de una sola línea"
+    );
+    let full = visual
+        .debug_bounds("command-full-0")
+        .expect("el comando completo se ve al desplegar la tarjeta");
+    assert!(
+        full.size.height > row_expanded.size.height,
+        "el bloque desplegado muestra más de una línea (las 6 del comando): {full:?}"
+    );
+}
+
 #[gpui::test]
 fn a_cancelled_turn_marks_the_open_tool_calls(cx: &mut TestAppContext) {
     let (panel, mut visual, _) = open_with_session(cx);
@@ -1153,6 +1214,7 @@ fn an_auth_required_event_shows_the_card(cx: &mut TestAppContext) {
                     AuthMethodTerminal::new("terminal", "Iniciar sesión")
                         .args(vec!["auth".to_string(), "login".to_string()]),
                 )],
+                message: None,
             },
             cx,
         );
@@ -1269,13 +1331,19 @@ fn the_default_bindings_cover_the_spec_rows() {
         "chat::send",
         "chat::newline",
         "chat::cancel_turn",
-        "chat::focus_input",
         "chat::new_session",
         "chat::accept_permission",
         "chat::reject_permission",
     ] {
         assert!(all.contains(expected), "falta {expected} en {all}");
     }
+    // `Ctrl+L` belongs to the workspace's focus wheel: a `Chat` binding would
+    // outrank it from inside the chat (`07-etapa5-productividad.md` §9.2, D8).
+    // The action itself stays, unbound.
+    assert!(
+        !all.contains("chat::focus_input"),
+        "chat::focus_input no debería tener atajo: {all}"
+    );
 }
 
 #[test]
@@ -1913,7 +1981,7 @@ fn connection(id: &str, agent_id: &str, label: &str) -> ChatConnection {
         id: id.into(),
         agent_id: agent_id.into(),
         label: label.into(),
-        identity: Some("gary@example.com · max".into()),
+        identity: Some("ana@example.com · max".into()),
         last_used: "Usado hace 2 h".into(),
         badge: ConnectionBadge::Connected,
     }
@@ -2047,12 +2115,19 @@ fn the_expired_banner_offers_volver_a_conectar(cx: &mut TestAppContext) {
             Some(ConnectionBanner::Expired {
                 id: "c-claude".into(),
                 label: "Claude · personal".into(),
+                reason: None,
             }),
             cx,
         );
     });
     paint(&mut visual);
     assert!(visual.debug_bounds("chat-connection-banner").is_some());
+    assert!(
+        visual
+            .debug_bounds("chat-connection-banner-reason")
+            .is_none(),
+        "sin motivo no hay línea «El agente dijo»"
+    );
     let text = panel.read_with(&visual, |panel, _| {
         panel.banner().map(ConnectionBanner::text)
     });
@@ -2067,6 +2142,33 @@ fn the_expired_banner_offers_volver_a_conectar(cx: &mut TestAppContext) {
     let log = emitted(&recorder);
     assert!(log.contains("Reconnect"), "{log}");
     assert!(log.contains("Repair"), "{log}");
+}
+
+/// `docs/specs/07-etapa5-productividad.md` §10.1: with a reason, the banner
+/// adds "El agente dijo: «motivo»" under "La sesión de «X» venció".
+#[gpui::test]
+fn the_expired_banner_shows_the_agents_own_reason(cx: &mut TestAppContext) {
+    let (panel, mut visual, _) = open(cx);
+    panel.update(&mut visual, |panel, cx| {
+        panel.set_banner(
+            Some(ConnectionBanner::Expired {
+                id: "c-claude".into(),
+                label: "Claude · personal".into(),
+                reason: Some("token revoked".into()),
+            }),
+            cx,
+        );
+    });
+    paint(&mut visual);
+    assert!(
+        visual
+            .debug_bounds("chat-connection-banner-reason")
+            .is_some()
+    );
+    let reason = panel.read_with(&visual, |panel, _| {
+        panel.banner().and_then(ConnectionBanner::reason_text)
+    });
+    assert_eq!(reason.as_deref(), Some("El agente dijo: «token revoked»"));
 }
 
 #[gpui::test]

@@ -29,9 +29,21 @@ Objetivo: comprobar que las tres apuestas técnicas funcionan en la máquina de 
 `cincel-review` completo, `DiffTransformMap` y `BlockMap` en el editor, pill, `+`/`−` por línea, barra flotante, panel de revisión, árbol con `+N −M`, persistencia, rebase de ediciones del usuario, informe al agente, diálogo de buffer sucio.
 **Comprobación manual**: pedirle a Claude un cambio que toque 3 archivos; ver los segmentos en el editor; aceptar uno, rechazar otro, rechazar una sola línea de un tercero; escribir a mano dentro de un segmento pendiente; cerrar y reabrir Cincel con pendientes; deshacer un rechazo; en el siguiente mensaje comprobar que el agente sabe qué rechazaste.
 
-## Etapa 4: pulido y distribución
-Git en el árbol y en el gutter, buscador de archivos (`frizbee`), paleta de comandos, empaquetado (`dist` → tarball + `install.sh`; `cargo-deb`), rendimiento (perfil de arranque y de tecleo), documentación de usuario.
-**Comprobación manual**: instalar desde el tarball en una máquina limpia (o contenedor) y repetir las comprobaciones de las etapas 1 a 3.
+## Etapa 4: conexiones de agentes y renombrado a Cincel
+Spec: `06-etapa4-conexiones-y-cincel.md`. Conexiones aisladas por suscripción (Claude, Codex, Google Antigravity) con perfiles propios, Node privado, adaptadores y binarios descargados al conectar; renombrado a Cincel con migración de carpetas; log a archivo.
+**Comprobación manual**: la lista de `06-etapa4-conexiones-y-cincel.md` §11.
+
+## Etapa 5: productividad
+Spec: `07-etapa5-productividad.md` (fuente de verdad; reemplaza a `docs/etapas/pendientes-etapa-5.md`). Buscador rápido de archivos (`Ctrl+P`, `frizbee`); pantalla de configuración como pestaña (`Ctrl+,`) que escribe el mismo `settings.json` conservando comentarios, con la gestión de conexiones y las actualizaciones de adaptador y Node; modal de atajos con buscador (botón en la barra de estado, `F1`); git en el margen del editor (añadido, modificado, eliminado contra HEAD, en su propia columna y sin cambiar el ancho del margen); paneles con foco (`Ctrl+Shift+A` / `Ctrl+Shift+E`) y rueda de foco (`Ctrl+L`); menú en la barra de título (con `Ctrl+N` = nuevo archivo, y salir o cerrar la ventana preguntando por archivos sin guardar) y botones de paneles, sin que nada mueva el texto del editor; y cinco deudas: motivo de `AuthRequired`, buscar y reemplazar con filas fantasma, cancelar descargas de verdad, actualizar adaptador y Node, autoguardado tras una pausa.
+**Comprobación manual**: la lista de `07-etapa5-productividad.md` §14.
+
+## Etapa 6: rendimiento, distribución y publicación (cierre = versión 1.0)
+- **Rendimiento** medido contra `01-producto.md §5` (arranque en frío, abrir 5 000 líneas, latencia de tecleo, archivos de 1 MB y de 50 000 líneas, memoria y CPU en reposo sin redibujo continuo) y corrección de lo que no cumpla.
+- **Instalador liviano**: tarball + `install.sh` y `.deb` con `cargo-deb`, compilados en GitHub Actions sobre `ubuntu-22.04`; los agentes se siguen descargando al conectar.
+- **Repositorio público**: lo hace el autor; Cincel solo lo guía. README en inglés con sección en español, `CONTRIBUTING`, CI con fmt, clippy `-D warnings`, tests (siempre con las features `cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support`) y `cargo deny`.
+- **Documentación de usuario** en español: instalación, primer arranque, conexiones, revisión de cambios, atajos, ajustes.
+- **Fuentes Inter y JetBrains Mono embebidas** en el binario (licencia OFL).
+**Comprobación manual**: instalar desde el tarball y desde el `.deb` en una máquina limpia (o contenedor) y repetir las comprobaciones de las etapas 1 a 5.
 
 ## Después de v1 (ideas ordenadas)
-LSP (completado, diagnósticos, ir a definición) · terminal integrado y autenticación de agentes dentro de la app · comentarios sobre segmentos para dialogar con el agente · multi-cursor y plegado · búsqueda en proyecto · panel de git · ACP v2 (rename/delete/binarios) · macOS.
+LSP (completado, diagnósticos, ir a definición) · terminal integrado y autenticación de agentes dentro de la app · comentarios sobre segmentos para dialogar con el agente · multi-cursor y plegado · búsqueda en proyecto · paleta de comandos (`Ctrl+Shift+P`) · OpenCode y agentes con API key o gateway · panel de git · ACP v2 (rename/delete/binarios) · macOS.

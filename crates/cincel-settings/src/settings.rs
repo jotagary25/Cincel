@@ -104,7 +104,13 @@ pub enum Autosave {
     Off,
     /// Save when the editor loses focus.
     OnFocusChange,
+    /// Save `autosave_delay_ms` after the last keystroke, if the buffer is
+    /// still dirty by then (`docs/specs/07-etapa5-productividad.md` §10.5).
+    AfterDelay,
 }
+
+/// Smallest and largest `files.autosave_delay_ms`, in milliseconds.
+const AUTOSAVE_DELAY_RANGE: (u64, u64) = (100, 60_000);
 
 /// `files`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +120,9 @@ pub struct FilesSettings {
     pub exclude: Vec<String>,
     /// When to save automatically.
     pub autosave: Autosave,
+    /// With `autosave: "after_delay"`, how long to wait after the last
+    /// keystroke before saving, in milliseconds.
+    pub autosave_delay_ms: u64,
 }
 
 impl Default for FilesSettings {
@@ -125,6 +134,7 @@ impl Default for FilesSettings {
                 "**/node_modules".to_owned(),
             ],
             autosave: Autosave::Off,
+            autosave_delay_ms: 1000,
         }
     }
 }
@@ -139,6 +149,9 @@ pub struct ReviewSettings {
     pub max_file_size_kb: u64,
     /// Same, by line count.
     pub max_lines: u32,
+    /// Megabytes of file copies the photo taken before each agent turn may
+    /// hold; past it, files keep only their hash (`03-arquitectura.md` §4).
+    pub snapshot_max_total_mb: u64,
     /// Globs that always require confirmation before the agent touches them.
     pub sensitive_paths: Vec<String>,
 }
@@ -146,9 +159,10 @@ pub struct ReviewSettings {
 impl Default for ReviewSettings {
     fn default() -> Self {
         Self {
-            jump_to_next_on_decide: true,
+            jump_to_next_on_decide: false,
             max_file_size_kb: 2048,
             max_lines: 50_000,
+            snapshot_max_total_mb: 300,
             sensitive_paths: vec![
                 "**/.env*".to_owned(),
                 "**/.git/**".to_owned(),
@@ -413,8 +427,21 @@ impl Settings {
                         }
                     }),
                     autosave: reader.field(files, "autosave", d.autosave),
+                    autosave_delay_ms: reader.checked_field(
+                        files,
+                        "autosave_delay_ms",
+                        d.autosave_delay_ms,
+                        |ms: &u64| {
+                            if (AUTOSAVE_DELAY_RANGE.0..=AUTOSAVE_DELAY_RANGE.1).contains(ms) {
+                                Ok(())
+                            } else {
+                                Err("files.autosave_delay_ms tiene que estar entre 100 y 60000"
+                                    .to_owned())
+                            }
+                        },
+                    ),
                 };
-                reader.unknown_keys(files, &["exclude", "autosave"]);
+                reader.unknown_keys(files, &["exclude", "autosave", "autosave_delay_ms"]);
                 value
             }),
             review: reader.object(object, "review", |reader, review| {
@@ -427,6 +454,11 @@ impl Settings {
                     ),
                     max_file_size_kb: reader.field(review, "max_file_size_kb", d.max_file_size_kb),
                     max_lines: reader.field(review, "max_lines", d.max_lines),
+                    snapshot_max_total_mb: reader.field(
+                        review,
+                        "snapshot_max_total_mb",
+                        d.snapshot_max_total_mb,
+                    ),
                     sensitive_paths: reader.array(
                         review,
                         "sensitive_paths",
@@ -446,6 +478,7 @@ impl Settings {
                         "jump_to_next_on_decide",
                         "max_file_size_kb",
                         "max_lines",
+                        "snapshot_max_total_mb",
                         "sensitive_paths",
                     ],
                 );
@@ -732,6 +765,47 @@ mod tests {
         assert_eq!(loaded.value.text_rendering, TextRendering::Grayscale);
         assert_eq!(loaded.value.files.autosave, Autosave::OnFocusChange);
         assert_eq!(loaded.value.window.decorations, Decorations::Server);
+    }
+
+    #[test]
+    fn after_delay_autosave_round_trips_with_its_default_delay() {
+        let loaded = Settings::parse(r#"{ "files": { "autosave": "after_delay" } }"#);
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert_eq!(loaded.value.files.autosave, Autosave::AfterDelay);
+        assert_eq!(loaded.value.files.autosave_delay_ms, 1000);
+    }
+
+    #[test]
+    fn after_delay_autosave_round_trips_through_serde() {
+        let files = FilesSettings {
+            autosave: Autosave::AfterDelay,
+            autosave_delay_ms: 250,
+            ..FilesSettings::default()
+        };
+        let json = serde_json::to_string(&files).unwrap();
+        assert_eq!(serde_json::from_str::<FilesSettings>(&json).unwrap(), files);
+        let loaded = Settings::parse(&format!(r#"{{ "files": {json} }}"#));
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert_eq!(loaded.value.files, files);
+    }
+
+    #[test]
+    fn autosave_delay_ms_out_of_range_is_rejected() {
+        for delay in [0, 99, 60_001, 1_000_000] {
+            let loaded = Settings::parse(&format!(
+                r#"{{ "files": {{ "autosave_delay_ms": {delay} }} }}"#
+            ));
+            assert_eq!(loaded.value.files.autosave_delay_ms, 1000, "{delay}");
+            assert_eq!(loaded.issues.len(), 1, "{delay}: {:?}", loaded.issues);
+            assert_eq!(loaded.issues[0].path, "files.autosave_delay_ms");
+        }
+    }
+
+    #[test]
+    fn autosave_delay_ms_inside_range_is_accepted() {
+        let loaded = Settings::parse(r#"{ "files": { "autosave_delay_ms": 250 } }"#);
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert_eq!(loaded.value.files.autosave_delay_ms, 250);
     }
 
     #[test]

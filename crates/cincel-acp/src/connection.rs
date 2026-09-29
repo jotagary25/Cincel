@@ -255,6 +255,10 @@ struct Shared {
     /// Agent `elicitationId` -> our request id, for URL elicitations, so
     /// `elicitation/complete` can close the right dialog.
     url_elicitations: Mutex<HashMap<String, PermissionRequestId>>,
+    /// Text of the last `_auth/status_update` that reported a logged-out
+    /// state (cleared by any other kind): fallback reason of
+    /// [`AgentEvent::AuthRequired`] when the error itself carries none.
+    logged_out_reason: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -263,6 +267,19 @@ impl Shared {
         if self.events.send_blocking(event).is_err() {
             tracing::debug!("la UI cerró el canal de eventos");
         }
+    }
+
+    /// Reason of an `auth_required` error for [`AgentEvent::AuthRequired`]:
+    /// the error's own text ([`protocol::auth_required_message`]: `data`
+    /// field `message`/`reason`, then `message`), else the text of the last
+    /// logged-out `_auth/status_update`.
+    fn auth_required_message(&self, error: &agent_client_protocol::Error) -> Option<String> {
+        protocol::auth_required_message(&error.message, error.data.as_ref()).or_else(|| {
+            self.logged_out_reason
+                .lock()
+                .ok()
+                .and_then(|reason| reason.clone())
+        })
     }
 
     fn error(&self, message: impl Into<String>) {
@@ -446,6 +463,7 @@ async fn run_agent(
         tool_calls: Mutex::new(HashMap::new()),
         pending_file_change_requests: Mutex::new(HashMap::new()),
         url_elicitations: Mutex::new(HashMap::new()),
+        logged_out_reason: Mutex::new(None),
     });
 
     let transport = build_transport(stdin, stdout);
@@ -746,12 +764,17 @@ fn handle_ext_notification(shared: &Arc<Shared>, notification: &UntypedMessage) 
         return;
     }
     match protocol::parse_auth_status_update(notification.params()) {
-        Some(status) => shared.emit(AgentEvent::AuthStatus {
-            kind: status.kind,
-            label: status.label,
-            detail: status.detail,
-            account: status.account,
-        }),
+        Some(status) => {
+            if let Ok(mut reason) = shared.logged_out_reason.lock() {
+                *reason = protocol::logged_out_status_text(&status);
+            }
+            shared.emit(AgentEvent::AuthStatus {
+                kind: status.kind,
+                label: status.label,
+                detail: status.detail,
+                account: status.account,
+            });
+        }
         None => tracing::warn!("_auth/status_update con formato inválido, ignorado"),
     }
 }
@@ -878,6 +901,7 @@ async fn command_loop(
                     Err(error) if error.code == ErrorCode::AuthRequired => {
                         shared.emit(AgentEvent::AuthRequired {
                             methods: auth_methods.clone(),
+                            message: shared.auth_required_message(&error),
                         });
                     }
                     Err(error) => shared.error(error.message),
@@ -907,6 +931,7 @@ async fn command_loop(
                     Err(error) if error.code == ErrorCode::AuthRequired => {
                         shared.emit(AgentEvent::AuthRequired {
                             methods: auth_methods.clone(),
+                            message: shared.auth_required_message(&error),
                         });
                     }
                     Err(error) => shared.error(error.message),
@@ -933,6 +958,7 @@ async fn command_loop(
                     Err(error) if error.code == ErrorCode::AuthRequired => {
                         shared.emit(AgentEvent::AuthRequired {
                             methods: auth_methods.clone(),
+                            message: shared.auth_required_message(&error),
                         });
                     }
                     Err(error) => shared.error(error.message),

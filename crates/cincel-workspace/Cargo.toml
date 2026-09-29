@@ -28,6 +28,9 @@ parking_lot = { workspace = true }
 # `cincel_chat::markdown` (`crate::markdown_preview`): the preview shows a
 # muted placeholder instead of loading them.
 regex = { workspace = true }
+# Fuzzy matching for the quick file finder (`Ctrl+P`, `crate::file_finder`,
+# `docs/specs/07-etapa5-productividad.md` §3, D1).
+frizbee = { workspace = true }
 rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

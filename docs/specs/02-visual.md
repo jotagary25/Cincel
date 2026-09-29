@@ -2,6 +2,8 @@
 
 Estado: v1.0. Describe **cómo se ve y se siente** Cincel. Los valores concretos (colores, tamaños) son los predeterminados; todos son configurables por tema.
 
+**Corrección de la Etapa 5** (`docs/specs/07-etapa5-productividad.md`, 2026-09-28): §5 (git en el margen), §8 (barra de título con menú y botones de paneles, botón de atajos, atajos nuevos y cambiados). Detalle en las secciones correspondientes más abajo.
+
 ## 1. Ventana y layout
 
 ```
@@ -72,7 +74,7 @@ Colores de sintaxis: 12 capturas estándar de tree-sitter (`keyword`, `function`
 
 ## 5. El editor
 
-- **Gutter**: números de línea alineados a la derecha, `text.muted`, número actual en `text`, en una columna de al menos 3 dígitos de ancho. A la izquierda de los números, una barra de 3 px por línea con los colores de diff del agente (v1) y de git (v2). Las filas fantasma no llevan número. El ancho del gutter no depende de la revisión: mostrar o decidir segmentos nunca corre el código.
+- **Gutter**: números de línea alineados a la derecha, `text.muted`, número actual en `text`, en una columna de al menos 3 dígitos de ancho. A la izquierda de los números, una barra de 3 px por línea con los colores de diff del agente y, en su propia columna de 3 px (Etapa 5), los colores de git contra `HEAD`: `git.added` (`#98c379`) en las líneas que no existen en `HEAD`, `git.modified` (`#61afef`) en las que reemplazan una de `HEAD`, y `git.deleted` (`#e06c75`) como una marca de 3 px × 6 px centrada en el borde entre filas donde se borró texto. Las dos columnas (git y agente) conviven en la misma fila sin pisarse; las filas fantasma no llevan barra de git (no existen en el disco) ni número. El ancho del gutter no depende de la revisión ni de git: mostrar o decidir segmentos, y tener o no cambios de git, nunca corre el código — la columna de git se paga repartiendo el espacio que ya existía antes de los números (`docs/specs/07-etapa5-productividad.md` §6.3, D11), no agrandando el gutter.
 - **Línea actual**: fondo `bg.elevated` al 60% (sin borde).
 - **Cursor**: barra de 2 px, parpadeo 500 ms que se detiene tras 5 s sin escribir.
 - **Selección**: `selection`, esquinas rectas.
@@ -136,18 +138,36 @@ Abajo al centro del editor, 4 s, `bg.elevated`. Al rechazar: "Segmento rechazado
 
 ## 8. Atajos de teclado (predeterminados, Linux)
 
+**Barra de título y menú (Etapa 5).** A la izquierda de la barra de título, un
+botón con tres rayitas abre un menú (`gpui_kit::component::menu::PopupMenu`)
+con: Abrir carpeta…, Carpetas recientes ▸, Nuevo archivo…, Guardar, Guardar
+todo, Configuración, Atajos de teclado, Conexiones y Salir — cada ítem
+muestra el atajo de la tabla de abajo cuando tiene uno. A su lado, dos
+botones muestran u ocultan el chat y los archivos (misma acción que
+`Ctrl+Shift+A`/`Ctrl+Shift+E`, con la regla de foco de más abajo). La barra
+de estado suma un botón de atajos de teclado (icono de teclado, a la derecha,
+antes del zoom) que abre el mismo modal que `F1`. Ninguno de estos elementos
+cambia el alto de la barra de título ni de la de estado, ni corre el editor
+(`docs/specs/07-etapa5-productividad.md` D16).
+
 | Acción | Tecla | Contexto |
 |---|---|---|
 | Abrir carpeta | `Ctrl+O` | global |
+| Nuevo archivo | `Ctrl+N` | global, con proyecto abierto |
 | Guardar / guardar todo | `Ctrl+S` / `Ctrl+Alt+S` | editor |
 | Cerrar pestaña | `Ctrl+W` | editor |
 | Buscar en archivo | `Ctrl+F` | editor |
+| Buscar y reemplazar en archivo | `Ctrl+H` | editor |
 | Deshacer / rehacer | `Ctrl+Z` / `Ctrl+Shift+Z` | editor |
 | Ir a línea | `Ctrl+G` | editor |
 | Vista previa de Markdown | `Ctrl+Shift+V` | editor y área de pestañas, con Markdown activo |
-| Mostrar/ocultar chat | `Ctrl+Shift+A` | global |
-| Mostrar/ocultar árbol | `Ctrl+Shift+E` | global |
-| Foco al chat | `Ctrl+L` | global |
+| Buscador rápido de archivos | `Ctrl+P` | global, con proyecto abierto |
+| Configuración | `Ctrl+,` | global |
+| Atajos de teclado | `F1` | global |
+| Salir | `Ctrl+Q` | global |
+| Mostrar/ocultar chat (abre y enfoca / enfoca / cierra, ver regla abajo) | `Ctrl+Shift+A` | global |
+| Mostrar/ocultar árbol (misma regla) | `Ctrl+Shift+E` | global |
+| Siguiente zona de foco: chat → editor → archivos → chat | `Ctrl+L` | global |
 | Enviar mensaje / salto de línea | `Enter` / `Shift+Enter` | chat |
 | Cancelar turno | `Esc` (con el chat enfocado) | chat |
 | Aceptar segmento o línea bajo el cursor | `Ctrl+Enter` | editor con segmento pendiente bajo el cursor; si no, salto de línea normal |
@@ -160,7 +180,19 @@ Abajo al centro del editor, 4 s, `bg.elevated`. Al rechazar: "Segmento rechazado
 | Deshacer último rechazo | `Alt+Shift+U` | global |
 | Zoom UI | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | global |
 
-Reglas: nunca `Ctrl+Y` ni `Ctrl+N` para aceptar/rechazar; no usar `Super`, `Ctrl+Alt+flechas`, `Alt+F*` (los toma COSMIC/GNOME). Los atajos con contexto hacen fallthrough a la acción normal cuando el contexto no aplica. Todo atajo es un comando con nombre (`review::accept_hunk`, etc.) reasignable en `keymap.json`.
+**Regla de `Ctrl+Shift+A` / `Ctrl+Shift+E` (Etapa 5, `07-etapa5-productividad.md`
+§7):** panel oculto → se abre y el foco va a él (el compositor del chat, o el
+archivo seleccionado del árbol); panel visible con el foco dentro de él →
+se cierra y el foco vuelve al editor (o al área de pestañas); panel visible
+con el foco en otro lado → se enfoca sin cerrar nada. `Ctrl+L` recorre las
+zonas visibles en ese orden fijo, sin abrir ni cerrar paneles y sin rueda
+hacia atrás; `workspace::focus_chat` (el atajo de "foco al chat" de antes de
+esta etapa) sigue existiendo como comando, sin tecla asignada por defecto.
+Con un modal abierto (conexiones, buscador de archivos, atajos, nuevo
+archivo, diálogo de guardar, panel de revisión o el menú de la barra de
+título desplegado), estos tres atajos no hacen nada.
+
+Reglas: no usar `Super`, `Ctrl+Alt+flechas`, `Alt+F*` (los toma COSMIC/GNOME). Los atajos con contexto hacen fallthrough a la acción normal cuando el contexto no aplica. Todo atajo es un comando con nombre (`review::accept_hunk`, etc.) reasignable en `keymap.json`. Los bindings por defecto exactos, ya verificados contra `crates/cincel-settings/src/defaults.rs`, están además en `docs/specs/07-etapa5-productividad.md` §11.1.
 
 ## 9. Estados vacíos y errores
 - Sin proyecto: pantalla central con logo, "Abrir carpeta (Ctrl+O)" y proyectos recientes.

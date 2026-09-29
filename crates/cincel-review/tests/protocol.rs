@@ -257,7 +257,7 @@ fn deleted_files_restore_or_stay_deleted() {
     let file = store.file(&p("d.txt")).unwrap();
     assert!(matches!(file.status, FileStatus::Deleted { .. }));
     assert_eq!(file.turn_id, TurnId(3));
-    assert_eq!(store.stats(&p("d.txt")), (0, 2));
+    assert_eq!(store.stats(&p("d.txt")), (0, 1));
     let revert = store.reject_file(&p("d.txt")).unwrap();
     assert_eq!(
         revert,

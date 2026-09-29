@@ -75,6 +75,13 @@
 //!   `_auth/status_update` -> [`AgentEvent::AuthStatus`];
 //!   `elicitation/complete` -> [`AgentEvent::ElicitationCompleted`].
 //!
+//! # Etapa 5
+//!
+//! * [`AgentEvent::AuthRequired`] carries `message`: the agent's reason
+//!   ([`auth_required_message`] over the -32000 error's `data`/`message`,
+//!   falling back to the last logged-out `_auth/status_update`,
+//!   [`logged_out_status_text`]). Verbatim: callers redact it.
+//!
 //! # Desviaciones (ver `docs/specs/modulos/acp.md` §Desviaciones)
 //!
 //! * `AuthMethodView::kind` only distinguishes `Terminal` from `Other`: the
@@ -105,6 +112,7 @@ pub use protocol::{
     AuthStatusKind, ElicitationResponder, FileChangeReport, FsError, McpServerSpec,
     PermissionOutcome, PermissionRequestId, PermissionResponder, PromptBlock,
     agent_supports_auth_status, agent_supports_file_change_report, agent_supports_logout,
+    auth_required_message, logged_out_status_text,
 };
 pub use registry::{
     AgentDescriptor, AgentRegistry, BinaryTarget, CACHE_TTL, CustomAgent, Distribution, LaunchSpec,

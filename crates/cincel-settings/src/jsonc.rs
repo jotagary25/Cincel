@@ -31,12 +31,14 @@ use serde_json::{Map, Value};
 
 use crate::issue::SettingsIssue;
 
-/// Parses JSONC text into a [`Value`].
+/// The strict JSONC dialect every Cincel document is read with: comments and
+/// trailing commas, nothing else (no single quotes, no unquoted keys, no hex
+/// numbers), so a file accepted here is accepted by every other JSONC reader.
 ///
-/// Empty (or whitespace-only) input is `Value::Null`, exactly like a missing
-/// file, so callers treat both the same way.
-pub(crate) fn parse(text: &str) -> Result<Value, String> {
-    let options = jsonc_parser::ParseOptions {
+/// Shared with [`crate::edit`], which parses the same dialect into a CST
+/// instead of a [`Value`].
+pub(crate) fn parse_options() -> jsonc_parser::ParseOptions {
+    jsonc_parser::ParseOptions {
         allow_comments: true,
         allow_trailing_commas: true,
         allow_loose_object_property_names: false,
@@ -44,8 +46,16 @@ pub(crate) fn parse(text: &str) -> Result<Value, String> {
         allow_single_quoted_strings: false,
         allow_hexadecimal_numbers: false,
         allow_unary_plus_numbers: false,
-    };
-    jsonc_parser::parse_to_serde_value::<Value>(text, &options).map_err(|error| error.to_string())
+    }
+}
+
+/// Parses JSONC text into a [`Value`].
+///
+/// Empty (or whitespace-only) input is `Value::Null`, exactly like a missing
+/// file, so callers treat both the same way.
+pub(crate) fn parse(text: &str) -> Result<Value, String> {
+    jsonc_parser::parse_to_serde_value::<Value>(text, &parse_options())
+        .map_err(|error| error.to_string())
 }
 
 /// Reads a document object key by key, collecting issues instead of failing.

@@ -1,7 +1,8 @@
 //! cincel-project: ver `docs/specs/modulos/project.md`.
 //!
 //! The open project, with no GPUI and no async runtime: a file tree, a file
-//! watcher, the store of open buffers and the git status. Every long
+//! watcher, the store of open buffers, the git status and the per-file diff
+//! against `HEAD` the editor's gutter paints. Every long
 //! operation is expressed as "start it, then drive it from wherever you
 //! like", so the caller (`cincel-workspace`) can run it on GPUI's
 //! background executor without this crate knowing what an executor is.
@@ -38,6 +39,7 @@ mod diff;
 mod git;
 mod ignore_rules;
 mod recents;
+mod snapshot;
 mod watcher;
 mod worktree;
 
@@ -46,8 +48,15 @@ pub use buffer_store::{
     EditSource, OpenError, ReloadOutcome, SaveError,
 };
 pub use diff::{Edit, apply as apply_edits, minimal_edits};
-pub use git::{GIT_DEBOUNCE, GitFileStatus, GitStatus, GitStatusWatcher};
+pub use git::{
+    GIT_DEBOUNCE, GIT_DIR_DEBOUNCE, GitDirEvent, GitDirWatcher, GitFileStatus, GitHunk,
+    GitHunkKind, GitStatus, GitStatusWatcher, LineDiff, diff_against_head, git_dir,
+};
 pub use ignore_rules::{ExcludeSet, IgnoreRules};
 pub use recents::{MAX_RECENTS, Recents};
+pub use snapshot::{
+    ProjectSnapshot, RACY_WINDOW, SnapshotChange, SnapshotContent, SnapshotEntry, SnapshotLimits,
+    SnapshotSource,
+};
 pub use watcher::{FsEvent, WATCH_DEBOUNCE, WatchError, WatchOptions, Watcher};
 pub use worktree::{Entries, Entry, EntryKind, ScanEvent, Worktree, WorktreeConfig, WorktreeScan};

@@ -35,7 +35,7 @@ impl Identity {
         self.email.is_none() && self.plan.is_none() && self.organization.is_none()
     }
 
-    /// Gray line for the popover: `"gary@… · Max"`-style, `None` when empty.
+    /// Gray line for the popover: `"ana@… · Max"`-style, `None` when empty.
     #[must_use]
     pub fn summary(&self) -> Option<String> {
         let parts: Vec<&str> = [self.email.as_deref(), self.plan.as_deref()]
@@ -413,7 +413,7 @@ mod tests {
             Err(ConnectionsError::EmptyLabel)
         ));
         let identity = Identity {
-            email: Some("gary@example.com".to_string()),
+            email: Some("ana@example.com".to_string()),
             plan: Some("Claude Max".to_string()),
             organization: None,
         };
@@ -531,11 +531,11 @@ mod tests {
             "Antigravity · personal"
         );
         let summary = Identity {
-            email: Some("gary@example.com".to_string()),
+            email: Some("ana@example.com".to_string()),
             plan: Some("Max".to_string()),
             organization: None,
         }
         .summary();
-        assert_eq!(summary.as_deref(), Some("gary@example.com · Max"));
+        assert_eq!(summary.as_deref(), Some("ana@example.com · Max"));
     }
 }

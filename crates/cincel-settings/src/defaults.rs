@@ -21,7 +21,16 @@ pub const DEFAULT_KEYMAP_JSONC: &str = r##"[
       "ctrl-o": "workspace::open_folder",
       "ctrl-shift-a": "workspace::toggle_chat",
       "ctrl-shift-e": "workspace::toggle_tree",
-      "ctrl-l": "workspace::focus_chat",
+      // Siguiente zona de foco: chat → editor → archivos → chat. Salta los
+      // paneles ocultos y nunca abre nada. "workspace::focus_chat" sigue
+      // existiendo, sin atajo.
+      "ctrl-l": "workspace::focus_next_zone",
+      // Buscador de archivos, configuración, atajos, nuevo archivo y salir.
+      "ctrl-p": "workspace::toggle_file_finder",
+      "ctrl-,": "workspace::open_settings",
+      "f1": "workspace::show_shortcuts",
+      "ctrl-n": "workspace::new_file",
+      "ctrl-q": "workspace::quit",
       "ctrl-shift-r": "workspace::open_review_panel",
       // Siguiente / anterior cambio, con las dos teclas de la spec.
       "alt-j": "workspace::next_change",
@@ -48,6 +57,7 @@ pub const DEFAULT_KEYMAP_JSONC: &str = r##"[
       "ctrl-alt-s": "editor::save_all",
       "ctrl-w": "workspace::close_tab",
       "ctrl-f": "editor::find",
+      "ctrl-h": "editor::find_replace",
       "f3": "editor::find_next",
       "shift-f3": "editor::find_prev",
       "ctrl-z": "editor::undo",
@@ -181,17 +191,24 @@ const DEFAULT_SETTINGS_JSONC: &str = r##"{
     // Patrones que no se muestran en el árbol ni se recorren.
     // Se suman a lo que diga .gitignore.
     "exclude": ["**/.git", "**/target", "**/node_modules"],
-    // "off" o "on_focus_change".
-    "autosave": "off"
+    // "off", "on_focus_change" o "after_delay" (guarda tras autosave_delay_ms
+    // sin escribir).
+    "autosave": "off",
+    // Con "after_delay": milisegundos sin escribir antes de guardar (100 a 60000).
+    "autosave_delay_ms": 1000
   },
 
   "review": {
     // Saltar al siguiente segmento pendiente al aceptar o rechazar uno.
-    "jump_to_next_on_decide": true,
+    "jump_to_next_on_decide": false,
     // Archivos más grandes que esto se revisan enteros, no por segmento.
     "max_file_size_kb": 2048,
     // Ídem por cantidad de líneas.
     "max_lines": 50000,
+    // Megabytes que puede ocupar la copia del proyecto que se toma antes de
+    // cada mensaje al agente; pasado el tope, los archivos guardan solo su
+    // huella y la base sale del buffer si está abierto.
+    "snapshot_max_total_mb": 300,
     // Rutas que siempre piden confirmación antes de que el agente las toque.
     "sensitive_paths": ["**/.env*", "**/.git/**", "**/Cargo.lock", "**/package-lock.json"]
   },
@@ -280,7 +297,14 @@ mod tests {
             ("ctrl-g", &editor, "editor::go_to_line"),
             ("ctrl-shift-a", &global, "workspace::toggle_chat"),
             ("ctrl-shift-e", &global, "workspace::toggle_tree"),
-            ("ctrl-l", &global, "workspace::focus_chat"),
+            // `07-etapa5-productividad.md` §9.2 and §11.1.
+            ("ctrl-l", &global, "workspace::focus_next_zone"),
+            ("ctrl-p", &global, "workspace::toggle_file_finder"),
+            ("ctrl-,", &global, "workspace::open_settings"),
+            ("f1", &global, "workspace::show_shortcuts"),
+            ("ctrl-n", &global, "workspace::new_file"),
+            ("ctrl-q", &global, "workspace::quit"),
+            ("ctrl-h", &editor, "editor::find_replace"),
             ("enter", &chat, "chat::send"),
             ("shift-enter", &chat, "chat::newline"),
             ("escape", &chat, "chat::cancel_turn"),
@@ -321,17 +345,17 @@ mod tests {
                 "{stroke} en {contexts:?}"
             );
         }
+        // `workspace::focus_chat` stays registered but loses `ctrl-l` (§9.2, D9).
+        assert!(!keymap.commands().contains(&"workspace::focus_chat"));
     }
 
     #[test]
     fn default_keymap_avoids_the_forbidden_keys() {
-        // `02-visual.md` §8: nunca Ctrl+Y ni Ctrl+N para aceptar/rechazar, ni
-        // Super, ni Alt+F*.
+        // 02-visual.md §8: ni Super, ni Alt+F* (los toma COSMIC/GNOME).
         for section in Keymap::default().sections() {
             for binding in &section.bindings {
                 let stroke = binding.keystroke.to_string();
                 assert!(!binding.keystroke.cmd, "{stroke} usa Super");
-                assert!(stroke != "ctrl-y" && stroke != "ctrl-n", "{stroke}");
                 assert!(
                     !(binding.keystroke.alt
                         && binding.keystroke.key.starts_with('f')

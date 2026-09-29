@@ -1018,7 +1018,7 @@ async fn authenticate_failure_emits_auth_failed() {
 async fn auth_status_update_is_parsed() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let cwd = workspace.path().to_path_buf();
-    let launch = fake_launch().with_env("FAKE_AUTH_EMAIL", "gary@example.com");
+    let launch = fake_launch().with_env("FAKE_AUTH_EMAIL", "ana@example.com");
     let mut connection = AgentConnection::start(cwd.clone());
 
     let (supports, status) = tokio::time::timeout(TIMEOUT, async {
@@ -1057,7 +1057,7 @@ async fn auth_status_update_is_parsed() {
     assert_eq!(kind, cincel_acp::AuthStatusKind::Account);
     assert_eq!(label, "Fake Max");
     let account = account.expect("account");
-    assert_eq!(account.email.as_deref(), Some("gary@example.com"));
+    assert_eq!(account.email.as_deref(), Some("ana@example.com"));
     assert_eq!(account.organization.as_deref(), Some("Fake Org"));
     assert_eq!(account.plan.as_deref(), Some("max"));
 }
@@ -1113,4 +1113,100 @@ async fn elicitation_complete_closes_the_pending_request() {
     assert_eq!(asked, completed_id);
     assert_eq!(elicitation_id, "elic-1");
     assert_eq!(answer.as_deref(), Some("elicitation=accept"));
+}
+
+// ------------------------------------------------------------------ Etapa 5
+
+/// Spawns the fake agent with the `FAKE_AUTH_*` variables in `vars`, asks
+/// for `session/new` (or `session/load` with `load`) and returns the
+/// `AuthRequired` event's message.
+async fn auth_required_message_with(vars: &[(&str, &str)], load: bool) -> Option<String> {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let cwd = workspace.path().to_path_buf();
+    let mut launch = fake_launch();
+    for (name, value) in vars {
+        launch = launch.with_env(*name, *value);
+    }
+    let mut connection = AgentConnection::start(cwd.clone());
+    let message = tokio::time::timeout(TIMEOUT, async {
+        connect_with(&connection, launch, &cwd).await;
+        let command = if load {
+            AgentCommand::LoadSession {
+                session_id: SessionId::new("vieja"),
+                cwd: cwd.clone(),
+                mcp_servers: Vec::new(),
+            }
+        } else {
+            AgentCommand::NewSession {
+                cwd: cwd.clone(),
+                mcp_servers: Vec::new(),
+            }
+        };
+        connection.send(command).await.expect("session");
+        loop {
+            match connection.recv().await.expect("evento") {
+                AgentEvent::AuthRequired { message, .. } => return message,
+                AgentEvent::AuthStatus { .. } | AgentEvent::Stderr(_) => {}
+                other => panic!("se esperaba AuthRequired: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timeout");
+    connection.shutdown();
+    message
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_required_carries_the_agent_message() {
+    assert_eq!(
+        auth_required_message_with(&[("FAKE_AUTH_REQUIRED", "token revoked")], false)
+            .await
+            .as_deref(),
+        Some("token revoked")
+    );
+    // Same for `session/load`.
+    assert_eq!(
+        auth_required_message_with(&[("FAKE_AUTH_REQUIRED", "token revoked")], true)
+            .await
+            .as_deref(),
+        Some("token revoked")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_required_prefers_the_reason_in_data() {
+    let message = auth_required_message_with(
+        &[
+            ("FAKE_AUTH_REQUIRED", "Authentication required"),
+            (
+                "FAKE_AUTH_REQUIRED_DATA",
+                r#"{"reason":"refresh token expired"}"#,
+            ),
+        ],
+        false,
+    )
+    .await;
+    assert_eq!(message.as_deref(), Some("refresh token expired"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_required_without_message_is_none() {
+    assert_eq!(
+        auth_required_message_with(&[("FAKE_AUTH_REQUIRED", "")], false).await,
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_required_falls_back_to_the_logged_out_status() {
+    let message = auth_required_message_with(
+        &[
+            ("FAKE_AUTH_REQUIRED", " "),
+            ("FAKE_AUTH_LOGGED_OUT_DETAIL", "session expired upstream"),
+        ],
+        false,
+    )
+    .await;
+    assert_eq!(message.as_deref(), Some("session expired upstream"));
 }

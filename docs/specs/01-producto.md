@@ -2,6 +2,8 @@
 
 Estado: v1.0 (2026-09-17). Fuente de verdad sobre **qué** hace Cincel. Las decisiones de fondo están en `docs/00-sintesis-y-decisiones.md`; la investigación en `docs/research/`.
 
+**Corrección de la Etapa 5** (`docs/specs/07-etapa5-productividad.md`, 2026-09-28): el §3 excluía de la v1 el buscador de archivos difuso; ya construido, entra en la v1 (ver §3 más abajo).
+
 ## 1. Qué es
 
 Cincel es un editor de código de escritorio para Linux, minimalista y liviano, con un chat integrado que conecta agentes de programación (Claude Code, Codex, Gemini CLI, OpenCode y cualquier otro compatible con ACP) usando las suscripciones que el usuario ya tiene. Su rasgo distintivo: **todo cambio que hace un agente se muestra dentro del editor, segmento por segmento, y el usuario acepta o rechaza cada segmento o cada línea**. Los cambios nunca se revisan en el chat.
@@ -24,6 +26,7 @@ Público objetivo: el propio autor y desarrolladores con perfil similar. Platafo
 - Árbol de archivos con estado de "modificado por el agente" y contadores `+N −M`.
 - Pestañas de archivos; editor con: colores de sintaxis (tree-sitter) para ~15 lenguajes, edición con cursor único, selección con teclado y mouse, deshacer/rehacer, buscar en el archivo, guardar, indentación básica, números de línea, ajuste de línea opcional, entrada de texto internacional (acentos, dead keys, IME).
 - Chat con agentes ACP: elegir agente, sesión nueva, streaming de respuestas en markdown, llamadas a herramientas visibles y plegables, pedidos de permiso, plan del agente, selector de modo/modelo/esfuerzo, comandos slash del agente, cancelar.
+- Buscador rápido de archivos (`Ctrl+P`), difuso, con letras salteadas y errores de tipeo (Etapa 5, `docs/specs/07-etapa5-productividad.md` §3).
 - Revisión de cambios en el editor: segmentos rojo/verde, aceptar/rechazar por segmento, por línea, por archivo y por turno; navegación entre cambios; barra flotante; panel de revisión con la lista de archivos; deshacer el último rechazo; persistencia entre sesiones; informe de rechazos al agente en el siguiente mensaje.
 - Ajustes en JSON (con comentarios) y mapa de teclas configurable; tema oscuro y claro.
 
@@ -32,7 +35,7 @@ Público objetivo: el propio autor y desarrolladores con perfil similar. Platafo
 - Terminal integrado (el login de agentes se delega al terminal del sistema).
 - Panel de git, commits, blame. Solo se lee el estado de git para colorear el árbol.
 - Multi-cursor, plegado de código, minimapa.
-- Búsqueda en todo el proyecto, paleta de comandos, buscador de archivos difuso.
+- Búsqueda en todo el proyecto, paleta de comandos.
 - Extensiones o plugins.
 - Comentarios sobre segmentos para dialogar con el agente (estilo Antigravity).
 - Soporte para macOS y Windows.

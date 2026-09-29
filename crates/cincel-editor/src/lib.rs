@@ -56,8 +56,12 @@
 //!   `02-visual.md` §8 for the editor contexts; install them with
 //!   [`bind_default_keys`] before loading the user's keymap. Action names are
 //!   the ones in the spec (`editor::insert_newline`, `review::accept_hunk`, …).
-//! - **Key contexts**: `Editor`, `Editor && searching` and
+//! - **Key contexts**: `Editor`, `Editor && searching`,
+//!   `Editor && searching && replacing` and
 //!   `Editor && review_hunk_under_cursor` (see [`EditorView::key_context`]).
+//!   A host that loads its own keymap after the defaults re-binds
+//!   [`search_bar_bindings`] on top of it, so `Tab`, `Enter` and `Ctrl+Enter`
+//!   keep their search-bar meaning while the bar has the keyboard.
 //!
 //! # Display pipeline
 //!
@@ -96,7 +100,8 @@
 //! moves), the pill on the hunk with the cursor or the mouse (with a clock for
 //! a previous turn) on the first of its rows whose text leaves it room — or a
 //! compact two-icon pill at 70 % when none does (see [`element`]) — and the
-//! floating bar, whose "✓ Aceptar" / "✗ Rechazar" read as enabled (`status.ok`
+//! floating bar, whose "✓ Aceptar todo" / "✗ Rechazar todo" (the whole turn)
+//! read as enabled (`status.ok`
 //! / `status.error` glyphs, `text` words, `bg.surface` on hover) — and reports
 //! every click and key as
 //! [`EditorEvent::Review`]. It **never applies a decision itself**: the host
@@ -120,10 +125,31 @@
 //!   host writes the file and calls [`EditorView::mark_saved`].
 //! - **Soft wrap** measures in monospace columns (see [`wrap_map`]), and tabs
 //!   are painted as a fixed `tab_size` spaces rather than to the next tab stop.
-//! - **Search** covers the buffer, not the phantom rows (deleted text is not
-//!   in the file, so a match there could not be edited or replaced); it walks
-//!   past them without skipping any buffer row, and has no replace.
+//! - **Search and replace** (`Ctrl+F`, `Ctrl+H`;
+//!   `docs/specs/07-etapa5-productividad.md` §10.2) covers the buffer *and*
+//!   the phantom rows, in screen order: phantom matches are highlighted,
+//!   counted (`3/12 (2 en líneas quitadas)`) and visited with `Enter` /
+//!   `Shift+Enter`, but never replaced — the phantom text is what
+//!   "Rechazar" restores, not the file. "Reemplazar" on a phantom match jumps
+//!   to the next real one with a notice; "Reemplazar todo" is one
+//!   `EditSource::User` transaction (one `Ctrl+Z`) over the real matches and
+//!   reports the phantom ones it left alone. Replace mode splits the same
+//!   28 px strip into two fields side by side, so the text never moves more
+//!   than with the plain search bar ([`view::SEARCH_BAR_HEIGHT`]).
 //! - `Ctrl+click` does nothing, as `editor.md` asks for v1 (no multi-cursor).
+//!
+//! # Git column (`docs/specs/07-etapa5-productividad.md` §6)
+//!
+//! [`EditorView::set_git_diff`] takes the file's changes against `HEAD` as
+//! [`GitGutterHunk`]s in buffer rows (the host runs git; the editor never
+//! does) and anchors them to the buffer, so the bars follow every edit until
+//! the host sends the next diff; [`EditorView::git_diff`] reads them back
+//! resolved. They are painted in a 3 px column of their own — green added,
+//! blue modified, a red 3 × 6 px mark where lines were deleted — with the
+//! colours of [`EditorView::set_git_colors`]. The gutter is exactly as wide
+//! as before the column existed (padding 2 + git 3 + gap 2 + agent bar 3 +
+//! gap 3 = the old 4 + 3 + 6), phantom rows never get a git bar, and the
+//! minimal chrome has none.
 //!
 //! # The editor as a text field
 //!
@@ -189,13 +215,15 @@
 //! - **Matching bracket**: the bracket at or before the cursor and its match
 //!   get a subtle `border` box ([`EditorView::matching_brackets`]).
 //! - **Mouse cursor**: the pointing hand over every enabled review control,
-//!   the arrow over a disabled one and over the rest of a pill or of the bar,
-//!   the I-beam over the text ([`EditorView::cursor_style_at`]).
+//!   the arrow over a disabled one, over the rest of a pill or of the bar and
+//!   over the margins that are not text (gutter, vertical scrollbar), the
+//!   I-beam over the text ([`EditorView::cursor_style_at`]).
 
 pub mod actions;
 pub mod decorations;
 pub mod display_map;
 pub mod element;
+pub mod git_gutter;
 pub mod input;
 pub mod ops;
 pub mod review;
@@ -209,7 +237,11 @@ pub mod wrap_map;
 #[cfg(all(test, feature = "test-support"))]
 mod editing_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod git_gutter_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod review_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod search_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
 #[cfg(all(test, feature = "test-support"))]
@@ -218,16 +250,16 @@ mod text_field_tests;
 pub use actions::{
     AcceptFile, AcceptHunk, AcceptLine, Backspace, Backtab, Cancel, Confirm, Copy, Cut, Delete,
     DeleteLine, DeleteWordLeft, DeleteWordRight, DuplicateLineDown, DuplicateLineUp, Find,
-    FindNext, FindPrev, GoToLine, InsertNewline, JoinLines, Lowercase, MoveDown, MoveLeft,
-    MoveLineDown, MoveLineUp, MovePageDown, MovePageUp, MoveRight, MoveToDocumentEnd,
+    FindNext, FindPrev, FindReplace, GoToLine, InsertNewline, JoinLines, Lowercase, MoveDown,
+    MoveLeft, MoveLineDown, MoveLineUp, MovePageDown, MovePageUp, MoveRight, MoveToDocumentEnd,
     MoveToDocumentStart, MoveToLineEnd, MoveToLineStart, MoveToMatchingBracket, MoveUp,
     MoveWordLeft, MoveWordRight, NextFile, NextHunk, OpenReviewPanel, Paste, PrevHunk, Redo,
-    RejectFile, RejectHunk, RejectLine, Save, SelectAll, SelectDown, SelectLeft, SelectLine,
-    SelectNext, SelectPageDown, SelectPageUp, SelectRight, SelectToDocumentEnd,
-    SelectToDocumentStart, SelectToLineEnd, SelectToLineStart, SelectUp, SelectWordLeft,
-    SelectWordRight, SortLines, Tab, ToggleComments, ToggleSearchCase, ToggleSearchRegex,
-    ToggleSoftWrap, ToggleWhitespace, Undo, UndoLastReject, Uppercase, bind_default_keys,
-    default_key_bindings,
+    RejectFile, RejectHunk, RejectLine, ReplaceAll, ReplaceNext, Save, SearchNextField,
+    SearchPrevField, SelectAll, SelectDown, SelectLeft, SelectLine, SelectNext, SelectPageDown,
+    SelectPageUp, SelectRight, SelectToDocumentEnd, SelectToDocumentStart, SelectToLineEnd,
+    SelectToLineStart, SelectUp, SelectWordLeft, SelectWordRight, SortLines, Tab, ToggleComments,
+    ToggleSearchCase, ToggleSearchRegex, ToggleSoftWrap, ToggleWhitespace, Undo, UndoLastReject,
+    Uppercase, bind_default_keys, default_key_bindings, search_bar_bindings,
 };
 pub use decorations::{Decorator, TextDecorations};
 pub use display_map::{
@@ -235,11 +267,14 @@ pub use display_map::{
     RowKind, RowText,
 };
 pub use element::EditorElement;
+pub use git_gutter::{GitGutterColors, GitGutterHunk, GitGutterKind};
 pub use input::WeakInputHandler;
 pub use review::{
     ReviewAction, ReviewHunkKind, ReviewHunkView, ReviewLineView, ReviewView, ReviewWordDiffs,
 };
-pub use search::{SearchState, find_matches};
+pub use search::{
+    MatchLocation, PhantomLines, SearchField, SearchState, find_matches, replace_all_message,
+};
 pub use settings::{
     AutoHeight, EditorChrome, EditorSettings, Indentation, SharedBuffer, detect_indentation, shared,
 };

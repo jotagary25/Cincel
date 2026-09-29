@@ -51,6 +51,12 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// success file.
 const POLL: Duration = Duration::from_millis(50);
 
+/// How long an ACP login waits for [`AgentEvent::Exited`] after a failed
+/// `authenticate` before calling it a rejection. When the agent dies with
+/// the request pending, the transport error and the exit status race each
+/// other; the exit status is the one worth reporting.
+const EXIT_GRACE: Duration = Duration::from_millis(300);
+
 /// Events of one [`LoginSession`], in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginEvent {
@@ -825,20 +831,17 @@ async fn drive_acp(
             },
             AgentEvent::AuthSucceeded { .. } => return AcpEnd::Succeeded,
             AgentEvent::AuthFailed { message, .. } => {
+                // A dying agent fails the pending request and exits at the
+                // same time; report the exit when it arrives right away.
+                if let Some(code) = exit_within(connection, EXIT_GRACE).await {
+                    return AcpEnd::Failed(exited(code));
+                }
                 return AcpEnd::Failed(LoginEvent::Failed {
                     message: redact_line(&message, &[]),
                     reason: LoginFailure::Rejected,
                 });
             }
-            AgentEvent::Exited { code, .. } => {
-                return AcpEnd::Failed(LoginEvent::Failed {
-                    message: match code {
-                        Some(code) => format!("El agente terminó con un error (código {code})."),
-                        None => "El agente se interrumpió.".to_string(),
-                    },
-                    reason: LoginFailure::Exit(code.and_then(|code| u32::try_from(code).ok())),
-                });
-            }
+            AgentEvent::Exited { code, .. } => return AcpEnd::Failed(exited(code)),
             AgentEvent::Error { message, .. } => {
                 return AcpEnd::Failed(LoginEvent::Failed {
                     message: redact_line(&message, &[]),
@@ -850,6 +853,36 @@ async fn drive_acp(
                 });
             }
             _ => {}
+        }
+    }
+}
+
+/// The failure for an agent that exited with `code` during the login.
+fn exited(code: Option<i32>) -> LoginEvent {
+    LoginEvent::Failed {
+        message: match code {
+            Some(code) => format!("El agente terminó con un error (código {code})."),
+            None => "El agente se interrumpió.".to_string(),
+        },
+        reason: LoginFailure::Exit(code.and_then(|code| u32::try_from(code).ok())),
+    }
+}
+
+/// Wait up to `grace` for the agent to exit (or its connection to close),
+/// returning its exit code when it does. Other events in that window are
+/// discarded: the login is already over.
+async fn exit_within(connection: &AgentConnection, grace: Duration) -> Option<Option<i32>> {
+    let deadline = Instant::now() + grace;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(left, connection.recv()).await {
+            Ok(Ok(AgentEvent::Exited { code, .. })) => return Some(code),
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) => return Some(None),
+            Err(_) => return None,
         }
     }
 }

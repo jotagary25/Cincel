@@ -218,7 +218,11 @@ impl FileReview {
     /// `(added, removed)` lines still pending.
     pub fn stats(&self) -> (u32, u32) {
         match &self.status {
-            FileStatus::Deleted { previous } => (0, crate::text::rope_rows(previous) as u32),
+            // Lines, the way a hunk counts them: the empty row after a
+            // trailing newline is not one.
+            FileStatus::Deleted { previous } => {
+                (0, diff::split_lines(&previous.to_string()).len() as u32)
+            }
             _ if self.too_large || self.binary => self.whole_stats,
             _ => self.pending_hunks().fold((0, 0), |(added, removed), hunk| {
                 let rows = self.buffer_rows(hunk);

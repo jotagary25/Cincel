@@ -855,7 +855,7 @@ impl ChatPanel {
                 self.auth_methods = auth_methods;
                 self.status = AgentStatus::Ready;
             }
-            AgentEvent::AuthRequired { methods } => {
+            AgentEvent::AuthRequired { methods, .. } => {
                 self.auth_methods = methods.clone();
                 let entry = AuthEntry {
                     methods: methods.iter().map(auth_choice).collect(),
@@ -1456,10 +1456,23 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Moves the keyboard focus to the composer (`Ctrl+L`).
+    /// Moves the keyboard focus to the composer (`workspace::toggle_chat`,
+    /// the focus wheel and `chat::focus_input`).
     pub fn focus_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    /// Whether the keyboard focus is anywhere inside the panel: the composer,
+    /// the transcript, the header and every popover (`@`, `/`, "Conectar",
+    /// the conversation list, the context menus), which are all painted
+    /// inside the panel's element tree
+    /// (`docs/specs/07-etapa5-productividad.md` §7.1).
+    ///
+    /// Answers from the last rendered frame, like every GPUI focus query.
+    #[must_use]
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx)
     }
 
     /// `Shift+Enter`: a line break in the composer, focusing it first if

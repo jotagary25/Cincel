@@ -47,7 +47,7 @@ rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 
 # proyecto y ajustes (agregados por cincel-project/cincel-settings, E1-B)
-jsonc-parser = { version = "0.33", features = ["serde"] }
+jsonc-parser = { version = "0.33", features = ["serde", "cst"] }
 globset = "0.4"
 
 # editor (agregado por cincel-editor, E1-C): búsqueda con regex opcional
@@ -66,6 +66,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 portable-pty = "0.9"
 lzma-rs = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# buscador de archivos (agregado por cincel-workspace, E5-F): coincidencia
+# difusa con posiciones para resaltar (D1)
+frizbee = "0.13"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

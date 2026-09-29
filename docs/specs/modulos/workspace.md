@@ -4,7 +4,7 @@
 - `Workspace` (entidad raíz): `Project`, `BufferStore`, `ReviewStore`, `ChatPanel`, `Dock` con tres paneles (izquierda chat, centro pestañas, derecha árbol) usando el dock de `gpui-kit`; tamaños y colapsado persistidos en `layout.json`.
 - **Pestañas**: lista con título, indicador sucio (●), indicador de revisión (`+N −M` en pequeño), previsualización (cursiva) vs. fijada; cerrar con `Ctrl+W` pregunta si hay cambios sin guardar; clic medio cierra; reordenar arrastrando (v1 opcional).
 - **Vista previa de Markdown** (`workspace::toggle_markdown_preview`, `Ctrl+Shift+V`, solo con una pestaña de Markdown activa): alterna el cuerpo de la pestaña entre el editor de código y un renderizado del texto *actual* del buffer, reusando el renderizador del chat (`cincel_chat::markdown`) con su propio resaltado de bloques de código; se actualiza sola 150 ms después de cada cambio del buffer. El título, el punto de sucio y `Ctrl+S` siguen atados al buffer de siempre; la barra de estado muestra "Vista previa" en lugar de `Ln, Col`. Un botón con icono al final del breadcrumb hace lo mismo con el mouse. Cada pestaña recuerda si estaba en vista previa en `layout.json` y la restaura al reabrir el proyecto.
-- **Árbol**: componente árbol de `gpui-kit` alimentado por `Worktree`; iconos por tipo; colores de estado del agente (`02-visual.md §6.4`) y de git (v2); clic simple previsualiza, doble fija; menú contextual con "Revelar en carpeta", "Copiar ruta", "Copiar ruta relativa"; teclado ↑↓←→ y `Enter`.
+- **Árbol**: componente árbol de `gpui-kit` alimentado por `Worktree`; iconos por tipo; colores de estado del agente (`02-visual.md §6.4`) y de git (v2): modificado en `status.warning` con `+N −M`, creado en `status.ok` con `+N`, borrado pendiente tachado en `status.error` con `−N` y tooltip "Borrado por el agente · pendiente" (sigue en el árbol aunque el `Worktree` ya no lo liste, hasta que se decide); clic simple previsualiza, doble fija; clic en un borrado pendiente abre una pestaña de solo lectura con todo su contenido previo en rojo (una única sección de filas fantasma) y la barra flotante con "Aceptar archivo"/"Rechazar archivo" además de las del turno: aceptar cierra la pestaña, rechazar restaura el archivo y la pestaña pasa a ser un editor normal; menú contextual con "Revelar en carpeta", "Copiar ruta", "Copiar ruta relativa"; teclado ↑↓←→ y `Enter`.
 - **Barra de estado**: posición, EOL, lenguaje, chip de la conexión activa (icono del proveedor + etiqueta, o "Sin conexión"; clic abre el popover "Conectar" del chat y despliega el dock si estaba colapsado), pendientes (clic abre panel de revisión), zoom.
 - **Conexiones** (Etapa 4, `docs/specs/06-etapa4-conexiones-y-cincel.md` §1–§4, §6; motor en `modulos/connections.md`): `Agents` es dueño de `Connections` (índice, perfiles, runtime privado, adaptadores) y de `ConnectionsModal`.
   - **Al arrancar no se conecta nada**: se lee `connections.json` para llenar el popover y nada más; no se lanza ningún proceso ni se lee `~/.claude`, `~/.codex` o `~/.gemini`, y el registry ACP ya no se descarga al arrancar (solo al preparar un agente desde el modal). `connections.default_label` solo preselecciona una fila.
@@ -16,7 +16,14 @@
 - **Avisos**: cola de toasts.
 - **Comandos globales**: `workspace::open_folder`, `toggle_chat`, `toggle_tree`, `focus_chat`, `next_change`, `prev_change`, `next_file_with_changes`, `accept_turn`, `reject_turn`, `undo_last_reject`, `open_review_panel`, `zoom_*`.
 - **Keymap**: carga `keymap.json` del usuario sobre el predeterminado; formato `[{ "context": "Editor && review_hunk_under_cursor", "bindings": { "ctrl-enter": "review::accept_hunk" } }]` (mismo formato que Zed para que sea familiar).
-- **Ciclo de revisión**: al `TurnEnded`, para cada archivo tocado en el turno: releer disco, actualizar buffer, `ReviewStore::file_written`; si el archivo no estaba abierto, abrirlo en un buffer sin pestaña; actualizar árbol y barra. Al recibir `FsWrite`: `BufferStore::apply_agent_write` + `ReviewStore`. Al recibir un `tool_call` con `locations` y `kind: edit` la primera vez para un path: `capture_base` desde el buffer/disco.
+- **Ciclo de revisión** (**v2 (2026-09-28): la base viene de la foto del proyecto; las herramientas son solo una pista**; regla en `03-arquitectura.md` §4):
+  1. *Foto al empezar el turno*: `Agents` llama a `Review::begin_prompt`, que saca la foto del proyecto (`cincel_project::ProjectSnapshot::capture`, el recorrido del árbol con sus exclusiones y `files.exclude`; texto hasta `review.max_file_size_kb`; binarios con hash y bytes; por encima de `review.snapshot_max_total_mb` solo hash, y la base sale del buffer si está abierto) en el ejecutor de fondo. El prompt sale cuando la foto está lista; si tarda más de 1 s el chat muestra "Preparando la revisión…". Con `ProjectOptions::inert()` (tests) la foto es síncrona.
+  2. *Vigilancia*: `Project` emite `FilesChanged(Vec<FsEvent>)` por cada lote del watcher, para cualquier ruta del proyecto (abierta o no). Para una ruta sin seguimiento la base es la copia de la foto (`capture_base_text`; `file_created` si no existía) y luego `file_written`/`file_deleted` con el disco; renombrar = borrar + crear. Si el buffer tiene cambios sin guardar, se suman a la base (no son del agente).
+  3. *Repaso al terminar* (`end_turn`, también en `agent_gone` y al encadenar turnos): la foto entera contra el disco (tamaño/mtime; contenido si difieren o si el mtime es reciente) y se suma lo que el watcher no avisó; recién después se libera la foto.
+  4. *Atribución*: lo que Cincel escribe durante el turno (`Project::save`, nuevo archivo, rechazos) emite `HostWrote(path)` y actualiza la foto: no es del agente; `classify` sigue mandando para los buffers en seguimiento. Lo que cambian otros programas durante el turno se atribuye al agente.
+  5. *Pistas*: `FsWrite` (`BufferStore::apply_agent_write` + `ReviewStore`), `FsRead` y el primer `tool_call` edit/delete/move con `locations` capturan la base antes, como en v1; si el disco ya difiere de la foto, la base es la foto.
+  6. *Turnos encadenados*: cada turno saca su foto; lo pendiente de turnos anteriores conserva su base original.
+  7. *Binarios* (no UTF-8): "archivo binario cambiado por el agente" en el árbol y el panel, solo aceptar o rechazar el archivo entero (rechazar = restaurar los bytes de la foto); sin copia previa, solo aceptar.
 - **Diálogo de buffer sucio** antes de que el agente escriba un archivo con cambios sin guardar: Guardar / Descartar / Mantener (mantener = el agente escribe encima y el hunk incluirá tus cambios).
 
 ## Binario `cincel`
@@ -61,7 +68,10 @@ Detalle y motivos en `docs/etapas/etapa-3.md`, sección "Desviaciones":
   `ReviewStore` como `Agent`.
 - `review.max_file_size_kb`/`max_lines` se aplican en el host; no pueden
   subir los límites fijos del store (2 MB / 50 000 líneas).
-- Archivos no UTF-8 o binarios no entran en la revisión (no hay buffer).
+- ~~Archivos no UTF-8 o binarios no entran en la revisión (no hay buffer).~~
+  Desde la v2 de la revisión (2026-09-28) entran aparte del store, solo por
+  archivo: "archivo binario cambiado por el agente", rechazar = restaurar los
+  bytes de la foto.
 - `turn_active` es por archivo (el que el turno en curso está tocando).
 - El diálogo de buffer sucio siempre pregunta antes de un `FsWrite`; al
   arrancar un tool call solo si el permiso no se concedió solo (si no, se
@@ -78,10 +88,86 @@ Detalle, verificación, desviaciones y lista de comprobación manual en
   logos de marcas y el proyecto no incluye esos recursos.
 - "No se encontró un navegador" se detecta por heurística (`$BROWSER` o
   `xdg-open` en el `PATH`): `cx.open_url` no informa fallos.
-- Cerrar el modal durante "Preparando…" no corta una descarga en curso: el
-  hilo termina (las descargas son reanudables) y su resultado se descarta.
 - `AuthRequired` ya no muestra la tarjeta "Hace falta autenticarse" del
   chat: lo reemplaza el banner de sesión vencida con "Volver a conectar".
 - Detener el proceso a propósito (cambio de conexión, eliminar) ya no deja
   el aviso "El agente se cerró" en la conversación; solo la píldora pasa a
   `desconectado`.
+
+## Etapa 5: productividad
+
+Detalle, verificación, desviaciones y lista de comprobación manual en
+`docs/etapas/etapa-5.md`. Spec: `docs/specs/07-etapa5-productividad.md`.
+
+- **Foco** (`crate::focus`): `FocusZone { Chat, Center, Files }`.
+  `Workspace::toggle_focus(zone, …)` es la regla de `Ctrl+Shift+A`/
+  `Ctrl+Shift+E`: panel oculto → abrir y enfocar; panel visible con el foco
+  dentro → cerrar y devolver el foco al centro; panel visible con el foco en
+  otro lado → enfocar sin cerrar. `Workspace::focus_next_zone` (`Ctrl+L`)
+  recorre las zonas visibles Chat → Centro → Archivos → Chat, sin abrir ni
+  cerrar nada; `next_zone(current, visible)` es la función pura que decide el
+  destino. `workspace::focus_chat` se conserva registrada, sin binding por
+  defecto. `Workspace::is_modal_open` reúne todo lo que congela estos atajos.
+- **Buscador rápido de archivos** (`crate::file_finder`, `Ctrl+P`):
+  `FileFinder` (una instancia por proyecto abierto) con `rank(candidates,
+  query, recent, limit)` como función pura de coincidencia difusa
+  (`frizbee` 0.13, MIT) y desempate. Sin proyecto, toast; con el buscador
+  abierto, `Ctrl+P` lo cierra. Abre en pestaña de previsualización
+  (`CenterPanel::open_file(path, pin: false)`).
+- **Pestaña de configuración** (`crate::settings_view`, `Ctrl+,`):
+  `SettingsView`, con secciones Apariencia, Fuentes, Editor, Archivos,
+  Revisión y Conexiones. Cada control escribe con
+  `cincel_settings::write_edit` (conserva comentarios, orden y claves
+  desconocidas) y emite `SettingsViewEvent::Written`, que el workspace aplica
+  sin el toast "Configuración recargada". La sección Conexiones
+  (`crate::agents::settings_bridge::SettingsBridge`) nunca toca
+  `cincel_connections` directamente: emite eventos que `Agents` decide,
+  incluidas las actualizaciones de adaptador y de Node con `CancelToken`
+  cancelable desde el propio botón "Cancelar".
+- **Modal de atajos y botón de la barra de estado** (`crate::shortcuts_modal`,
+  `F1`): mezcla el keymap en vigor con los bindings Rust de los widgets,
+  agrupa por categoría (Generales, Editor, Revisión, Chat, Conexiones), marca
+  "Personalizado" lo que el usuario cambió en `keymap.json` y "Desactivado en
+  tu keymap.json" lo que puso en `null`.
+- **Barra de título** (`crate::title_menu`): botón de menú (Abrir carpeta,
+  Carpetas recientes, Nuevo archivo, Guardar, Guardar todo, Configuración,
+  Atajos de teclado, Conexiones, Salir) y los dos botones de mostrar/ocultar
+  chat y archivos, que llaman a la misma `Workspace::toggle_focus` que los
+  atajos. "Salir" (`Ctrl+Q`), la `×` de la barra de título y el cierre del
+  escritorio (`Alt+F4`) convergen en `Workspace::should_close` (la `×` y
+  `Alt+F4` a través de `Workspace::request_close`, que además guarda la
+  geometría; la `×` pasa por `TitleBar::on_close_window`, porque sin
+  manejador gpui-kit quita la ventana sin preguntar): primero preguntan por
+  los cambios de agente sin decidir (borrados incluidos); sin archivos sin
+  guardar cierran directo; con ellos, abren el diálogo "¿Guardar cambios?"
+  (Guardar todo y salir / Salir sin guardar / Cancelar).
+- **Nuevo archivo** (`crate::new_file`, `Ctrl+N`): campo flotante (mismo
+  estilo y posición que el buscador de archivos) que crea el archivo en disco
+  bajo la carpeta seleccionada en el árbol (o la raíz) y lo abre fijado.
+  `validate_new_file_name` es la función pura que rechaza nombres vacíos,
+  absolutos o con `..`.
+- **Git en el margen del editor**: `Project` arranca un `GitDirWatcher` junto
+  al `GitStatusWatcher` y emite `ProjectEvent::GitDiffChanged(PathBuf)`; el
+  workspace recalcula el diff de los archivos abiertos en el ejecutor de
+  fondo y llama a `EditorView::set_git_diff` (detalle del pintado en
+  `modulos/editor.md`).
+- **Autoguardado tras una pausa** (`center.rs`): con `files.autosave =
+  "after_delay"`, cada cambio del usuario reprograma un `Timer::after
+  (autosave_delay_ms)`; si el buffer sigue sucio al vencer, se guarda, salvo
+  que el archivo esté en un turno de revisión activo. Reemplaza la
+  limitación de etapas anteriores de solo autoguardar "al perder el foco".
+- **Cancelar una descarga de verdad** (`docs/specs/07-etapa5-productividad.md`
+  §10.3): "Cancelar" en "Preparando…" dispara un `CancelToken` real: la
+  descarga se corta entre lecturas de 64 KiB, se borra el `.part` y el
+  proceso de `npm install` (en su propio grupo) se mata. Reemplaza la
+  desviación de la Etapa 4 que dejaba terminar el hilo y descartaba su
+  resultado.
+- **Motivo de `AuthRequired`**: `AgentEvent::AuthRequired` trae ahora
+  `message: Option<String>` con el motivo que dio el agente (redactado y
+  recortado a 240 caracteres), que el banner de sesión vencida del chat
+  muestra como "El agente dijo: «motivo»".
+- **Botón de actualizar adaptador y Node**: la sección Conexiones de la
+  pestaña de configuración muestra "Actualizar a X.Y.Z" cuando
+  `Adapters::update_available`/`Runtime::update_available` devuelven una
+  versión nueva, con barra de progreso y "Cancelar"; `prune_unused` borra las
+  versiones que ya no se usan al arrancar y al detener un agente.

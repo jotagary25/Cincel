@@ -34,12 +34,31 @@ workspace_actions! {
     CancelClose => "cancel_close",
     /// Opens a folder as the project, through the xdg portal dialog.
     OpenFolder => "open_folder",
-    /// Shows or hides the chat dock.
+    /// `Ctrl+Shift+A`: opens and focuses the chat, closes it when the focus
+    /// is already inside, or focuses it when it is visible but the focus is
+    /// elsewhere (`docs/specs/07-etapa5-productividad.md` §7).
     ToggleChat => "toggle_chat",
-    /// Shows or hides the file tree dock.
+    /// `Ctrl+Shift+E`: the same rule for the file tree.
     ToggleTree => "toggle_tree",
-    /// Moves the focus to the chat input.
+    /// Moves the focus to the chat input, opening the chat if needed. Kept
+    /// for users who bind it; it has no default shortcut since Etapa 5 (D9).
     FocusChat => "focus_chat",
+    /// `Ctrl+L`: the focus wheel, chat → center → files → chat, over the
+    /// visible zones only (§9).
+    FocusNextZone => "focus_next_zone",
+    /// `Ctrl+P`: the quick file finder (§3, E5-F).
+    ToggleFileFinder => "toggle_file_finder",
+    /// `Ctrl+,`: the settings tab (§4, E5-G).
+    OpenSettings => "open_settings",
+    /// `F1`: the keyboard shortcuts modal (§5, E5-H).
+    ShowShortcuts => "show_shortcuts",
+    /// `Ctrl+N`: creates a file and opens it (§8.2, D6, E5-I).
+    NewFile => "new_file",
+    /// `Ctrl+Q`: quits, asking about unsaved files first (§8.2, D15, E5-I).
+    Quit => "quit",
+    /// The menu's "Conexiones": the settings tab on its Connections section
+    /// (§8.2, D7, E5-G/E5-I). No default shortcut.
+    OpenConnections => "open_connections",
     /// Closes the active tab, asking about unsaved changes.
     CloseTab => "close_tab",
     /// Toggles the active Markdown tab between the code editor and a
@@ -90,5 +109,13 @@ mod tests {
         assert_eq!(ToggleTree.name(), "workspace::toggle_tree");
         assert_eq!(ZoomReset.name(), "workspace::zoom_reset");
         assert_eq!(CopyRelativePath.name(), "workspace::copy_relative_path");
+        assert_eq!(FocusNextZone.name(), "workspace::focus_next_zone");
+        assert_eq!(ToggleFileFinder.name(), "workspace::toggle_file_finder");
+        assert_eq!(OpenSettings.name(), "workspace::open_settings");
+        assert_eq!(ShowShortcuts.name(), "workspace::show_shortcuts");
+        assert_eq!(NewFile.name(), "workspace::new_file");
+        assert_eq!(Quit.name(), "workspace::quit");
+        assert_eq!(OpenConnections.name(), "workspace::open_connections");
+        assert_eq!(FocusChat.name(), "workspace::focus_chat");
     }
 }

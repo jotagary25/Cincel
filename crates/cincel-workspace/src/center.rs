@@ -7,19 +7,25 @@
 //! close dialog, the breadcrumb, the status bar and the layout file work off
 //! [`Tab`], never off the editor.
 //!
+//! The bar can also hold one tab that is not a file: the settings tab
+//! ([`crate::settings_view::SettingsView`], `Ctrl+,`). [`CenterItem`] names
+//! either kind; saving, autosave, the dirty dot, the layout file, the review
+//! and the Markdown preview only ever walk the file tabs.
+//!
 //! A file that is not valid UTF-8 still opens, in an editor over a read-only
 //! buffer built with [`cincel_text::Buffer::from_bytes_lossy`]
 //! (`docs/specs/modulos/workspace.md`: "solo lectura").
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use cincel_editor::{EditorEvent, EditorView, ReviewAction, shared};
 use cincel_project::{BufferChange, BufferHandle, OpenError, ReloadOutcome};
 use cincel_syntax::Language;
-use cincel_text::{Buffer, LineEnding, Point};
+use cincel_text::{Buffer, BufferEvent, EditSource, LineEnding, Point, SubscriptionId};
 use gpui::{
     App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
-    MouseDownEvent, SharedString, Subscription, Window,
+    MouseDownEvent, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable as _;
@@ -34,7 +40,8 @@ use std::sync::Arc;
 use crate::layout::TabLayout;
 use crate::markdown_preview::MarkdownPreviewView;
 use crate::project::{Project, ProjectEvent};
-use crate::review::{DirtyChoice, SharedSummary, stats_label};
+use crate::review::{DirtyChoice, FileState, SharedSummary, stats_label};
+use crate::settings_view::{SettingsSection, SettingsView, SettingsViewEvent};
 use crate::theme::ThemeColors;
 
 /// The GPUI key context the tab area declares. The code editor will declare
@@ -145,8 +152,14 @@ pub struct Tab {
     pub symbol: Option<SharedString>,
     /// Whether the file was deleted behind our back.
     pub deleted: bool,
-    /// Whether the buffer refuses edits (a file that is not UTF-8).
+    /// Whether the buffer refuses edits (a file that is not UTF-8, or the
+    /// view of a deletion).
     pub read_only: bool,
+    /// The tab of a file the agent deleted, still waiting for a decision: an
+    /// empty read-only buffer out of the store, with the file's previous
+    /// content painted over it as one hunk of phantom rows
+    /// (`crate::review::Review::view_for_tab`).
+    pub deleted_review: bool,
     /// Where the cursor was before its last move: the editor moves to the
     /// next hunk of its own file before it reports `Alt+J`, and the review
     /// needs the position the jump started from.
@@ -165,6 +178,26 @@ pub struct Tab {
     markdown_preview_view: Option<Entity<MarkdownPreviewView>>,
     /// Keeps the subscription to the editor's events alive.
     _subscription: Subscription,
+    /// The raw buffer subscription that wakes `_autosave_pump` on every
+    /// `EditSource::User` edit (`docs/specs/07-etapa5-productividad.md`
+    /// §10.5, "tras N milisegundos sin escribir"); unsubscribed when the
+    /// tab closes (see `Drop` below).
+    autosave_subscription: SubscriptionId,
+    /// Kept alive for the tab's lifetime: reacts to every user edit and
+    /// reprograms `autosave_timer`.
+    _autosave_pump: Task<()>,
+    /// The pending "after_delay" autosave, if any. A fresh user edit
+    /// replaces it (`CenterPanel::reprogram_autosave`), dropping — and so
+    /// cancelling — whatever was left of the previous one: that drop *is*
+    /// the debounce. Closing the tab or turning the setting off also drops
+    /// it (the latter as a no-op check when it would have fired, §10.5).
+    autosave_timer: Option<Task<()>>,
+}
+
+impl Drop for Tab {
+    fn drop(&mut self) {
+        self.buffer.lock().unsubscribe(self.autosave_subscription);
+    }
 }
 
 impl Tab {
@@ -227,10 +260,42 @@ impl Tab {
     }
 }
 
+/// What a slot of the tab bar holds: a file, or the settings tab
+/// (`docs/specs/07-etapa5-productividad.md` §4.5).
+///
+/// File tabs keep living in their own `Vec<Tab>` (so [`CenterPanel::tabs`]
+/// is still the slice every caller indexes); the settings tab is a single
+/// extra slot at a position of the bar. This enum is the view of both that
+/// [`CenterPanel::active_item`] and [`CenterPanel::items`] give.
+#[derive(Clone, Copy)]
+pub enum CenterItem<'a> {
+    /// A file tab.
+    File(&'a Tab),
+    /// The settings tab.
+    Settings(&'a Entity<SettingsView>),
+}
+
+/// The settings tab: its view and where it sits in the bar.
+struct SettingsSlot {
+    view: Entity<SettingsView>,
+    /// How many file tabs are to its left.
+    position: usize,
+    /// Keeps the subscription to the view's events alive.
+    _subscription: Subscription,
+}
+
+/// One slot of the tab bar, in bar order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    /// Index into [`CenterPanel::tabs`].
+    File(usize),
+    Settings,
+}
+
 /// The payload of a tab being dragged, for reordering the tab bar.
 #[derive(Clone, Debug)]
 struct TabDrag {
-    /// Index the drag started from.
+    /// Slot of the bar the drag started from (files and settings alike).
     index: usize,
     /// Title, so the thing under the cursor says what it is.
     title: SharedString,
@@ -255,6 +320,15 @@ impl Render for TabDragPreview {
             .text_sm()
             .child(self.title.clone())
     }
+}
+
+/// What a new tab is built over ([`CenterPanel::load`]).
+struct LoadedFile {
+    buffer: BufferHandle,
+    language: Option<Arc<Language>>,
+    relative: PathBuf,
+    read_only: bool,
+    deleted_review: bool,
 }
 
 /// What a pending `Ctrl+W` is waiting for.
@@ -300,6 +374,10 @@ pub enum CenterEvent {
 
 impl EventEmitter<CenterEvent> for CenterPanel {}
 
+/// The settings tab's events, passed on to the workspace (all but
+/// "Abrir settings.json", which the center handles itself).
+impl EventEmitter<SettingsViewEvent> for CenterPanel {}
+
 /// The center panel: tabs, breadcrumb and the active tab's body.
 pub struct CenterPanel {
     project: Option<Entity<Project>>,
@@ -307,7 +385,14 @@ pub struct CenterPanel {
     /// dirty-buffer dialog and the autosave rule.
     review: SharedSummary,
     tabs: Vec<Tab>,
+    /// The active *file* tab. It is remembered while the settings tab is
+    /// the active one, which [`CenterPanel::active_tab`] then hides.
     active: Option<usize>,
+    /// The settings tab, when open: never more than one, never in
+    /// `layout.json` (D4).
+    settings: Option<SettingsSlot>,
+    /// Whether the settings tab is the active one.
+    settings_active: bool,
     pending_close: Option<PendingClose>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -321,16 +406,22 @@ impl CenterPanel {
             review: SharedSummary::default(),
             tabs: Vec::new(),
             active: None,
+            settings: None,
+            settings_active: false,
             pending_close: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
         })
     }
 
-    /// Shows `project`, closing every tab of the previous one.
+    /// Shows `project`, closing every tab of the previous one. The settings
+    /// tab is not the project's: it stays.
     pub fn set_project(&mut self, project: Option<Entity<Project>>, cx: &mut Context<Self>) {
         self.tabs.clear();
         self.active = None;
+        if let Some(slot) = &mut self.settings {
+            slot.position = 0;
+        }
         self.pending_close = None;
         self._subscriptions.clear();
         if let Some(project) = &project {
@@ -356,14 +447,174 @@ impl CenterPanel {
         &self.tabs
     }
 
-    /// The active tab, if any.
+    /// The active file tab, if any; `None` while the settings tab is the
+    /// active one.
     pub fn active_tab(&self) -> Option<&Tab> {
+        if self.settings_active {
+            return None;
+        }
         self.active.and_then(|index| self.tabs.get(index))
     }
 
-    /// The index of the active tab.
+    /// The index of the active file tab (`None` while the settings tab is
+    /// the active one).
     pub fn active_index(&self) -> Option<usize> {
+        if self.settings_active {
+            return None;
+        }
         self.active
+    }
+
+    /// Whatever the active slot of the bar holds.
+    pub fn active_item(&self) -> Option<CenterItem<'_>> {
+        if self.settings_active {
+            return self
+                .settings
+                .as_ref()
+                .map(|slot| CenterItem::Settings(&slot.view));
+        }
+        self.active_tab().map(CenterItem::File)
+    }
+
+    /// Every slot of the bar, in bar order.
+    pub fn items(&self) -> Vec<CenterItem<'_>> {
+        self.slots()
+            .into_iter()
+            .filter_map(|slot| match slot {
+                Slot::File(index) => self.tabs.get(index).map(CenterItem::File),
+                Slot::Settings => self
+                    .settings
+                    .as_ref()
+                    .map(|slot| CenterItem::Settings(&slot.view)),
+            })
+            .collect()
+    }
+
+    /// Whether the settings tab is the active one.
+    pub fn is_settings_active(&self) -> bool {
+        self.settings_active && self.settings.is_some()
+    }
+
+    /// The settings tab, when open.
+    pub fn settings_view(&self) -> Option<&Entity<SettingsView>> {
+        self.settings.as_ref().map(|slot| &slot.view)
+    }
+
+    /// Whether the bar has anything at all (files or settings).
+    pub fn has_items(&self) -> bool {
+        !self.tabs.is_empty() || self.settings.is_some()
+    }
+
+    /// The slots of the bar in order: the file tabs with the settings tab
+    /// at its position.
+    fn slots(&self) -> Vec<Slot> {
+        let mut slots: Vec<Slot> = (0..self.tabs.len()).map(Slot::File).collect();
+        if let Some(slot) = &self.settings {
+            slots.insert(slot.position.min(self.tabs.len()), Slot::Settings);
+        }
+        slots
+    }
+
+    /// `workspace::open_settings` (`Ctrl+,`): activates the settings tab, or
+    /// opens it pinned to the right of the active tab (§4.1). `section`
+    /// shows that section (the menu's "Conexiones", D7).
+    pub fn open_settings(
+        &mut self,
+        section: Option<SettingsSection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SettingsView> {
+        let view = match &self.settings {
+            Some(slot) => slot.view.clone(),
+            None => {
+                let view = cx.new(|cx| SettingsView::new(window, cx));
+                // Everything the tab says reaches the workspace through the
+                // center; opening `settings.json` is the center's own job.
+                let subscription = cx.subscribe_in(
+                    &view,
+                    window,
+                    |this, _, event: &SettingsViewEvent, window, cx| match event {
+                        SettingsViewEvent::OpenSettingsFile => this.open_settings_file(window, cx),
+                        other => cx.emit(other.clone()),
+                    },
+                );
+                let position = match self.active_index() {
+                    Some(active) => active + 1,
+                    None => self.tabs.len(),
+                };
+                self.settings = Some(SettingsSlot {
+                    view: view.clone(),
+                    position,
+                    _subscription: subscription,
+                });
+                tracing::debug!("pestaña de configuración abierta");
+                view
+            }
+        };
+        if let Some(section) = section {
+            view.update(cx, |view, cx| view.set_section(section, window, cx));
+        }
+        self.activate_settings(window, cx);
+        view
+    }
+
+    /// Makes the settings tab the active one.
+    pub fn activate_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_none() {
+            return;
+        }
+        if !self.settings_active {
+            // Leaving a file tab is a focus change (`files.autosave`).
+            self.autosave(window, cx);
+        }
+        self.settings_active = true;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the settings tab. Nothing to ask: every change is saved as it
+    /// happens. The neighbour on its right (or left) becomes active.
+    pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slot) = self.settings.take() else {
+            return;
+        };
+        if self.settings_active {
+            self.settings_active = false;
+            self.active = if self.tabs.is_empty() {
+                None
+            } else {
+                Some(slot.position.min(self.tabs.len() - 1))
+            };
+        }
+        tracing::debug!("pestaña de configuración cerrada");
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// "Abrir settings.json" of the settings tab: a pinned tab over the
+    /// file, created with `{}` when it does not exist. Without a project
+    /// there is no tab to open it in, so the desktop opens it.
+    fn open_settings_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(paths) = cx
+            .try_global::<crate::settings::AppSettings>()
+            .and_then(|state| state.config.paths.clone())
+        else {
+            crate::toast::warn("No se encontró la carpeta de configuración", cx);
+            return;
+        };
+        if !paths.settings.exists() {
+            let created = std::fs::create_dir_all(&paths.config_dir)
+                .and_then(|()| std::fs::write(&paths.settings, "{}\n"));
+            if let Err(error) = created {
+                crate::toast::error(format!("No se pudo crear settings.json: {error}"), cx);
+                return;
+            }
+        }
+        if self.project.is_some() {
+            self.open_file(&paths.settings, true, window, cx);
+        } else {
+            cx.open_with_system(&paths.settings);
+        }
     }
 
     /// Opens `path` (absolute), previewing it or pinning it.
@@ -402,32 +653,202 @@ impl CenterPanel {
             return;
         }
 
+        // A file the agent deleted, still waiting for a decision, is never
+        // read from the disk (it is not there): its tab is a read-only view
+        // of what it held (`crate::review::Review::view_for_tab`).
+        let deleted_review = self.is_pending_deletion(path);
+        let Some(loaded) = self.load(path, deleted_review, &project, cx) else {
+            return;
+        };
+        let tab = self.build_tab(path, loaded, &project, !pin, position, window, cx);
+
+        // A preview takes the place of the previous preview.
+        let index = match self.tabs.iter().position(|tab| tab.preview) {
+            Some(index) if !pin => {
+                let left_of_settings = self
+                    .settings
+                    .as_ref()
+                    .is_some_and(|slot| index < slot.position);
+                self.close_without_asking(index, window, cx);
+                let index = index.min(self.tabs.len());
+                self.tabs.insert(index, tab);
+                // Same slot of the bar as the preview it replaces.
+                if left_of_settings && let Some(slot) = &mut self.settings {
+                    slot.position += 1;
+                }
+                index
+            }
+            // New tabs go to the far right, past the settings tab too.
+            _ => {
+                self.tabs.push(tab);
+                self.tabs.len() - 1
+            }
+        };
+        self.activate(index, window, cx);
+        cx.emit(CenterEvent::TabOpened {
+            path: path.to_path_buf(),
+        });
+    }
+
+    /// Whether the review has `path` as a deletion of the agent still
+    /// waiting for a decision.
+    fn is_pending_deletion(&self, path: &Path) -> bool {
+        self.review
+            .borrow()
+            .file(path)
+            .is_some_and(|file| file.state == FileState::Deleted)
+    }
+
+    /// The buffer a new tab of `path` shows: the store's, a read-only copy
+    /// of a file that is not UTF-8, or — for a pending deletion — an empty
+    /// read-only buffer the review paints the old content over. `None`
+    /// after reporting why it could not be opened.
+    fn load(
+        &self,
+        path: &Path,
+        deleted_review: bool,
+        project: &Entity<Project>,
+        cx: &mut Context<Self>,
+    ) -> Option<LoadedFile> {
+        if deleted_review {
+            let (mut buffer, _had_bom) = Buffer::from_bytes_lossy(b"");
+            buffer.set_read_only(true);
+            let (language, relative) = project.read_with(cx, |project, _| {
+                (project.language_for(path), project.relative(path))
+            });
+            return Some(LoadedFile {
+                buffer: shared(buffer),
+                language,
+                relative,
+                read_only: true,
+                deleted_review: true,
+            });
+        }
         let opened = project.update(cx, |project, cx| {
             project
                 .open_buffer(path, cx)
                 .map(|buffer| (buffer, project.language_for(path), project.relative(path)))
         });
-        let (buffer, language, relative, read_only) = match opened {
-            Ok((buffer, language, relative)) => (buffer, language, relative, false),
+        match opened {
+            Ok((buffer, language, relative)) => Some(LoadedFile {
+                buffer,
+                language,
+                relative,
+                read_only: false,
+                deleted_review: false,
+            }),
             // A file that is not UTF-8 still opens, read only, out of the
             // store (`docs/specs/modulos/workspace.md`).
             Err(OpenError::NotUtf8(_)) => {
-                let Some(buffer) = read_only_buffer(path, cx) else {
-                    return;
-                };
+                let buffer = read_only_buffer(path, cx)?;
                 crate::toast::warn("Archivo abierto en solo lectura: contenido no UTF-8", cx);
                 let (language, relative) = project.read_with(cx, |project, _| {
                     (project.language_for(path), project.relative(path))
                 });
-                (buffer, language, relative, true)
+                Some(LoadedFile {
+                    buffer,
+                    language,
+                    relative,
+                    read_only: true,
+                    deleted_review: false,
+                })
             }
             Err(error) => {
                 report_open_error(&error, cx);
-                return;
+                None
             }
-        };
+        }
+    }
 
-        let content = TabContent::build(&buffer, language.clone(), &project, position, window, cx);
+    /// Whether some tab no longer matches the review: a clean tab of a file
+    /// the agent deleted that still shows the editor, or the read-only tab
+    /// of a deletion that was decided since.
+    pub fn deleted_reviews_out_of_sync(&self, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| self.deleted_review_mismatch(tab, cx))
+    }
+
+    fn deleted_review_mismatch(&self, tab: &Tab, cx: &App) -> bool {
+        let pending = self.is_pending_deletion(&tab.path);
+        if tab.deleted_review {
+            !pending
+        } else {
+            // Unsaved changes are never thrown away for the review.
+            pending && (tab.read_only || !tab.editor().read(cx).is_dirty())
+        }
+    }
+
+    /// Brings the tabs in line with the review's deletions
+    /// (`crate::review::Review` asks for it after every refresh that needs
+    /// it): an accepted deletion closes its tab, a rejected one turns the tab
+    /// into a normal editor of the restored file, and a clean tab of a file
+    /// the agent just deleted becomes the read-only view of the deletion.
+    pub fn sync_deleted_reviews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let stale: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| self.deleted_review_mismatch(tab, cx))
+            .map(|tab| tab.path.clone())
+            .collect();
+        for path in stale {
+            let Some(index) = self.tabs.iter().position(|tab| tab.path == path) else {
+                continue;
+            };
+            let pending = self.is_pending_deletion(&path);
+            if !pending && !path.is_file() {
+                // Accepted: the file is gone for good, and so is its tab.
+                self.close_without_asking(index, window, cx);
+                continue;
+            }
+            let Some(loaded) = self.load(&path, pending, &project, cx) else {
+                continue;
+            };
+            let (preview, had_focus) = {
+                let old = &self.tabs[index];
+                let focus = old.editor().read(cx).focus_handle(cx);
+                (old.preview, focus.is_focused(window))
+            };
+            let tab = self.build_tab(&path, loaded, &project, preview, None, window, cx);
+            self.tabs[index] = tab;
+            if had_focus && self.active_index() == Some(index) {
+                self.focus_active(window, cx);
+            }
+            tracing::debug!(path = %path.display(), pending, "pestaña de borrado actualizada");
+            cx.emit(CenterEvent::TabOpened { path });
+        }
+        cx.notify();
+    }
+
+    /// A tab over `loaded`, with its editor, its subscriptions and its
+    /// autosave pump; the caller puts it in the bar.
+    #[allow(clippy::too_many_arguments)]
+    fn build_tab(
+        &mut self,
+        path: &Path,
+        loaded: LoadedFile,
+        project: &Entity<Project>,
+        preview: bool,
+        position: Option<SavedPosition>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Tab {
+        let LoadedFile {
+            buffer,
+            language,
+            relative,
+            read_only,
+            deleted_review,
+        } = loaded;
+        let content = TabContent::build(&buffer, language.clone(), project, position, window, cx);
+        if deleted_review {
+            content
+                .editor()
+                .update(cx, |editor, cx| editor.set_read_only(true, cx));
+        }
         let editor = content.editor().clone();
         let subscription = cx.subscribe_in(&editor, window, {
             let path = path.to_path_buf();
@@ -435,7 +856,37 @@ impl CenterPanel {
                 this.on_editor_event(&path, editor, event, window, cx);
             }
         });
-        let tab = Tab {
+        // `files.autosave = "after_delay"` (`docs/specs/07-etapa5-…md`
+        // §10.5): the raw buffer subscription is the only signal that
+        // fires on *every* edit (`EditorEvent::DirtyChanged` only fires on
+        // the clean/dirty transition, which cannot "reprogram" a delay on
+        // each keystroke). Its callback must be `Send` and cannot reach
+        // `Context`, so it only wakes a small channel; a pump task drains
+        // it and reprograms the timer from inside a proper `Context`
+        // (the same shape `Review`'s own buffer subscriptions use).
+        let (autosave_wake_tx, autosave_woken) = async_channel::bounded::<()>(1);
+        let autosave_subscription = buffer.lock().subscribe(Box::new(move |event| {
+            let BufferEvent::Edited { source, .. } = event;
+            if *source == EditSource::User {
+                let _ = autosave_wake_tx.try_send(());
+            }
+        }));
+        let autosave_pump = cx.spawn_in(window, {
+            let path = path.to_path_buf();
+            async move |this, cx| {
+                while autosave_woken.recv().await.is_ok() {
+                    let alive = this
+                        .update_in(cx, |center, window, cx| {
+                            center.reprogram_autosave(&path, window, cx);
+                        })
+                        .is_ok();
+                    if !alive {
+                        break;
+                    }
+                }
+            }
+        });
+        Tab {
             path: path.to_path_buf(),
             title: SharedString::from(
                 relative
@@ -444,33 +895,24 @@ impl CenterPanel {
                     .unwrap_or_else(|| relative.display().to_string()),
             ),
             relative,
-            preview: !pin,
+            preview,
             scroll: position.map(|position| position.scroll).unwrap_or(0.),
             cursor: position.map(|position| position.cursor).unwrap_or_default(),
             symbol: None,
-            deleted: false,
+            // The title says "(eliminado)" while the deletion is pending.
+            deleted: deleted_review,
             read_only,
+            deleted_review,
             cursor_before: None,
             buffer,
             language,
             content,
             markdown_preview_view: None,
             _subscription: subscription,
-        };
-
-        // A preview takes the place of the previous preview.
-        let index = match self.tabs.iter().position(|tab| tab.preview) {
-            Some(index) if !pin => {
-                self.close_without_asking(index, window, cx);
-                index.min(self.tabs.len())
-            }
-            _ => self.tabs.len(),
-        };
-        self.tabs.insert(index, tab);
-        self.activate(index, window, cx);
-        cx.emit(CenterEvent::TabOpened {
-            path: path.to_path_buf(),
-        });
+            autosave_subscription,
+            _autosave_pump: autosave_pump,
+            autosave_timer: None,
+        }
     }
 
     /// What the editor of `path` has to say.
@@ -614,6 +1056,27 @@ impl CenterPanel {
         }
     }
 
+    /// How many open files have unsaved changes, for `workspace::quit` and
+    /// the window's `×` (`crate::title_menu`, §8.2, D15).
+    pub fn dirty_count(&self, cx: &App) -> usize {
+        self.dirty_paths(cx).len()
+    }
+
+    /// "Guardar todo y salir" (`crate::title_menu`, §8.2): like `save_all`,
+    /// but reports whether *every* dirty file actually saved, so the quit
+    /// dialog can stay open (with the error `save_path` already toasted)
+    /// instead of letting the window close underneath a failed save.
+    pub fn save_all_for_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let dirty = self.dirty_paths(cx);
+        let mut all_saved = true;
+        for path in dirty {
+            if !self.save_path(&path, None, window, cx) {
+                all_saved = false;
+            }
+        }
+        all_saved
+    }
+
     /// Saves everything that is dirty, for `files.autosave = "on_focus_change"`.
     ///
     /// While an agent turn runs, files in review are left alone
@@ -635,6 +1098,61 @@ impl CenterPanel {
             }
             self.save_path(&path, None, window, cx);
         }
+    }
+
+    /// Replaces `path`'s pending "after_delay" autosave with a fresh one,
+    /// due `autosave_delay_ms` from now (`docs/specs/07-etapa5-…md` §10.5).
+    /// Called on every `EditSource::User` edit (via the tab's buffer
+    /// subscription): a new edit before the old delay was up simply
+    /// overwrites `autosave_timer`, dropping — and so cancelling — the
+    /// stale one. That is the entire "postpone" rule; no counter needed.
+    fn reprogram_autosave(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let delay_ms = crate::settings::settings(cx).files.autosave_delay_ms;
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.path == path) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        tab.autosave_timer = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(delay_ms))
+                .await;
+            let _ = this.update_in(cx, |center, window, cx| {
+                center.autosave_after_delay(&path, window, cx);
+            });
+        }));
+    }
+
+    /// What `reprogram_autosave`'s timer does once its delay elapses
+    /// undisturbed (`docs/specs/07-etapa5-productividad.md` §10.5).
+    fn autosave_after_delay(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        // The setting changed away from "after_delay" (or off) while this
+        // was pending: a no-op, not a surprise save. Closing the tab
+        // cancels the timer outright (`Tab`'s `Drop`); this covers turning
+        // the setting off (or changing the delay) without touching every
+        // open tab the moment settings reload.
+        if crate::settings::settings(cx).files.autosave != cincel_settings::Autosave::AfterDelay {
+            return;
+        }
+        let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) else {
+            return;
+        };
+        if tab.read_only || !tab.editor().read(cx).is_dirty() {
+            return;
+        }
+        let (turn_active, tracked) = {
+            let review = self.review.borrow();
+            (review.turn_active, review.tracked.clone())
+        };
+        if turn_active && tracked.contains(&path.to_path_buf()) {
+            // Same rule as `on_focus_change`: retried once the turn ends.
+            // Nothing here observes the turn ending directly, so this
+            // polls by rescheduling for another `autosave_delay_ms`,
+            // exactly like the timer that just fired.
+            tracing::debug!(path = %path.display(), "autoguardado tras pausa pospuesto: el agente está editando");
+            self.reprogram_autosave(path, window, cx);
+            return;
+        }
+        self.save_path(path, None, window, cx);
     }
 
     /// The open files with unsaved changes.
@@ -708,7 +1226,7 @@ impl CenterPanel {
     /// tab between the code editor and a rendered preview of the same buffer.
     /// A no-op on anything that is not a Markdown tab, and on no tab at all.
     pub fn toggle_markdown_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.active else {
+        let Some(index) = self.active_index() else {
             return;
         };
         self.toggle_markdown_preview_at(index, window, cx);
@@ -939,6 +1457,42 @@ impl CenterPanel {
         cx.notify();
     }
 
+    /// Moves the slot `from` of the bar to `to`, the settings tab included
+    /// (dropping a dragged tab). Without the settings tab this is
+    /// [`CenterPanel::move_tab`].
+    pub fn move_item(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if self.settings.is_none() {
+            self.move_tab(from, to, cx);
+            return;
+        }
+        let mut slots = self.slots();
+        if from == to || from >= slots.len() || to >= slots.len() {
+            return;
+        }
+        let moved = slots.remove(from);
+        slots.insert(to, moved);
+        let active = self.active;
+        let mut old: Vec<Option<Tab>> = self.tabs.drain(..).map(Some).collect();
+        let mut position = 0;
+        for slot in &slots {
+            match slot {
+                Slot::File(index) => {
+                    if active == Some(*index) {
+                        self.active = Some(self.tabs.len());
+                    }
+                    if let Some(tab) = old[*index].take() {
+                        self.tabs.push(tab);
+                    }
+                }
+                Slot::Settings => position = self.tabs.len(),
+            }
+        }
+        if let Some(slot) = &mut self.settings {
+            slot.position = position;
+        }
+        cx.notify();
+    }
+
     /// Makes the tab at `index` the active one and puts the cursor in it.
     ///
     /// Leaving a tab is a focus change, so `files.autosave` fires here too.
@@ -946,21 +1500,34 @@ impl CenterPanel {
         if index >= self.tabs.len() {
             return;
         }
-        if self.active != Some(index) {
+        if self.active != Some(index) || self.settings_active {
             self.autosave(window, cx);
         }
         self.active = Some(index);
+        self.settings_active = false;
         self.focus_active(window, cx);
         cx.notify();
     }
 
-    /// Gives the keyboard to the editor of the active tab.
+    /// Gives the keyboard to the active tab (§7.3): the settings view, the
+    /// Markdown preview of a tab showing it, or the tab's editor; the panel
+    /// itself without tabs.
     pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_active
+            && let Some(slot) = &self.settings
+        {
+            let handle = slot.view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            return;
+        }
         let Some(tab) = self.active_tab() else {
             window.focus(&self.focus_handle, cx);
             return;
         };
-        let handle = tab.editor().read(cx).focus_handle(cx);
+        let handle = match &tab.content {
+            TabContent::MarkdownPreview(_, preview) => preview.read(cx).focus_handle(cx),
+            TabContent::Editor(editor) => editor.read(cx).focus_handle(cx),
+        };
         window.focus(&handle, cx);
     }
 
@@ -987,8 +1554,13 @@ impl CenterPanel {
         self.close_without_asking(index, window, cx);
     }
 
-    /// Closes the active tab (`workspace::close_tab`).
+    /// Closes the active tab (`workspace::close_tab`), the settings tab
+    /// included.
     pub fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_settings_active() {
+            self.close_settings(window, cx);
+            return;
+        }
         if let Some(index) = self.active {
             self.close_tab(index, window, cx);
         }
@@ -999,6 +1571,11 @@ impl CenterPanel {
             return;
         }
         let tab = self.tabs.remove(index);
+        if let Some(slot) = &mut self.settings
+            && index < slot.position
+        {
+            slot.position -= 1;
+        }
         // A file in review keeps its buffer: the review listens to it and
         // shows it again the moment a tab opens it.
         if let Some(project) = &self.project
@@ -1015,6 +1592,10 @@ impl CenterPanel {
             Some(active) if active == index => Some(active.min(self.tabs.len() - 1)),
             other => other,
         };
+        // The last file tab is gone but the settings tab is still there.
+        if self.active.is_none() && self.settings.is_some() {
+            self.settings_active = true;
+        }
         // The closed view had the keyboard; without this the focus stays on a
         // view that is gone, the `Editor`/`Center` contexts stop matching and
         // the next `Ctrl+W` does nothing. With no tabs left the panel itself
@@ -1078,7 +1659,9 @@ impl CenterPanel {
         self.save_and_close(window, cx);
     }
 
-    /// The tabs as the layout file stores them.
+    /// The tabs as the layout file stores them: file tabs only, since the
+    /// settings tab is never restored (D4); with it active, the file tab
+    /// that was active before it.
     pub fn to_layout(&self) -> (Vec<TabLayout>, Option<usize>) {
         (self.tabs.iter().map(Tab::to_layout).collect(), self.active)
     }
@@ -1169,74 +1752,160 @@ impl CenterPanel {
             .bg(theme.bg_app)
             .border_b_1()
             .border_color(theme.border)
-            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
-                let active = self.active == Some(index);
-                let is_dirty = dirty[index];
-                h_flex()
-                    .id(("tab", index))
-                    .h_full()
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .cursor_pointer()
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .bg(if active {
-                        theme.bg_elevated
-                    } else {
-                        theme.bg_surface
-                    })
-                    .text_color(if active { theme.text } else { theme.text_muted })
-                    .when(tab.preview, |this| this.italic())
-                    .when(active, |this| this.font_weight(FontWeight::MEDIUM))
-                    .child(tab.display_title())
-                    // The review counter, small and muted
-                    // (`docs/specs/modulos/workspace.md`, "Pestañas").
-                    .children(stats[index].clone().map(|label| {
-                        div()
-                            .text_size(px(11. * scale))
-                            .text_color(theme.text_muted)
-                            .child(label)
-                    }))
-                    .child(
-                        div()
-                            .id(("tab-close", index))
-                            .w(px(14. * scale))
-                            .text_color(theme.text_muted)
+            .children(
+                self.slots()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(slot_index, slot)| {
+                        let index = match slot {
+                            Slot::File(index) => index,
+                            Slot::Settings => {
+                                return self
+                                    .render_settings_tab(slot_index, &theme, scale, cx)
+                                    .into_any_element();
+                            }
+                        };
+                        let tab = &self.tabs[index];
+                        let active = self.active_index() == Some(index);
+                        let is_dirty = dirty[index];
+                        h_flex()
+                            .id(("tab", index))
+                            .h_full()
+                            .px_3()
+                            .gap_2()
+                            .items_center()
                             .cursor_pointer()
-                            .hover(|style| style.text_color(theme.text))
-                            .child(if is_dirty {
-                                SharedString::from("●")
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .bg(if active {
+                                theme.bg_elevated
                             } else {
-                                SharedString::from("×")
+                                theme.bg_surface
                             })
+                            .text_color(if active { theme.text } else { theme.text_muted })
+                            .when(tab.preview, |this| this.italic())
+                            .when(active, |this| this.font_weight(FontWeight::MEDIUM))
+                            .child(tab.display_title())
+                            // The review counter, small and muted
+                            // (`docs/specs/modulos/workspace.md`, "Pestañas").
+                            .children(stats[index].clone().map(|label| {
+                                div()
+                                    .text_size(px(11. * scale))
+                                    .text_color(theme.text_muted)
+                                    .child(label)
+                            }))
+                            .child(
+                                div()
+                                    .id(("tab-close", index))
+                                    .w(px(14. * scale))
+                                    .text_color(theme.text_muted)
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(theme.text))
+                                    .child(if is_dirty {
+                                        SharedString::from("●")
+                                    } else {
+                                        SharedString::from("×")
+                                    })
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            this.close_tab(index, window, cx);
+                                        },
+                                    )),
+                            )
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.close_tab(index, window, cx);
-                            })),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.activate(index, window, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                            this.close_tab(index, window, cx);
-                        }),
-                    )
-                    .on_drag(
-                        TabDrag {
-                            index,
-                            title: tab.title.clone(),
-                        },
-                        |drag, _, _, cx| {
-                            let title = drag.title.clone();
-                            cx.new(|_| TabDragPreview { title })
-                        },
-                    )
-                    .drag_over::<TabDrag>(move |style, _, _, _| style.bg(theme.bg_elevated))
-                    .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
-                        this.move_tab(drag.index, index, cx);
-                    }))
+                                this.activate(index, window, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Middle,
+                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                    this.close_tab(index, window, cx);
+                                }),
+                            )
+                            .on_drag(
+                                TabDrag {
+                                    index: slot_index,
+                                    title: tab.title.clone(),
+                                },
+                                |drag, _, _, cx| {
+                                    let title = drag.title.clone();
+                                    cx.new(|_| TabDragPreview { title })
+                                },
+                            )
+                            .drag_over::<TabDrag>(move |style, _, _, _| style.bg(theme.bg_elevated))
+                            .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
+                                this.move_item(drag.index, slot_index, cx);
+                            }))
+                            .into_any_element()
+                    }),
+            )
+    }
+
+    /// The settings tab of the bar: "Configuración" with the settings icon,
+    /// never a dirty dot (every change is saved at once, §4.1).
+    fn render_settings_tab(
+        &self,
+        slot_index: usize,
+        theme: &ThemeColors,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active = self.settings_active;
+        let hover_bg = theme.bg_elevated;
+        let text = theme.text;
+        h_flex()
+            .id("tab-settings")
+            .debug_selector(|| "tab-settings".to_string())
+            .h_full()
+            .px_3()
+            .gap_2()
+            .items_center()
+            .cursor_pointer()
+            .border_r_1()
+            .border_color(theme.border)
+            .bg(if active {
+                theme.bg_elevated
+            } else {
+                theme.bg_surface
+            })
+            .text_color(if active { theme.text } else { theme.text_muted })
+            .when(active, |this| this.font_weight(FontWeight::MEDIUM))
+            .child(div().text_size(px(14. * scale)).child(IconName::Settings))
+            .child(crate::settings_view::TAB_TITLE)
+            .child(
+                div()
+                    .id("tab-settings-close")
+                    .w(px(14. * scale))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(text))
+                    .child("×")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.close_settings(window, cx);
+                    })),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.activate_settings(window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.close_settings(window, cx);
+                }),
+            )
+            .on_drag(
+                TabDrag {
+                    index: slot_index,
+                    title: SharedString::from(crate::settings_view::TAB_TITLE),
+                },
+                |drag, _, _, cx| {
+                    let title = drag.title.clone();
+                    cx.new(|_| TabDragPreview { title })
+                },
+            )
+            .drag_over::<TabDrag>(move |style, _, _, _| style.bg(hover_bg))
+            .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
+                this.move_item(drag.index, slot_index, cx);
             }))
     }
 
@@ -1574,8 +2243,9 @@ impl Panel for CenterPanel {
 impl Render for CenterPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ThemeColors::global(cx).clone();
-        let body = match self.active_tab() {
-            Some(tab) => tab.content.render(),
+        let body = match self.active_item() {
+            Some(CenterItem::Settings(view)) => view.clone().into_any_element(),
+            Some(CenterItem::File(tab)) => tab.content.render(),
             None => div()
                 .flex_1()
                 .min_h_0()
@@ -1612,10 +2282,11 @@ impl Render for CenterPanel {
             .bg(theme.bg_editor)
             .border_t_1()
             .border_color(theme.border)
-            .when(!self.tabs.is_empty(), |this| {
-                this.child(self.render_tabs(cx)).child(
+            .when(self.has_items(), |this| {
+                this.child(self.render_tabs(cx)).when(
                     // The breadcrumb only makes sense with a file open.
-                    self.render_breadcrumb(cx),
+                    !self.is_settings_active(),
+                    |this| this.child(self.render_breadcrumb(cx)),
                 )
             })
             .child(

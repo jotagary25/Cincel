@@ -25,36 +25,73 @@ pub mod agents;
 pub mod center;
 pub mod connection_modal;
 pub mod conversations;
+pub mod file_finder;
+pub mod focus;
 pub mod keymap;
 pub mod layout;
 pub mod markdown_preview;
+pub mod new_file;
 pub mod panels;
 pub mod project;
 pub mod review;
+pub mod review_close;
 pub mod settings;
+pub mod settings_view;
+pub mod shortcuts_modal;
 pub mod theme;
+pub mod title_menu;
 pub mod toast;
 pub mod tree_panel;
 pub mod window_state;
 pub mod workspace;
 
 #[cfg(all(test, feature = "test-support"))]
+mod appearance_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod autosave_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod connection_cancel_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod deleted_file_review_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod file_finder_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod first_open_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod git_gutter_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod modal_scroll_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod pending_review_close_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod review_counter_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod review_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod settings_view_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod shortcuts_modal_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod snapshot_review_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod test_support;
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
+#[cfg(all(test, feature = "test-support"))]
+mod title_bar_tests;
 
 pub use agents::Agents;
-pub use center::{CenterPanel, Tab, TabContent};
+pub use center::{CenterItem, CenterPanel, Tab, TabContent};
 pub use connection_modal::{ConnectionsModal, ModalEvent};
 pub use conversations::{ConversationStore, IndexEntry};
+pub use focus::{FocusZone, VisibleZones, next_zone};
 pub use layout::WorkspaceLayout;
 pub use markdown_preview::MarkdownPreviewView;
 pub use panels::ChatDock;
 pub use project::{Project, ProjectEvent};
 pub use review::{DirtyChoice, Review, ReviewSummary};
 pub use settings::AppSettings;
+pub use settings_view::{SettingsSection, SettingsView, SettingsViewEvent};
 pub use theme::{SyntaxColors, ThemeColors, Typography};
 pub use toast::{ToastKind, Toasts};
 pub use tree_panel::FilesPanel;

@@ -32,7 +32,7 @@ connections.disconnect(Uuid) -> Result<DisconnectReport>               // F3
 ```
 
 ### Índice (`ConnectionStore`)
-`Connection { id: Uuid, agent_id, label, identity: Option<Identity { email, plan, organization }>, created_at, last_used_at }` (segundos Unix). Métodos: `list` (más reciente primero), `get`, `create_pending(agent_id) -> PendingConnection { id, kind, profile }` (crea y siembra el perfil, **no** lo indexa), `finalize(&pending, label, identity)`, `discard_pending(id)`, `rename`, `touch`, `set_identity`, `delete` (borra perfil validado + índice), `profile_dir`, `profile`. Helpers: `suggest_label(kind, &existing)` → `"Claude · personal"` (`… 2` si está tomada), `Identity::summary()` → `"gary@… · Max"`.
+`Connection { id: Uuid, agent_id, label, identity: Option<Identity { email, plan, organization }>, created_at, last_used_at }` (segundos Unix). Métodos: `list` (más reciente primero), `get`, `create_pending(agent_id) -> PendingConnection { id, kind, profile }` (crea y siembra el perfil, **no** lo indexa), `finalize(&pending, label, identity)`, `discard_pending(id)`, `rename`, `touch`, `set_identity`, `delete` (borra perfil validado + índice), `profile_dir`, `profile`. Helpers: `suggest_label(kind, &existing)` → `"Claude · personal"` (`… 2` si está tomada), `Identity::summary()` → `"ana@… · Max"`.
 
 ### Perfil (`Profile`, `AgentKind`)
 `AgentKind::{Claude, Codex, Antigravity}` ↔ `"claude-acp" | "codex-acp" | "antigravity-acp"`; `source()` (`AdapterSource::Npm { package, command }` o `Binary`), `npm_package()`, `needs_node()`, `display_name()` (`"Antigravity"`, para etiquetas), `full_name()` (`"Google Antigravity"`), `description()`, `profile_var()` (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_HOME`), `login_method()` (`LoginMethod::Pty` o `AcpAuthenticate("oauth-personal")`), `login_needs_code()` (solo Claude). `RETIRED_AGENTS`/`retired_reason("gemini")`: el motivo que muestra una conexión vieja de Gemini. `Profile::process_env(node_bin)` → `ProcessEnv` con la variable de perfil, `STRIPPED_VARIABLES` quitadas (incluye los prefijos `GOOGLE_*`, `GEMINI_*`, `CLOUDSDK_*`, `GCLOUD_*`, `ANTIGRAVITY_*`, `AGY_*`; el `GEMINI_HOME` propio se pone después de quitar), `BROWSER=/bin/true` para Antigravity y el `bin/` del Node privado al frente del `PATH` (solo npm). `seed()`: Codex `config.toml` con `cli_auth_credentials_store = "file"`; Claude y Antigravity nada (Antigravity guarda `auth.type` en `antigravity-acp/settings.json` al autenticarse; sembrarlo antes haría que `session/new` abra un login en el navegador en vez de responder `auth_required`). `credentials_file()` (`.credentials.json`, `auth.json`, `antigravity-acp/acp_token.json`), `has_credentials()`, `clear_credentials()`, `offline_identity()` (Antigravity: campo `email` del token si existiera; el token real de 1.2.1 no lo trae).
@@ -97,6 +97,44 @@ F1 (activar): `agent_launch(&conn)` → `AgentConnection::start_with_env(raíz_d
 F3 (eliminar): `disconnect(id)` → `DisconnectReport { logout: LoggedOut | NotSupported | Skipped(_) | Failed(_), process_stopped, profile_removed, index_removed, profile_error }`; borrar las conversaciones de la conexión es del chat. Antigravity anuncia `logout` (borra su token) → `LoggedOut`; el modal agrega "Para revocar el acceso, hacelo desde tu cuenta de Google". Una conexión vieja de Gemini → `NotSupported` sin lanzar nada.
 F4 (sesión vencida): `status == SessionExpired` → `start_relogin(id)`; al `Completed`, `store().set_identity(id, identity)`.
 F5 (no disponible): `status == Unavailable` → **Reparar** = `prepare(Some(&registry), kind, cb)` (no toca credenciales).
+
+## Etapa 5: cancelar de verdad y actualizar adaptador/Node
+
+Detalle, verificación y desviaciones en `docs/etapas/etapa-5.md`. Spec:
+`docs/specs/07-etapa5-productividad.md` §10.3 y §10.4.
+
+- **`CancelToken`** (`cancel.rs`, `Arc<AtomicBool>`): `new`, `cancel`,
+  `is_cancelled`, `check` (`Err(Cancelled)` una vez cancelado), `sleep`
+  (duerme en tramos de 50 ms, cancelable). `CancelReader`/`CancelWriter`
+  fallan con un error de E/S una vez cancelado, así que `io::copy` de una
+  entrada de archivo se corta a mitad. Toda la cadena de preparación pasa a
+  recibir `&CancelToken`: `Connections::prepare`, `Runtime::ensure`,
+  `Adapters::ensure`, `install`, `install_binary`,
+  `PackageInstaller::install`. Los bucles de descarga (`runtime.rs`,
+  `adapters.rs`) revisan el token cada 64 KiB, entre reintentos y antes de
+  verificar/descomprimir; al cancelar se suelta la respuesta, se borra el
+  `.part` y el directorio de staging. `npm install` corre en su propio grupo
+  de procesos (`rustix`), con un hilo que lo espera y otro que revisa el
+  token cada 100 ms; cancelar mata el grupo. `WorkLock::acquire(key, token)`
+  serializa dos preparaciones del mismo recurso compartido (una segunda
+  espera, cancelablemente, a que la primera termine de limpiar).
+- **`Adapters::update(registry, kind, node, progress, &CancelToken) ->
+  Result<AdapterInstall>`**: instala la versión del registry en staging y
+  hace `commit(keep: Option<&str>)`, que no borra la versión en uso por una
+  conexión activa (D13). `Adapters::prune_unused(in_use: &[(&str, &str)])`
+  borra lo que no es `current` ni está en uso; lo llama el workspace al
+  arrancar (antes de lanzar nada) y al detener una conexión o terminar una
+  actualización.
+- **`Runtime::update_available() -> Result<Option<String>>`** resuelve
+  contra `index.json` según `connections.runtime.node_version` (`"lts"` → la
+  LTS más nueva ≥ 22; un mayor como `"22"` → la más nueva de esa línea; una
+  versión completa nunca ofrece actualización). `Runtime::update(progress,
+  &CancelToken) -> Result<NodePaths>` descarga, verifica, instala y mueve
+  `current`; la versión anterior se conserva hasta `Runtime::prune_old()` en
+  el próximo arranque.
+- Reemplaza la deuda de la Etapa 4 "cerrar el modal durante «Preparando…» no
+  corta una descarga en curso" y el deseo "botón Actualizar cuando el
+  registry publica una versión más nueva".
 
 ## Seguridad
 - El índice nunca guarda credenciales (test `index_never_contains_credentials`).

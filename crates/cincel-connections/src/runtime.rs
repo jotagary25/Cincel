@@ -6,6 +6,14 @@
 //!
 //! Network access goes through the [`Downloader`] trait so tests can serve
 //! `index.json`, `SHASUMS256.txt` and the archive from memory.
+//!
+//! Etapa 5 (`docs/specs/07-etapa5-productividad.md` §10.3, §10.4): every
+//! download takes a [`CancelToken`] (checked before each 64 KiB read, between
+//! retries and while unpacking; a cancelled run leaves no `.part`, no
+//! decompressed tarball and no staging directory), and
+//! [`Runtime::update_available`] / [`Runtime::update`] /
+//! [`Runtime::prune_old`] follow the settings' version policy
+//! ([`NodeVersion`]) without removing the runtime live agents use.
 
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -13,6 +21,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+use crate::cancel::{CancelReader, CancelToken, CancelWriter, WorkLock, or_cancelled};
 use crate::error::{ConnectionsError, Result, io_err};
 use crate::paths::{CincelPaths, create_private_dir, write_atomic};
 
@@ -64,30 +73,76 @@ impl NodePaths {
     }
 }
 
-/// Which Node version [`Runtime::ensure`] installs (`settings.json`
-/// `connections.runtime.node_version`).
+/// Which Node version [`Runtime::ensure`] installs and [`Runtime::update`]
+/// moves to (`settings.json` `connections.runtime.node_version`,
+/// `docs/specs/07-etapa5-productividad.md` §10.4).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NodeVersion {
-    /// Newest LTS release for this platform (default).
+    /// Newest LTS release for this platform with a major of at least
+    /// [`MIN_NODE_MAJOR`] (default, `"lts"`).
     #[default]
     Lts,
-    /// One exact version (`v24.11.1` or `24.11.1`).
+    /// Newest release of one major line (`"22"`), LTS or not.
+    Major(u64),
+    /// One exact version (`v24.11.1` or `24.11.1`): pinned, never updated.
     Exact(String),
 }
 
 impl NodeVersion {
-    /// Parse the settings value: `"lts"` or a version.
+    /// Parse the settings value: `"lts"`, a major (`"22"`, `"v22"`) or a
+    /// full version.
     #[must_use]
     pub fn parse(value: &str) -> Self {
         let value = value.trim();
         if value.is_empty() || value.eq_ignore_ascii_case("lts") {
-            Self::Lts
-        } else if value.starts_with('v') {
-            Self::Exact(value.to_string())
-        } else {
-            Self::Exact(format!("v{value}"))
+            return Self::Lts;
+        }
+        let bare = value.strip_prefix('v').unwrap_or(value);
+        if !bare.is_empty()
+            && bare.bytes().all(|byte| byte.is_ascii_digit())
+            && let Ok(major) = bare.parse()
+        {
+            return Self::Major(major);
+        }
+        Self::Exact(format!("v{bare}"))
+    }
+
+    /// Whether an installed `version` (`v24.11.1`) satisfies this request
+    /// without downloading anything: any install for [`NodeVersion::Lts`],
+    /// the same major for [`NodeVersion::Major`], the same version for
+    /// [`NodeVersion::Exact`].
+    #[must_use]
+    pub fn is_satisfied_by(&self, version: &str) -> bool {
+        match self {
+            Self::Lts => true,
+            Self::Major(major) => version_parts(version).first() == Some(major),
+            Self::Exact(exact) => exact == version,
         }
     }
+}
+
+/// `v24.11.1` -> `[24, 11, 1]` (non-numeric parts dropped).
+pub(crate) fn version_parts(version: &str) -> Vec<u64> {
+    version
+        .trim_start_matches('v')
+        .split('.')
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
+/// Whether "Actualizar a…" should offer `latest` given the installed
+/// version and the settings' [`NodeVersion`] policy. Pulled out of
+/// [`Runtime::update_available`] so the invariant is unit-testable without a
+/// network: under the default [`NodeVersion::Lts`] (`policy.is_satisfied_by`
+/// always `true`), this reduces to `latest` being numerically newer than
+/// `installed` — a lower LTS release is never offered, whichever source
+/// (the bundled index or a fresh nodejs.org check) `latest` came from.
+/// [`NodeVersion::Major`] additionally offers switching to a different major
+/// line the policy now asks for, even when that line's newest release is
+/// numerically lower (a deliberate move, not an "update").
+fn should_offer_update(policy: &NodeVersion, installed: &str, latest: &str) -> bool {
+    let newer = version_parts(latest) > version_parts(installed);
+    latest != installed && (newer || !policy.is_satisfied_by(installed))
 }
 
 /// Phase reported by [`Runtime::ensure`]'s progress callback.
@@ -300,13 +355,18 @@ impl Runtime {
         self.paths.runtime_dir().join("current")
     }
 
+    /// In-process lock key of the runtime directory ([`WorkLock`]).
+    fn lock_key(&self) -> String {
+        format!("runtime:{}", self.paths.runtime_dir().display())
+    }
+
     /// The installed runtime, without touching the network. `None` when
     /// nothing (complete) is installed.
     #[must_use]
     pub fn installed(&self) -> Option<NodePaths> {
         let version = std::fs::read_to_string(self.current_file()).ok()?;
         let version = version.trim();
-        if version.is_empty() || !version.starts_with('v') {
+        if version.is_empty() || !version.starts_with('v') || version.contains('/') {
             return None;
         }
         let paths = NodePaths::for_root(
@@ -317,45 +377,179 @@ impl Runtime {
     }
 
     /// Make sure a runtime is installed and return its paths. Uses the
-    /// installed one when it satisfies the requested version (offline-safe);
-    /// otherwise resolves, downloads (resuming a partial file, retrying),
-    /// verifies and extracts.
+    /// installed one when it satisfies the requested version (offline-safe,
+    /// [`NodeVersion::is_satisfied_by`]); otherwise resolves, downloads
+    /// (resuming a partial file, retrying), verifies and extracts.
+    /// Cancelling `cancel` stops it within one 64 KiB read (or one archive
+    /// entry) and removes the partial download and the staging directory.
     ///
     /// # Errors
     ///
     /// [`ConnectionsError::Network`], [`ConnectionsError::ChecksumMismatch`],
-    /// [`ConnectionsError::NoNodeRelease`], [`ConnectionsError::Extract`].
-    pub fn ensure(&self, progress: &mut dyn FnMut(RuntimeProgress)) -> Result<NodePaths> {
-        if let Some(installed) = self.installed() {
-            let satisfied = match &self.version {
-                NodeVersion::Lts => true,
-                NodeVersion::Exact(version) => &installed.version == version,
-            };
-            if satisfied {
-                progress(RuntimeProgress::Done);
-                return Ok(installed);
-            }
+    /// [`ConnectionsError::NoNodeRelease`], [`ConnectionsError::Extract`],
+    /// [`ConnectionsError::Cancelled`].
+    pub fn ensure(
+        &self,
+        progress: &mut dyn FnMut(RuntimeProgress),
+        cancel: &CancelToken,
+    ) -> Result<NodePaths> {
+        let _lock = WorkLock::acquire(&self.lock_key(), cancel)?;
+        if let Some(installed) = self.installed()
+            && self.version.is_satisfied_by(&installed.version)
+        {
+            progress(RuntimeProgress::Done);
+            return Ok(installed);
         }
         progress(RuntimeProgress::Resolving);
-        let platform = self.platform.clone().ok_or_else(|| {
+        let platform = self.platform()?;
+        let version = self.resolve_version(&platform, cancel)?;
+        self.fetch_and_install(&platform, &version, progress, cancel)
+    }
+
+    /// The version [`Runtime::update`] would install, when it differs from
+    /// the installed one (the "Actualizar a vX.Y.Z" button). Resolves
+    /// against nodejs.org's `index.json` (network) following the settings
+    /// policy: [`NodeVersion::Lts`], the newest LTS with a major of at least
+    /// [`MIN_NODE_MAJOR`]; [`NodeVersion::Major`], the newest release of that
+    /// line; [`NodeVersion::Exact`], never (pinned, no network). `None` too
+    /// when nothing is installed (preparing a connection installs it) or the
+    /// installed version is already the newest.
+    ///
+    /// # Errors
+    ///
+    /// [`ConnectionsError::Network`] (offline), [`ConnectionsError::Index`],
+    /// [`ConnectionsError::NoNodeRelease`].
+    pub fn update_available(&self) -> Result<Option<String>> {
+        if matches!(self.version, NodeVersion::Exact(_)) {
+            return Ok(None);
+        }
+        let Some(installed) = self.installed() else {
+            return Ok(None);
+        };
+        let platform = self.platform()?;
+        let latest = self.resolve_version(&platform, &CancelToken::new())?;
+        Ok(should_offer_update(&self.version, &installed.version, &latest).then_some(latest))
+    }
+
+    /// Install the version [`Runtime::update_available`] offers and move
+    /// `current` to it. The previous runtime stays on disk (agents started
+    /// with it keep running; `docs/specs/07-etapa5-productividad.md` D13)
+    /// until [`Runtime::prune_old`] runs on the next start. New npm
+    /// connections use the new runtime; a live one keeps its own until it
+    /// reconnects. Returns the installed runtime unchanged when it is
+    /// already the resolved version. Cancellable like [`Runtime::ensure`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::ensure`].
+    pub fn update(
+        &self,
+        progress: &mut dyn FnMut(RuntimeProgress),
+        cancel: &CancelToken,
+    ) -> Result<NodePaths> {
+        let _lock = WorkLock::acquire(&self.lock_key(), cancel)?;
+        progress(RuntimeProgress::Resolving);
+        let platform = self.platform()?;
+        let version = self.resolve_version(&platform, cancel)?;
+        if let Some(installed) = self.installed()
+            && installed.version == version
+        {
+            progress(RuntimeProgress::Done);
+            return Ok(installed);
+        }
+        self.fetch_and_install(&platform, &version, progress, cancel)
+    }
+
+    /// Remove every runtime that `current` does not point at, plus staging
+    /// directories left by a crashed install of another process. Call it at
+    /// start-up, before any agent runs (nothing is in use then). Does
+    /// nothing when no valid runtime is installed. Returns the removed
+    /// directory names.
+    ///
+    /// # Errors
+    ///
+    /// I/O errors removing a directory.
+    pub fn prune_old(&self) -> Result<Vec<String>> {
+        let Some(installed) = self.installed() else {
+            return Ok(Vec::new());
+        };
+        let keep = format!("node-{}", installed.version);
+        let runtime_dir = self.paths.runtime_dir();
+        let mut removed = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&runtime_dir) else {
+            return Ok(removed);
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stale = if name.starts_with("node-") {
+                name != keep
+            } else {
+                name.starts_with(".node-") && foreign_staging(&name)
+            };
+            if stale && entry.path().is_dir() {
+                std::fs::remove_dir_all(entry.path()).map_err(io_err(entry.path()))?;
+                removed.push(name);
+            }
+        }
+        Ok(removed)
+    }
+
+    fn platform(&self) -> Result<String> {
+        self.platform.clone().ok_or_else(|| {
             ConnectionsError::NoNodeRelease(format!(
                 "{}-{} no tiene binarios de Node en tar.xz",
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ))
-        })?;
-        let version = self.resolve_version(&platform)?;
+        })
+    }
+
+    fn staging_dir(&self, version: &str) -> PathBuf {
+        self.paths
+            .runtime_dir()
+            .join(format!(".node-{version}.tmp-{}", std::process::id()))
+    }
+
+    /// Download, verify and install `version`, removing the partial file,
+    /// the decompressed tarball and the staging directory when cancelled.
+    fn fetch_and_install(
+        &self,
+        platform: &str,
+        version: &str,
+        progress: &mut dyn FnMut(RuntimeProgress),
+        cancel: &CancelToken,
+    ) -> Result<NodePaths> {
         let archive = format!("node-{version}-{platform}.tar.xz");
-        let expected = self.expected_sha256(&version, &archive)?;
+        let part = self.paths.downloads_dir().join(format!("{archive}.part"));
+        let result =
+            self.fetch_and_install_inner(platform, version, &archive, &part, progress, cancel);
+        if matches!(result, Err(ConnectionsError::Cancelled)) {
+            let _ = std::fs::remove_file(&part);
+            let _ = std::fs::remove_file(decompressed_path(&part));
+            let _ = std::fs::remove_dir_all(self.staging_dir(version));
+        }
+        result
+    }
+
+    fn fetch_and_install_inner(
+        &self,
+        platform: &str,
+        version: &str,
+        archive: &str,
+        part: &Path,
+        progress: &mut dyn FnMut(RuntimeProgress),
+        cancel: &CancelToken,
+    ) -> Result<NodePaths> {
+        let expected = self.expected_sha256(version, archive, cancel)?;
         let url = format!("{}{version}/{archive}", self.base_url);
 
         create_private_dir(&self.paths.cache_dir)?;
         let downloads = self.paths.downloads_dir();
         std::fs::create_dir_all(&downloads).map_err(io_err(&downloads))?;
-        let part = downloads.join(format!("{archive}.part"));
 
         let mut last_error = None;
         for attempt in 1..=self.attempts {
+            cancel.check()?;
             if attempt > 1 {
                 progress(RuntimeProgress::Retrying {
                     attempt,
@@ -364,54 +558,85 @@ impl Runtime {
                         .map(ToString::to_string)
                         .unwrap_or_default(),
                 });
-                if !self.retry_delay.is_zero() {
-                    std::thread::sleep(self.retry_delay);
-                }
+                cancel.sleep(self.retry_delay)?;
             }
-            match self.download(&url, &part, &version, progress) {
+            let downloaded = download_part(
+                self.downloader.as_ref(),
+                &url,
+                part,
+                cancel,
+                RUNTIME_REPORT_EVERY,
+                &mut |done, total| {
+                    progress(RuntimeProgress::Downloading {
+                        version: version.to_string(),
+                        done,
+                        total,
+                    });
+                },
+            );
+            match downloaded {
                 Ok(()) => {}
+                Err(ConnectionsError::Cancelled) => return Err(ConnectionsError::Cancelled),
                 Err(error) => {
                     last_error = Some(error);
                     continue;
                 }
             }
+            cancel.check()?;
             progress(RuntimeProgress::Verifying);
-            let actual = sha256_file(&part)?;
+            let actual = sha256_file(part)?;
             if !actual.eq_ignore_ascii_case(&expected) {
                 // A corrupt partial file must not be resumed again.
-                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(part);
                 last_error = Some(ConnectionsError::ChecksumMismatch {
-                    file: archive.clone(),
+                    file: archive.to_string(),
                     expected: expected.clone(),
                     actual,
                 });
                 continue;
             }
+            cancel.check()?;
             progress(RuntimeProgress::Extracting);
-            let installed = self.install_archive(&part, &version, &platform)?;
-            let _ = std::fs::remove_file(&part);
+            let installed = self.install_archive(part, version, platform, cancel)?;
+            let _ = std::fs::remove_file(part);
             progress(RuntimeProgress::Done);
             return Ok(installed);
         }
         Err(last_error.unwrap_or_else(|| ConnectionsError::Network("sin intentos".to_string())))
     }
 
-    fn resolve_version(&self, platform: &str) -> Result<String> {
+    fn resolve_version(&self, platform: &str, cancel: &CancelToken) -> Result<String> {
+        cancel.check()?;
+        let pick: fn(&[u8], &str, &NodeVersion) -> Result<String> =
+            |body, platform, wanted| match wanted {
+                NodeVersion::Major(major) => pick_major(body, platform, *major),
+                _ => pick_lts(body, platform),
+            };
         match &self.version {
             NodeVersion::Exact(version) => Ok(version.clone()),
-            NodeVersion::Lts => {
+            wanted => {
                 let body = self
                     .downloader
-                    .get_bytes(&format!("{}index.json", self.base_url))?;
-                pick_lts(&body, platform)
+                    .get_bytes(&format!("{}index.json", self.base_url))
+                    .map_err(|error| or_cancelled(cancel, error))?;
+                cancel.check()?;
+                pick(&body, platform, wanted)
             }
         }
     }
 
-    fn expected_sha256(&self, version: &str, archive: &str) -> Result<String> {
+    fn expected_sha256(
+        &self,
+        version: &str,
+        archive: &str,
+        cancel: &CancelToken,
+    ) -> Result<String> {
+        cancel.check()?;
         let body = self
             .downloader
-            .get_bytes(&format!("{}{version}/SHASUMS256.txt", self.base_url))?;
+            .get_bytes(&format!("{}{version}/SHASUMS256.txt", self.base_url))
+            .map_err(|error| or_cancelled(cancel, error))?;
+        cancel.check()?;
         let text = String::from_utf8_lossy(&body);
         text.lines()
             .find_map(|line| {
@@ -425,62 +650,18 @@ impl Runtime {
             })
     }
 
-    fn download(
+    /// Unpack into staging, rename into place and point `current` at it.
+    /// Older runtimes are left for [`Runtime::prune_old`].
+    fn install_archive(
         &self,
-        url: &str,
-        part: &Path,
+        archive: &Path,
         version: &str,
-        progress: &mut dyn FnMut(RuntimeProgress),
-    ) -> Result<()> {
-        let offset = std::fs::metadata(part).map_or(0, |meta| meta.len());
-        let body = self.downloader.open(url, offset)?;
-        let mut file = if body.resumed && offset > 0 {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(part)
-                .map_err(io_err(part))?
-        } else {
-            std::fs::File::create(part).map_err(io_err(part))?
-        };
-        let mut done = if body.resumed { offset } else { 0 };
-        let total = body.total;
-        progress(RuntimeProgress::Downloading {
-            version: version.to_string(),
-            done,
-            total,
-        });
-        let mut reader = body.reader;
-        let mut buffer = vec![0u8; 256 * 1024];
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|error| ConnectionsError::Network(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            file.write_all(&buffer[..read]).map_err(io_err(part))?;
-            done += read as u64;
-            progress(RuntimeProgress::Downloading {
-                version: version.to_string(),
-                done,
-                total,
-            });
-        }
-        file.flush().map_err(io_err(part))?;
-        if let Some(total) = total
-            && done < total
-        {
-            return Err(ConnectionsError::Network(format!(
-                "descarga incompleta ({done} de {total} bytes)"
-            )));
-        }
-        Ok(())
-    }
-
-    fn install_archive(&self, archive: &Path, version: &str, platform: &str) -> Result<NodePaths> {
+        platform: &str,
+        cancel: &CancelToken,
+    ) -> Result<NodePaths> {
         let runtime_dir = self.paths.runtime_dir();
         create_private_dir(&runtime_dir)?;
-        let staging = runtime_dir.join(format!(".node-{version}.tmp-{}", std::process::id()));
+        let staging = self.staging_dir(version);
         if staging.exists() {
             std::fs::remove_dir_all(&staging).map_err(io_err(&staging))?;
         }
@@ -490,8 +671,11 @@ impl Runtime {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let top = format!("node-{version}-{platform}");
-        if let Err(error) = extract_node_tar_xz(archive, &top, &staging) {
+        if let Err(error) = extract_node_tar_xz(archive, &top, &staging, cancel) {
             let _ = std::fs::remove_dir_all(&staging);
+            if cancel.is_cancelled() {
+                return Err(ConnectionsError::Cancelled);
+            }
             return Err(ConnectionsError::Extract {
                 file: file_name,
                 message: error.to_string(),
@@ -505,25 +689,111 @@ impl Runtime {
                 message: "faltan node, npm-cli.js o npx-cli.js en el archivo".to_string(),
             });
         }
+        if cancel.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(ConnectionsError::Cancelled);
+        }
         let final_root = runtime_dir.join(format!("node-{version}"));
         if final_root.exists() {
             std::fs::remove_dir_all(&final_root).map_err(io_err(&final_root))?;
         }
         std::fs::rename(&staging, &final_root).map_err(io_err(&final_root))?;
         write_atomic(&self.current_file(), version.as_bytes())?;
-        // Older runtimes are dead weight once `current` points elsewhere.
-        if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with("node-") && name != format!("node-{version}") {
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
-            }
-        }
         Ok(NodePaths::for_root(version, final_root))
     }
 }
 
+/// Progress granularity of the Node download (bytes between reports).
+const RUNTIME_REPORT_EVERY: u64 = 256 * 1024;
+
+/// Size of every read of a download: the cancel token is checked before
+/// each one (D14).
+pub(crate) const DOWNLOAD_CHUNK: usize = 64 * 1024;
+
+/// Whether a staging directory name (`.<x>.tmp-<pid>`) belongs to another
+/// process than this one (a crashed install: safe to remove at start-up).
+pub(crate) fn foreign_staging(name: &str) -> bool {
+    name.rsplit_once(".tmp-")
+        .and_then(|(_, pid)| pid.parse::<u32>().ok())
+        .is_some_and(|pid| pid != std::process::id())
+}
+
+/// Download `url` into `part`, resuming from its current size (`Range`),
+/// reading 64 KiB at a time and checking `cancel` before every read.
+/// `on_progress(done, total)` runs at the start, every `report_every` bytes
+/// and at the end. When cancelled the response is dropped (closing the
+/// connection), `part` is removed and [`ConnectionsError::Cancelled`] is
+/// returned; any other failure keeps `part` so the next attempt resumes.
+pub(crate) fn download_part(
+    downloader: &dyn Downloader,
+    url: &str,
+    part: &Path,
+    cancel: &CancelToken,
+    report_every: u64,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<()> {
+    let result = download_part_inner(downloader, url, part, cancel, report_every, on_progress);
+    if matches!(result, Err(ConnectionsError::Cancelled)) {
+        let _ = std::fs::remove_file(part);
+    }
+    result
+}
+
+fn download_part_inner(
+    downloader: &dyn Downloader,
+    url: &str,
+    part: &Path,
+    cancel: &CancelToken,
+    report_every: u64,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<()> {
+    cancel.check()?;
+    let offset = std::fs::metadata(part).map_or(0, |meta| meta.len());
+    let body = downloader
+        .open(url, offset)
+        .map_err(|error| or_cancelled(cancel, error))?;
+    let mut file = if body.resumed && offset > 0 {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(part)
+            .map_err(io_err(part))?
+    } else {
+        std::fs::File::create(part).map_err(io_err(part))?
+    };
+    let mut done = if body.resumed { offset } else { 0 };
+    let total = body.total;
+    on_progress(done, total);
+    let mut reader = body.reader;
+    let mut buffer = vec![0u8; DOWNLOAD_CHUNK];
+    let mut reported = done;
+    loop {
+        cancel.check()?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| or_cancelled(cancel, ConnectionsError::Network(error.to_string())))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read]).map_err(io_err(part))?;
+        done += read as u64;
+        if done - reported >= report_every {
+            reported = done;
+            on_progress(done, total);
+        }
+    }
+    file.flush().map_err(io_err(part))?;
+    if reported != done {
+        on_progress(done, total);
+    }
+    if let Some(total) = total
+        && done < total
+    {
+        return Err(ConnectionsError::Network(format!(
+            "descarga incompleta ({done} de {total} bytes)"
+        )));
+    }
+    Ok(())
+}
 /// nodejs.org platform key for this machine (`linux-x64`, `darwin-arm64`...),
 /// `None` where no `.tar.xz` build exists (Windows).
 #[must_use]
@@ -580,6 +850,36 @@ pub fn pick_lts(index_json: &[u8], platform: &str) -> Result<String> {
         .ok_or_else(|| ConnectionsError::NoNodeRelease(format!("ninguna LTS para {platform}")))
 }
 
+/// Pick the newest release of `index.json` of the `major` line (LTS or not)
+/// that ships `platform`.
+///
+/// # Errors
+///
+/// [`ConnectionsError::Index`] for malformed JSON,
+/// [`ConnectionsError::NoNodeRelease`] when nothing matches.
+pub fn pick_major(index_json: &[u8], platform: &str, major: u64) -> Result<String> {
+    let releases: Vec<serde_json::Value> = serde_json::from_slice(index_json)?;
+    let mut best: Option<(Vec<u64>, String)> = None;
+    for release in releases {
+        let Some(version) = release.get("version").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let has_platform = release
+            .get("files")
+            .and_then(|files| files.as_array())
+            .is_some_and(|files| files.iter().any(|file| file.as_str() == Some(platform)));
+        let parts = version_parts(version);
+        if !has_platform || parts.first() != Some(&major) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(current, _)| parts > *current) {
+            best = Some((parts, version.to_string()));
+        }
+    }
+    best.map(|(_, version)| version).ok_or_else(|| {
+        ConnectionsError::NoNodeRelease(format!("ninguna versión {major}.x para {platform}"))
+    })
+}
 /// SHA-256 of a file, lowercase hex, streamed.
 ///
 /// # Errors
@@ -619,25 +919,54 @@ pub fn keep_runtime_entry(relative: &Path) -> bool {
 /// Decompress `archive` (`.tar.xz`), strip the `top/` directory and unpack
 /// only the entries [`keep_runtime_entry`] wants into `dest`. The tarball is
 /// decompressed to a temporary file next to `archive` first (streamed; the
-/// xz decoder does not need the whole archive in memory).
-fn extract_node_tar_xz(archive: &Path, top: &str, dest: &Path) -> std::io::Result<()> {
-    let tar_path = archive.with_extension("tar-decompressed");
-    {
-        let mut input = BufReader::new(std::fs::File::open(archive)?);
-        let mut output = std::io::BufWriter::new(std::fs::File::create(&tar_path)?);
+/// xz decoder does not need the whole archive in memory). Every read and
+/// write checks `cancel`, and so does every tar entry; the temporary tarball
+/// is removed whatever happens.
+fn extract_node_tar_xz(
+    archive: &Path,
+    top: &str,
+    dest: &Path,
+    cancel: &CancelToken,
+) -> std::io::Result<()> {
+    let tar_path = decompressed_path(archive);
+    let decompressed = (|| {
+        let mut input = BufReader::new(CancelReader {
+            inner: std::fs::File::open(archive)?,
+            token: cancel,
+        });
+        let mut output = std::io::BufWriter::new(CancelWriter {
+            inner: std::fs::File::create(&tar_path)?,
+            token: cancel,
+        });
         lzma_rs::xz_decompress(&mut input, &mut output)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        output.flush()?;
-    }
-    let result = unpack_filtered(&tar_path, top, dest);
+        output.flush()
+    })();
+    let result = decompressed.and_then(|()| unpack_filtered(&tar_path, top, dest, cancel));
     let _ = std::fs::remove_file(&tar_path);
     result
 }
 
-fn unpack_filtered(tar_path: &Path, top: &str, dest: &Path) -> std::io::Result<()> {
-    let mut tar = tar::Archive::new(BufReader::new(std::fs::File::open(tar_path)?));
+/// Where [`extract_node_tar_xz`] decompresses `archive` to.
+fn decompressed_path(archive: &Path) -> PathBuf {
+    archive.with_extension("tar-decompressed")
+}
+
+fn unpack_filtered(
+    tar_path: &Path,
+    top: &str,
+    dest: &Path,
+    cancel: &CancelToken,
+) -> std::io::Result<()> {
+    let mut tar = tar::Archive::new(BufReader::new(CancelReader {
+        inner: std::fs::File::open(tar_path)?,
+        token: cancel,
+    }));
     tar.set_preserve_permissions(true);
     for entry in tar.entries()? {
+        if cancel.is_cancelled() {
+            return Err(CancelToken::io_error());
+        }
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         let Ok(relative) = path.strip_prefix(top) else {
@@ -682,6 +1011,45 @@ mod tests {
     }
 
     #[test]
+    fn node_version_parses_major_lines() {
+        assert_eq!(NodeVersion::parse("22"), NodeVersion::Major(22));
+        assert_eq!(NodeVersion::parse(" v24 "), NodeVersion::Major(24));
+        assert!(NodeVersion::Major(22).is_satisfied_by("v22.3.0"));
+        assert!(!NodeVersion::Major(22).is_satisfied_by("v24.1.0"));
+        assert!(NodeVersion::Lts.is_satisfied_by("v24.1.0"));
+        assert!(NodeVersion::parse("22.11.1").is_satisfied_by("v22.11.1"));
+        assert!(!NodeVersion::parse("22.11.1").is_satisfied_by("v22.12.0"));
+    }
+
+    #[test]
+    fn pick_major_takes_newest_of_the_line() {
+        let index = serde_json::json!([
+            { "version": "v25.2.0", "lts": false, "files": ["linux-x64"] },
+            { "version": "v24.11.1", "lts": "Krypton", "files": ["linux-x64"] },
+            { "version": "v22.21.0", "lts": "Jod", "files": ["darwin-arm64"] },
+            { "version": "v22.20.0", "lts": "Jod", "files": ["linux-x64"] },
+            { "version": "v22.9.0", "lts": "Jod", "files": ["linux-x64"] }
+        ]);
+        let body = serde_json::to_vec(&index).expect("json");
+        assert_eq!(pick_major(&body, "linux-x64", 22).expect("22"), "v22.20.0");
+        assert_eq!(pick_major(&body, "linux-x64", 25).expect("25"), "v25.2.0");
+        assert!(matches!(
+            pick_major(&body, "linux-x64", 23),
+            Err(ConnectionsError::NoNodeRelease(_))
+        ));
+    }
+
+    #[test]
+    fn staging_of_other_processes_is_foreign() {
+        assert!(foreign_staging(".node-v24.1.0.tmp-1"));
+        assert!(!foreign_staging(&format!(
+            ".node-v24.1.0.tmp-{}",
+            std::process::id()
+        )));
+        assert!(!foreign_staging(".node-v24.1.0"));
+    }
+
+    #[test]
     fn pick_lts_takes_newest_lts_with_platform() {
         let index = serde_json::json!([
             { "version": "v25.2.0", "lts": false, "files": ["linux-x64"] },
@@ -722,6 +1090,40 @@ mod tests {
         ] {
             assert!(!keep_runtime_entry(Path::new(drop)), "{drop}");
         }
+    }
+
+    #[test]
+    fn should_offer_update_never_offers_a_lower_lts() {
+        // The bundled index (or a stale fetch) publishing an older release
+        // than what is already installed must never be offered.
+        assert!(!should_offer_update(
+            &NodeVersion::Lts,
+            "v24.11.1",
+            "v22.20.0"
+        ));
+        assert!(should_offer_update(
+            &NodeVersion::Lts,
+            "v22.20.0",
+            "v24.11.1"
+        ));
+        assert!(!should_offer_update(
+            &NodeVersion::Lts,
+            "v24.11.1",
+            "v24.11.1"
+        ));
+        // Major(22) with v24 installed offers switching to the line the
+        // policy now asks for, even though it is numerically lower: a
+        // deliberate move, not a regression of the default LTS policy.
+        assert!(should_offer_update(
+            &NodeVersion::Major(22),
+            "v24.11.1",
+            "v22.20.0"
+        ));
+        assert!(!should_offer_update(
+            &NodeVersion::Major(22),
+            "v22.20.0",
+            "v22.9.0"
+        ));
     }
 
     #[test]

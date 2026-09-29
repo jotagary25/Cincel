@@ -23,6 +23,7 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{DockArea, DockLayout, DockPlacement, DockSkin, panel_handle};
 use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Root, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{FontWeight, SharedString, WindowKind, WindowOptions, div, px};
@@ -30,11 +31,19 @@ use gpui_kit::{FontWeight, SharedString, WindowKind, WindowOptions, div, px};
 use crate::actions;
 use crate::agents::Agents;
 use crate::center::CenterPanel;
+use crate::file_finder::FileFinder;
+use crate::focus::FocusZone;
 use crate::layout::{DockLayout as DockLayoutState, WorkspaceLayout};
+use crate::new_file::NewFilePrompt;
 use crate::panels::ChatDock;
 use crate::project::{self, Project, ProjectOptions};
 use crate::review::{Nav, PanelState, Review, stats_label};
+use crate::review_close::ReviewCloseDialog;
+use crate::settings::Reloaded;
+use crate::settings_view::{SettingsSection, SettingsViewEvent};
+use crate::shortcuts_modal::ShortcutsModal;
 use crate::theme::ThemeColors;
+use crate::title_menu::QuitDialog;
 use crate::toast::{self, Toasts};
 use crate::tree_panel::FilesPanel;
 use crate::window_state::{self, WindowState};
@@ -119,6 +128,33 @@ pub struct Workspace {
     files: Entity<FilesPanel>,
     toasts: Entity<Toasts>,
     project: Option<Entity<Project>>,
+    /// The quick file finder (`Ctrl+P`, `crate::file_finder`, E5-F): built
+    /// once per open project (like the review panel), so it keeps its typed
+    /// query and tab-activation history between presses.
+    file_finder: Option<Entity<FileFinder>>,
+    /// The "Nuevo archivo…" floating field (`Ctrl+N`, `crate::new_file`,
+    /// E5-I): built once per open project, like the file finder.
+    new_file: Option<Entity<NewFilePrompt>>,
+    /// The keyboard shortcuts modal (`F1`, `crate::shortcuts_modal`, E5-H):
+    /// built once for the whole window, unlike the file finder, since it
+    /// does not need a project.
+    shortcuts_modal: Entity<ShortcutsModal>,
+    /// The "¿Guardar cambios?" dialog `workspace::quit` and the window's `×`
+    /// share (D15, `crate::title_menu`, E5-I).
+    quit_dialog: Option<QuitDialog>,
+    /// The "Hay N cambios de agente sin decidir" dialog that quitting,
+    /// closing and replacing the project ask before anything else
+    /// (`crate::review_close`).
+    review_close_dialog: Option<ReviewCloseDialog>,
+    /// Set once the quit dialog's own buttons decide; lets
+    /// `Workspace::should_close` answer `true` without asking again
+    /// (`crate::title_menu`, E5-I).
+    quit_confirmed: bool,
+    /// Whether the title bar's menu is open, for `Workspace::is_modal_open`
+    /// (§7.4, `crate::title_menu`, E5-I). A plain `Cell` because
+    /// `Button::dropdown_menu`'s `on_open_change` callback is not a
+    /// `cx.listener` (it never receives `&mut Self`).
+    title_menu_open: Rc<Cell<bool>>,
     recents: Recents,
     project_options: ProjectOptions,
     focus_handle: FocusHandle,
@@ -146,6 +182,9 @@ impl Workspace {
         let files = FilesPanel::new(cx);
         let toasts = cx.new(|_| Toasts::new());
         toast::set_global(&toasts, cx);
+        // The shortcuts modal (E5-H): needs no project, so it is built once
+        // here instead of in `open_project` like the file finder.
+        let shortcuts_modal = ShortcutsModal::new(center.clone(), window, cx);
 
         // `Ctrl+Shift+A`/`Ctrl+L` and the chat's own bindings need a real
         // window; `watch_files` doubles as "may this window use real OS
@@ -221,13 +260,32 @@ impl Workspace {
         // The status bar reads the active tab and the chat's connection, so
         // the workspace repaints whenever either changes (cursor, dirty dot,
         // tab switch, streaming, permission cards, …).
-        subscriptions.push(cx.observe(&center, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.observe_in(&center, window, |this, center, window, cx| {
+            // Without a project, closing the settings tab takes the center
+            // off screen with the keyboard in it: the root view takes it back
+            // so the global commands keep working (§4.1 of spec 07).
+            if this.project.is_none()
+                && !center.read(cx).has_items()
+                && center.read(cx).focus_handle(cx).is_focused(window)
+            {
+                window.focus(&this.focus_handle, cx);
+            }
+            cx.notify();
+        }));
         subscriptions.push(cx.observe(&chat, |_, _, cx| cx.notify()));
         // The connection modals float over the whole window.
         let modal = agents.read(cx).modal().clone();
         subscriptions.push(cx.observe(&modal, |_, _, cx| cx.notify()));
         // The pending counter and the review panel.
         subscriptions.push(cx.observe(&review, |_, _, cx| cx.notify()));
+        // The settings tab's events, which the center passes on (§4).
+        subscriptions.push(cx.subscribe_in(
+            &center,
+            window,
+            |this, _, event: &SettingsViewEvent, window, cx| {
+                this.on_settings_view_event(event, window, cx);
+            },
+        ));
 
         // `files.autosave = "on_focus_change"`: leaving the window is a focus
         // change (`docs/specs/modulos/settings.md`).
@@ -243,39 +301,8 @@ impl Workspace {
             Some((watcher, events)) => {
                 tasks.push(cx.spawn(async move |this, cx| {
                     while let Ok(event) = events.recv().await {
-                        let reloaded = cx.update(|cx| crate::settings::reload(event, cx));
-                        if !reloaded.changed {
-                            continue;
-                        }
                         let reported = this.update(cx, |workspace, cx| {
-                            // Settings, fonts and colours reach the open
-                            // editors here; the element has no globals.
-                            workspace
-                                .center
-                                .update(cx, |center, cx| center.refresh_editor_style(cx));
-                            workspace
-                                .review
-                                .update(cx, |review, cx| review.reload_settings(cx));
-                            workspace
-                                .agents
-                                .update(cx, |agents, cx| agents.reload_settings(cx));
-                            let chat_theme = crate::theme::chat_theme(cx);
-                            let chat_settings = crate::theme::chat_settings(cx);
-                            workspace.chat.update(cx, |chat, cx| {
-                                chat.set_theme(chat_theme, cx);
-                                chat.set_settings(chat_settings, cx);
-                            });
-                            for issue in &reloaded.issues {
-                                toast::warn(issue.to_string(), cx);
-                            }
-                            if reloaded.issues.is_empty() {
-                                toast::info_keyed(
-                                    "settings-reloaded",
-                                    "Configuración recargada",
-                                    cx,
-                                );
-                            }
-                            cx.notify();
+                            workspace.on_settings_event(event, cx);
                         });
                         if reported.is_err() {
                             break;
@@ -308,9 +335,16 @@ impl Workspace {
         // now and observed from here on (`docs/specs/modulos/settings.md`).
         let dark = is_dark(window.appearance());
         crate::settings::set_system_dark(dark, cx);
-        subscriptions.push(window.observe_window_appearance(|window, cx| {
-            if crate::settings::set_system_dark(is_dark(window.appearance()), cx) {
-                cx.refresh_windows();
+        // The desktop can answer late (Wayland reports "light" for the first
+        // frames and "dark" right after): the open editors, the chat and the
+        // review must follow, not just the window chrome.
+        let this = cx.weak_entity();
+        subscriptions.push(window.observe_window_appearance(move |window, cx| {
+            let dark = is_dark(window.appearance());
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |this, cx| this.follow_system_appearance(dark, cx));
+            } else {
+                crate::settings::set_system_dark(dark, cx);
             }
         }));
 
@@ -332,6 +366,13 @@ impl Workspace {
             files,
             toasts,
             project: None,
+            file_finder: None,
+            new_file: None,
+            shortcuts_modal,
+            quit_dialog: None,
+            review_close_dialog: None,
+            quit_confirmed: false,
+            title_menu_open: Rc::new(Cell::new(false)),
             recents: Recents::load(),
             project_options: options.project_options,
             focus_handle,
@@ -382,6 +423,22 @@ impl Workspace {
 
         let root = project.read(cx).root().to_path_buf();
         self.project = Some(project.clone());
+        // A fresh finder per project (E5-F): its candidates and its
+        // tab-activation history belong to this project's tabs, not the
+        // previous one's.
+        self.file_finder = Some(FileFinder::new(
+            project.clone(),
+            self.center.clone(),
+            window,
+            cx,
+        ));
+        // The "Nuevo archivo…" field (E5-I): same lifetime as the finder.
+        self.new_file = Some(NewFilePrompt::new(
+            project.clone(),
+            self.center.clone(),
+            window,
+            cx,
+        ));
         self.files
             .update(cx, |files, cx| files.set_project(Some(project.clone()), cx));
         self.center.update(cx, |center, cx| {
@@ -434,6 +491,86 @@ impl Workspace {
         &self.files
     }
 
+    /// The quick file finder (`Ctrl+P`), once a project has built it
+    /// (`crate::file_finder`, E5-F).
+    pub fn file_finder(&self) -> Option<&Entity<FileFinder>> {
+        self.file_finder.as_ref()
+    }
+
+    /// The "Nuevo archivo…" field (`Ctrl+N`), once a project has built it
+    /// (`crate::new_file`, E5-I).
+    pub fn new_file_prompt(&self) -> Option<&Entity<NewFilePrompt>> {
+        self.new_file.as_ref()
+    }
+
+    /// The keyboard shortcuts modal (`F1`, `crate::shortcuts_modal`, E5-H).
+    pub fn shortcuts_modal(&self) -> &Entity<ShortcutsModal> {
+        &self.shortcuts_modal
+    }
+
+    /// The recently opened projects, most recent first (`crate::title_menu`).
+    pub(crate) fn recents_snapshot(&self) -> &[PathBuf] {
+        self.recents.projects()
+    }
+
+    /// Replaces the recent-projects list and persists it to disk
+    /// (`crate::title_menu`).
+    pub(crate) fn set_recents(&mut self, recents: Recents) {
+        self.recents = recents;
+        if let Err(error) = self.recents.save() {
+            tracing::warn!(%error, "no se pudo guardar la lista de proyectos recientes");
+        }
+    }
+
+    /// The shared flag `crate::title_menu`'s menu button flips through
+    /// `Button::dropdown_menu`'s `on_open_change`.
+    pub(crate) fn title_menu_open_flag(&self) -> Rc<Cell<bool>> {
+        self.title_menu_open.clone()
+    }
+
+    /// Whether the "¿Guardar cambios?" quit dialog is up (`crate::title_menu`).
+    pub fn is_quit_dialog_open(&self) -> bool {
+        self.quit_dialog.is_some()
+    }
+
+    pub(crate) fn set_quit_dialog(&mut self, dialog: Option<QuitDialog>) {
+        self.quit_dialog = dialog;
+    }
+
+    /// How many files the open quit dialog is asking about, or `None`
+    /// without one (`crate::title_menu`'s `render_quit_dialog`).
+    pub(crate) fn quit_dialog_dirty_count(&self) -> Option<usize> {
+        self.quit_dialog.as_ref().map(QuitDialog::dirty_count)
+    }
+
+    /// Takes the focus the quit dialog is meant to restore, or `None`
+    /// without a dialog open.
+    pub(crate) fn take_quit_dialog_previous_focus(&mut self) -> Option<Option<FocusHandle>> {
+        self.quit_dialog.take().map(QuitDialog::into_previous_focus)
+    }
+
+    /// The open "cambios de agente sin decidir" dialog, if any
+    /// (`crate::review_close`).
+    pub(crate) fn review_close_dialog(&self) -> Option<&ReviewCloseDialog> {
+        self.review_close_dialog.as_ref()
+    }
+
+    pub(crate) fn review_close_dialog_mut(&mut self) -> Option<&mut ReviewCloseDialog> {
+        self.review_close_dialog.as_mut()
+    }
+
+    pub(crate) fn set_review_close_dialog(&mut self, dialog: Option<ReviewCloseDialog>) {
+        self.review_close_dialog = dialog;
+    }
+
+    pub(crate) fn is_quit_confirmed(&self) -> bool {
+        self.quit_confirmed
+    }
+
+    pub(crate) fn set_quit_confirmed(&mut self, confirmed: bool) {
+        self.quit_confirmed = confirmed;
+    }
+
     /// The toast queue.
     pub fn toasts(&self) -> &Entity<Toasts> {
         &self.toasts
@@ -448,6 +585,110 @@ impl Workspace {
             }
         });
         self.chat.update(cx, |chat, cx| chat.open_connections(cx));
+        cx.notify();
+    }
+
+    /// `workspace::open_settings` (`Ctrl+,`) and the menu's "Conexiones"
+    /// (`workspace::open_connections`, D7): opens or activates the settings
+    /// tab, on `section` when given (`docs/specs/07-etapa5-productividad.md`
+    /// §4.1, §8.2). Works without a project too: the tab then takes the
+    /// place of the empty screen.
+    pub fn open_settings_section(
+        &mut self,
+        section: Option<SettingsSection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self
+            .center
+            .update(cx, |center, cx| center.open_settings(section, window, cx));
+        self.agents
+            .update(cx, |agents, cx| agents.attach_settings_view(&view, cx));
+        cx.notify();
+    }
+
+    /// What the settings tab says: a key it wrote is applied at once, the
+    /// Connections section is `Agents`' business.
+    fn on_settings_view_event(
+        &mut self,
+        event: &SettingsViewEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SettingsViewEvent::Written => {
+                let reloaded =
+                    crate::settings::reload(cincel_settings::SettingsEvent::SettingsChanged, cx);
+                if reloaded.changed {
+                    // The tab is the one who asked: no "Configuración
+                    // recargada" (§4.3). The watcher's event that follows
+                    // has the same fingerprint and is ignored.
+                    self.apply_reloaded(&reloaded, false, cx);
+                }
+            }
+            SettingsViewEvent::OpenSettingsFile => {}
+            other => self.agents.update(cx, |agents, cx| {
+                agents.handle_settings_event(other, window, cx)
+            }),
+        }
+    }
+
+    /// One event of the configuration watcher: re-read the document and
+    /// apply it, with the "Configuración recargada" toast.
+    pub(crate) fn on_settings_event(&mut self, event: SettingsEvent, cx: &mut Context<Self>) {
+        let reloaded = crate::settings::reload(event, cx);
+        if reloaded.changed {
+            self.apply_reloaded(&reloaded, true, cx);
+        }
+    }
+
+    /// Records the desktop's appearance and, when it changed, hands the
+    /// theme now in force to every open editor, the chat and the Markdown
+    /// previews. Returns whether it changed.
+    pub(crate) fn follow_system_appearance(&mut self, dark: bool, cx: &mut Context<Self>) -> bool {
+        if !crate::settings::set_system_dark(dark, cx) {
+            return false;
+        }
+        self.refresh_theme_everywhere(cx);
+        cx.refresh_windows();
+        true
+    }
+
+    /// Hands the theme and settings in force to the editors (code font,
+    /// colors, grammar), the Markdown previews and the chat.
+    fn refresh_theme_everywhere(&mut self, cx: &mut Context<Self>) {
+        self.center
+            .update(cx, |center, cx| center.refresh_editor_style(cx));
+        let chat_theme = crate::theme::chat_theme(cx);
+        let chat_settings = crate::theme::chat_settings(cx);
+        self.chat.update(cx, |chat, cx| {
+            chat.set_theme(chat_theme, cx);
+            chat.set_settings(chat_settings, cx);
+        });
+    }
+
+    /// Hands what a reload changed to everything that caches settings: the
+    /// open editors (settings, fonts, colours; the element has no globals),
+    /// the review, the agents and the chat. Problems are always reported;
+    /// `notify` adds "Configuración recargada" when there were none (the
+    /// watcher does, the settings tab does not).
+    pub(crate) fn apply_reloaded(
+        &mut self,
+        reloaded: &Reloaded,
+        notify: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_theme_everywhere(cx);
+        self.review
+            .update(cx, |review, cx| review.reload_settings(cx));
+        self.agents
+            .update(cx, |agents, cx| agents.reload_settings(cx));
+        for issue in &reloaded.issues {
+            toast::warn(issue.to_string(), cx);
+        }
+        if notify && reloaded.issues.is_empty() {
+            toast::info_keyed("settings-reloaded", "Configuración recargada", cx);
+        }
         cx.notify();
     }
 
@@ -576,20 +817,34 @@ impl Workspace {
                 cx.new(|cx| Root::new(workspace, window, cx))
             })?;
 
-            window.update(cx, |_, window, cx| {
+            window.update(cx, |root, window, cx| {
                 window.set_window_title("Cincel");
                 window.activate_window();
                 report_gpu(window);
 
-                // Closing the only window ends the application, and the
-                // geometry has to be on disk before that happens.
-                window.on_window_should_close(cx, |window, _| {
-                    if let Err(error) =
-                        WindowState::from_window_bounds(window.window_bounds()).save()
-                    {
-                        tracing::warn!(%error, "no se pudo guardar el estado de la ventana");
-                    }
-                    true
+                // `×` (D15, `docs/specs/07-etapa5-productividad.md` §8.2):
+                // the same question `workspace::quit` asks
+                // (`Workspace::should_close`), which opens the "¿Guardar
+                // cambios?" dialog instead of closing when there are unsaved
+                // files. Closing the only window ends the application (see
+                // `cx.on_release` below), and the geometry has to be on disk
+                // before that happens.
+                // A weak handle: the window owns this callback and the
+                // workspace lives in the window, so a strong one would keep
+                // the workspace alive past the window (leaked handle).
+                let workspace = root
+                    .view()
+                    .clone()
+                    .downcast::<Workspace>()
+                    .ok()
+                    .map(|workspace| workspace.downgrade());
+                // The title bar's own `×` takes the same road
+                // (`Workspace::close_from_title_bar`).
+                window.on_window_should_close(cx, move |window, cx| {
+                    let Some(workspace) = workspace.as_ref().and_then(|w| w.upgrade()) else {
+                        return true;
+                    };
+                    workspace.update(cx, |workspace, cx| workspace.request_close(window, cx))
                 });
 
                 cx.on_release(|_, cx| cx.quit()).detach();
@@ -641,7 +896,9 @@ impl Workspace {
                 return;
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                this.open_project(&path, window, cx);
+                // Pending agent changes of the project being left are
+                // decided first (`crate::review_close`).
+                this.request_open_project(&path, window, cx);
             });
         })
         .detach();
@@ -653,7 +910,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle(DockPlacement::Left, window, cx);
+        self.toggle_focus(FocusZone::Chat, window, cx);
     }
 
     fn on_toggle_tree(
@@ -662,7 +919,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle(DockPlacement::Right, window, cx);
+        self.toggle_focus(FocusZone::Files, window, cx);
     }
 
     fn on_focus_chat(
@@ -676,9 +933,18 @@ impl Workspace {
                 area.toggle_dock(DockPlacement::Left, window, cx);
             }
         });
-        // `Ctrl+L` focuses the composer itself, not just the panel.
+        // The composer itself, not just the panel.
         self.chat
             .update(cx, |chat, cx| chat.focus_input(window, cx));
+    }
+
+    fn on_focus_next_zone(
+        &mut self,
+        _: &actions::FocusNextZone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_next_zone(window, cx);
     }
 
     fn on_close_tab(&mut self, _: &actions::CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -750,7 +1016,13 @@ impl Workspace {
             .update(cx, |review, cx| review.navigate(nav, None, window, cx));
     }
 
-    fn toggle(&mut self, placement: DockPlacement, window: &mut Window, cx: &mut Context<Self>) {
+    /// Expands or collapses the dock at `placement`, leaving the focus alone.
+    pub(crate) fn toggle_dock(
+        &mut self,
+        placement: DockPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.dock_area.update(cx, |area, cx| {
             area.toggle_dock(placement, window, cx);
             tracing::debug!(
@@ -854,6 +1126,7 @@ impl Workspace {
         // Every pixel size follows the zoom (`workspace::zoom_*`).
         let scale = crate::settings::ui_scale(cx);
         let center = self.center.read(cx);
+        let settings_active = center.is_settings_active();
         let tab = center.active_tab();
         let language = tab
             .and_then(|tab| tab.language.as_ref())
@@ -902,7 +1175,14 @@ impl Workspace {
             .h(px(STATUS_BAR_HEIGHT * scale))
             .flex_none()
             .py_0()
-            .left(
+            .left(if settings_active {
+                // The settings tab has no cursor, encoding nor language
+                // (`docs/specs/07-etapa5-productividad.md` §4.1).
+                h_flex()
+                    .gap_3()
+                    .text_color(theme.text_muted)
+                    .child(crate::settings_view::TAB_TITLE)
+            } else {
                 h_flex()
                     .gap_3()
                     .text_color(theme.text_muted)
@@ -913,8 +1193,8 @@ impl Workspace {
                     // Clicking the language will open the language picker in a
                     // later stage; today it is only a label.
                     .child(div().id("status-language").child(language))
-                    .children(read_only.then(|| SharedString::from("Solo lectura"))),
-            )
+                    .children(read_only.then(|| SharedString::from("Solo lectura")))
+            })
             .right(
                 h_flex()
                     .gap_3()
@@ -942,6 +1222,28 @@ impl Workspace {
                             .child(SharedString::from(pending_label(pending)))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.review.update(cx, |review, cx| review.toggle_panel(cx));
+                            })),
+                    )
+                    // The shortcuts modal button (D5, `crate::shortcuts_modal`,
+                    // E5-H): before the zoom label, like the other clickable
+                    // status bar controls.
+                    .child(
+                        div()
+                            .id("status-shortcuts")
+                            .cursor_pointer()
+                            .text_color(theme.text_muted)
+                            .hover(|style| style.text_color(theme.text))
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Atajos de teclado (F1)").build(window, cx)
+                            })
+                            .child(
+                                div()
+                                    .w(px(14. * scale))
+                                    .flex_none()
+                                    .child(gpui_kit::assets::IconName::Keyboard),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.show_shortcuts(window, cx);
                             })),
                     )
                     .child(SharedString::from(format!("{zoom} %"))),
@@ -1102,6 +1404,15 @@ impl Workspace {
                             .child("Demasiado grande para revisar por segmentos: solo el archivo entero"),
                     )
                 })
+                .when(row.binary && !row.too_large, |this| {
+                    this.child(
+                        div()
+                            .pl(px(32. * scale))
+                            .text_size(px(11. * scale))
+                            .text_color(theme.text_muted)
+                            .child("Archivo binario cambiado por el agente: se acepta o se restaura entero"),
+                    )
+                })
         }));
 
         let empty = review.summary().borrow().files.is_empty() && review.panel_rows().is_empty();
@@ -1149,12 +1460,13 @@ impl Workspace {
     }
 }
 
-/// "N pendientes", with the singular.
+/// "N cambios pendientes", with the singular: the same changes the tree's
+/// root line and the floating bar count.
 fn pending_label(pending: usize) -> String {
     if pending == 1 {
-        "1 pendiente".to_string()
+        "1 cambio pendiente".to_string()
     } else {
-        format!("{pending} pendientes")
+        format!("{pending} cambios pendientes")
     }
 }
 
@@ -1204,6 +1516,14 @@ impl Render for Workspace {
                 .min_h_0()
                 .child(self.dock_area.clone())
                 .into_any_element()
+        } else if self.center.read(cx).has_items() {
+            // The settings tab without a project: the empty screen gives the
+            // center area to it until it closes (§4.1).
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(self.center.clone())
+                .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -1220,6 +1540,36 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_chat))
             .on_action(cx.listener(Self::on_toggle_tree))
             .on_action(cx.listener(Self::on_focus_chat))
+            .on_action(cx.listener(Self::on_focus_next_zone))
+            // E5-F: the quick file finder (`crate::file_finder`).
+            .on_action(
+                cx.listener(|this, _: &actions::ToggleFileFinder, window, cx| {
+                    this.toggle_file_finder(window, cx)
+                }),
+            )
+            // E5-G: the settings tab.
+            .on_action(cx.listener(|this, _: &actions::OpenSettings, window, cx| {
+                this.open_settings_section(None, window, cx)
+            }))
+            // E5-H: the shortcuts modal.
+            .on_action(cx.listener(|this, _: &actions::ShowShortcuts, window, cx| {
+                this.show_shortcuts(window, cx)
+            }))
+            // E5-I: "Nuevo archivo" (`crate::new_file`).
+            .on_action(cx.listener(|this, _: &actions::NewFile, window, cx| {
+                this.open_new_file_prompt(window, cx)
+            }))
+            // E5-I: "Salir", with the unsaved-files dialog
+            // (`crate::title_menu`).
+            .on_action(
+                cx.listener(|this, _: &actions::Quit, window, cx| this.request_quit(window, cx)),
+            )
+            // E5-G / E5-I: the settings tab on its Connections section.
+            .on_action(
+                cx.listener(|this, _: &actions::OpenConnections, window, cx| {
+                    this.open_settings_section(Some(SettingsSection::Connections), window, cx)
+                }),
+            )
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_save_all))
             .on_action(cx.listener(Self::on_zoom_in))
@@ -1255,17 +1605,7 @@ impl Render for Workspace {
             .flex_col()
             .bg(theme.bg_app)
             .text_color(theme.text)
-            .child(
-                TitleBar::new().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .px_1()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(title),
-                ),
-            )
+            .child(self.render_title_bar(title, window, cx))
             .child(body)
             .child(self.render_status_bar(cx))
             .children(self.render_review_panel(cx))
@@ -1273,6 +1613,36 @@ impl Render for Workspace {
                 let modal = self.agents.read(cx).modal().clone();
                 modal.read(cx).is_open().then_some(modal)
             })
+            // The quick file finder floats over everything else, like the
+            // modal above (`crate::file_finder`, E5-F).
+            .children(
+                self.file_finder
+                    .as_ref()
+                    .filter(|finder| finder.read(cx).is_open())
+                    .cloned(),
+            )
+            // The "Nuevo archivo…" field floats over everything else too
+            // (`crate::new_file`, E5-I).
+            .children(
+                self.new_file
+                    .as_ref()
+                    .filter(|prompt| prompt.read(cx).is_open())
+                    .cloned(),
+            )
+            // The shortcuts modal floats over everything else too
+            // (`crate::shortcuts_modal`, E5-H).
+            .children(
+                Some(&self.shortcuts_modal)
+                    .filter(|modal| modal.read(cx).is_open())
+                    .cloned(),
+            )
+            // The "¿Guardar cambios?" quit dialog (D15, `crate::title_menu`,
+            // E5-I).
+            .children(self.render_quit_dialog(cx))
+            // "Hay N cambios de agente sin decidir" and the bar's "¿Rechazar
+            // todo el turno?" (`crate::review_close`).
+            .children(self.render_review_close_dialog(cx))
+            .children(self.render_reject_turn_dialog(cx))
             // Toasts float over the editor area, bottom center
             // (`02-visual.md` §6.5). "Editor area" is the center of the dock,
             // so the two side docks are subtracted from the band.

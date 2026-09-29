@@ -26,6 +26,17 @@ pub struct Hunk {
 pub struct LinePair { pub base_row: Option<u32>, pub buffer_row: Option<Anchor> }
 ```
 
+## De dónde sale la base (v2, 2026-09-28)
+
+**v2 (2026-09-28): la base viene de la foto del proyecto; las herramientas son solo una pista.** El store no cambia de forma: sigue recibiendo `capture_base_*`, `file_written`, `file_created` y `file_deleted`. Lo que cambió es quién lo alimenta (`cincel-workspace`, `review.rs` + `review_snapshot.rs`; regla completa en `03-arquitectura.md` §4):
+
+- Antes de cada prompt el host saca una foto de todos los archivos del proyecto (`cincel_project::ProjectSnapshot`, mismo recorrido y exclusiones que el árbol).
+- Todo lo que cambia en disco durante el turno es del agente, lo haya hecho con una herramienta o con un script: para una ruta que no está en revisión, la base es la copia de la foto (`capture_base_text`) o, si no existía, `file_created`; después `file_written`/`file_deleted` con lo que hay en disco. Renombrar = borrar + crear.
+- Las pistas del agente (`fs/read_text_file`, `fs/write_text_file`, `tool_call` edit/delete/move) siguen capturando la base antes, como en v1, pero dejaron de ser requisito.
+- Lo que el propio Cincel guarda durante el turno actualiza la foto y no se atribuye al agente.
+- `capture_base` es un no-op para un archivo ya en revisión: entre turnos encadenados la base original se conserva hasta que el usuario decide.
+- Los archivos no UTF-8 no entran en el store (no hay buffer): el host los revisa aparte, solo por archivo.
+
 ## Operaciones
 - `begin_turn(turn_id)`, `end_turn(turn_id)`.
 - `capture_base(path, text)`: fija la base si el archivo no está en revisión; si ya lo está, no hace nada (la base de un archivo persiste entre turnos hasta que se acepta o rechaza todo).

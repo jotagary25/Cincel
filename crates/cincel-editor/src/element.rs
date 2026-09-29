@@ -36,6 +36,7 @@
 //! and the icons are 14 px when two of them and a 2 px gap fit in it, 11 px
 //! otherwise ([`line_icon_size`]).
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Instant;
 
@@ -50,8 +51,10 @@ use gpui::{
 };
 
 use crate::display_map::{DisplayCell, DisplayRow, RowKind, RowText};
+use crate::git_gutter::GitGutterKind;
 use crate::input::WeakInputHandler;
 use crate::review::{ReviewAction, ReviewHunkKind};
+use crate::search::MatchLocation;
 use crate::settings::EditorChrome;
 use crate::theme::{
     self, CURRENT_LINE_ALPHA, DIFF_BG_ALPHA, DIFF_WORD_ALPHA, EditorTheme, PHANTOM_TEXT_ALPHA,
@@ -62,14 +65,29 @@ use crate::view::{
 };
 use crate::wrap_map::WrapRow;
 
-/// Left padding of the gutter, before the diff bar.
-const GUTTER_PADDING_LEFT: f32 = 4.;
-/// Width of the per-row diff bar in the gutter.
-const GUTTER_BAR_WIDTH: f32 = 3.;
-/// Gap between the diff bar and the line numbers.
-const GUTTER_BAR_GAP: f32 = 6.;
+// Gutter, left to right (`docs/specs/07-etapa5-productividad.md` §6.3):
+// padding 2, git column 3, gap 2, agent bar 3, gap 3 — the same 13 px the
+// padding (4), the agent bar (3) and its gap (6) took before the git column
+// existed, so the numbers and the text sit exactly where they always did.
+
+/// Left padding of the gutter, before the git column.
+pub(crate) const GUTTER_PADDING_LEFT: f32 = 2.;
+/// Width of the git column (added, modified, deletion mark).
+pub(crate) const GIT_BAR_WIDTH: f32 = 3.;
+/// Gap between the git column and the agent's diff bar.
+pub(crate) const GIT_BAR_GAP: f32 = 2.;
+/// Width of the agent's per-row diff bar in the gutter.
+pub(crate) const GUTTER_BAR_WIDTH: f32 = 3.;
+/// Gap between the agent's diff bar and the line numbers.
+pub(crate) const GUTTER_BAR_GAP: f32 = 3.;
+/// Everything before the line numbers: the width the gutter always had
+/// there.
+pub(crate) const GUTTER_BEFORE_NUMBERS: f32 =
+    GUTTER_PADDING_LEFT + GIT_BAR_WIDTH + GIT_BAR_GAP + GUTTER_BAR_WIDTH + GUTTER_BAR_GAP;
+/// Height of the mark where lines of `HEAD` were deleted.
+pub(crate) const GIT_DELETED_MARK_HEIGHT: f32 = 6.;
 /// Gap between the line numbers and the text.
-const GUTTER_TEXT_GAP: f32 = 12.;
+pub(crate) const GUTTER_TEXT_GAP: f32 = 12.;
 /// Height of the accept/reject pill (02-visual §6.1).
 pub const PILL_HEIGHT: f32 = 24.;
 /// Width of the accept/reject pill (02-visual §6.1).
@@ -137,8 +155,9 @@ pub(crate) struct GutterMetrics {
     pub gutter_width: Pixels,
 }
 
-/// The gutter of `view`. It never depends on the review: showing or hiding
-/// hunks must not move the text (02-visual §6.1).
+/// The gutter of `view`. It never depends on the review nor on the git
+/// diff: showing or hiding hunks must not move the text (02-visual §6.1,
+/// spec 07 D11/D16).
 pub(crate) fn gutter_metrics(view: &EditorView, window: &Window) -> GutterMetrics {
     let char_width = shape(
         "0".to_string(),
@@ -166,9 +185,7 @@ pub(crate) fn gutter_metrics(view: &EditorView, window: &Window) -> GutterMetric
     GutterMetrics {
         char_width,
         number_width,
-        gutter_width: px(GUTTER_PADDING_LEFT + GUTTER_BAR_WIDTH + GUTTER_BAR_GAP)
-            + number_width
-            + px(GUTTER_TEXT_GAP),
+        gutter_width: px(GUTTER_BEFORE_NUMBERS) + number_width + px(GUTTER_TEXT_GAP),
     }
 }
 
@@ -192,6 +209,8 @@ struct RowLayout {
     words: Vec<(Bounds<Pixels>, Hsla)>,
     /// Full-width background from the host's decorations, if any.
     background: Option<Hsla>,
+    /// The bar of the git column on this row (never on a phantom row).
+    git_bar: Option<(GitGutterKind, Hsla)>,
 }
 
 impl RowLayout {
@@ -295,6 +314,11 @@ pub struct EditorPrepaint {
     tooltip: Option<TooltipLayout>,
     /// Per-hunk gutter borders.
     hunk_borders: Vec<(Bounds<Pixels>, Hsla)>,
+    /// Deletion marks of the git column (the 3 × 6 mark and its 1 px line),
+    /// painted over the row boundaries.
+    git_deleted: Vec<(Bounds<Pixels>, Hsla)>,
+    /// X of the git column.
+    git_x: Pixels,
     /// Right edge of the line numbers.
     numbers_right: Pixels,
     /// The placeholder, shaped, while the buffer is empty.
@@ -315,6 +339,10 @@ pub struct EditorPrepaint {
     max_scroll_x: f32,
     scrollbar: Option<(Bounds<Pixels>, Bounds<Pixels>, f32)>,
     theme: EditorTheme,
+    /// What is not text and shows the arrow: the gutter and the strip the
+    /// vertical scrollbar lives in (its track and thumb). Filled after the
+    /// view is laid out.
+    margin_hitboxes: Vec<Hitbox>,
 }
 
 /// The editor element.
@@ -861,11 +889,15 @@ type BarSpec = (String, Hsla, Hsla, Option<ReviewAction>, f32);
 /// Lays out the floating review bar (02-visual §6.2), or `None` when it is
 /// hidden.
 ///
-/// "✓ Aceptar" and "✗ Rechazar" act on the hunk under the cursor, else on the
-/// host's current one ([`EditorView::review_target`]); they react whenever
-/// the bar does (not while the agent writes, when the bar only shows the
-/// spinner), with the glyph in `status.ok` / `status.error` and the word in
-/// `text`. The hovered button gets a `bg.surface` background.
+/// "✓ Aceptar todo" and "✗ Rechazar todo" act on the agent's whole turn, in
+/// every file ([`ReviewAction::AcceptTurn`] / [`ReviewAction::RejectTurn`],
+/// the same as `Ctrl+Alt+↵` / `Ctrl+Alt+⌫`): the hunk under the cursor
+/// already has its own pill and `Ctrl+↵` / `Ctrl+⌫`. The position ("cambio N
+/// de M") follows the hunk under the cursor, else the host's current one
+/// ([`EditorView::review_target`]). The buttons react whenever the bar does
+/// (not while the agent writes, when the bar only shows the spinner), with
+/// the glyph in `status.ok` / `status.error` and the word in `text`. The
+/// hovered button gets a `bg.surface` background.
 fn layout_bar(
     view: &mut EditorView,
     bounds: Bounds<Pixels>,
@@ -889,28 +921,49 @@ fn layout_bar(
         false
     } else if !review.hunks.is_empty() {
         let target = view.review_target().unwrap_or(0);
-        let id = review.hunks[target].id;
         let total = review.pending_in_file.max(review.hunks.len());
         let sep = |specs: &mut Vec<BarSpec>| {
             specs.push(("·".into(), muted, muted, None, 10.));
         };
+        // A file decided only as a whole (a deletion) gets its own two
+        // buttons first; the turn's follow.
+        let lead = if review.file_actions {
+            specs.push((
+                "✓ Aceptar archivo".into(),
+                check,
+                label,
+                Some(ReviewAction::AcceptFile),
+                0.,
+            ));
+            specs.push((
+                "✗ Rechazar archivo".into(),
+                cross,
+                label,
+                Some(ReviewAction::RejectFile),
+                10.,
+            ));
+            sep(&mut specs);
+            10.
+        } else {
+            0.
+        };
         specs.push((
-            "✓ Aceptar".into(),
+            "✓ Aceptar todo".into(),
             check,
             label,
-            Some(ReviewAction::AcceptHunk(id)),
-            0.,
+            Some(ReviewAction::AcceptTurn),
+            lead,
         ));
-        specs.push(("Ctrl+↵".into(), muted, muted, None, 6.));
+        specs.push(("Ctrl+Alt+↵".into(), muted, muted, None, 6.));
         sep(&mut specs);
         specs.push((
-            "✗ Rechazar".into(),
+            "✗ Rechazar todo".into(),
             cross,
             label,
-            Some(ReviewAction::RejectHunk(id)),
+            Some(ReviewAction::RejectTurn),
             10.,
         ));
-        specs.push(("Ctrl+⌫".into(), muted, muted, None, 6.));
+        specs.push(("Ctrl+Alt+⌫".into(), muted, muted, None, 6.));
         sep(&mut specs);
         specs.push((
             "↑ Alt+K".into(),
@@ -928,7 +981,7 @@ fn layout_bar(
         ));
         sep(&mut specs);
         specs.push((
-            format!("{}/{total} cambios", target + 1),
+            format!("cambio {} de {total}", target + 1),
             text,
             text,
             None,
@@ -1132,6 +1185,17 @@ impl Element for EditorElement {
             let numbers_left = numbers_right - metrics.number_width;
             let text_width = (bounds.size.width - gutter_width - px(SCROLLBAR_WIDTH)).max(px(1.));
 
+            // The git column: hunks resolved at this version (their anchors
+            // followed every edit since the host computed them). No gutter,
+            // no column.
+            let git_hunks = if minimal {
+                Vec::new()
+            } else {
+                view.git_gutter.resolve()
+            };
+            let git_colors = view.git_gutter.colors;
+            let git_x = bounds.left() + px(GUTTER_PADDING_LEFT);
+
             // Soft wrap: monospace columns, or measured advances with a
             // prose font.
             view.ensure_wrap(text_width, char_width, window);
@@ -1148,13 +1212,24 @@ impl Element for EditorElement {
                 view.scroll_top = row * f32::from(line_height);
             }
 
-            // Autoscroll to the cursor if it moved off-screen.
+            // Autoscroll to the cursor if it moved off-screen; a jump to a
+            // change centres it instead, unless it already sits in the middle
+            // third (the clamp below keeps it as close as the document lets).
             if view.autoscroll {
                 view.autoscroll = false;
+                let center = std::mem::take(&mut view.autoscroll_center);
                 let cursor_row = view.cursor_wrap_row();
                 let cursor_top = cursor_row as f32 * f32::from(line_height);
                 let cursor_bottom = cursor_top + f32::from(line_height);
-                if cursor_top < view.scroll_top {
+                let viewport = f32::from(viewport_height);
+                if center {
+                    let third = viewport / 3.;
+                    let centred = cursor_top >= view.scroll_top + third
+                        && cursor_bottom <= view.scroll_top + viewport - third;
+                    if !centred {
+                        view.scroll_top = cursor_top + f32::from(line_height) / 2. - viewport / 2.;
+                    }
+                } else if cursor_top < view.scroll_top {
                     view.scroll_top = cursor_top;
                 } else if cursor_bottom > view.scroll_top + f32::from(viewport_height) {
                     view.scroll_top = cursor_bottom - f32::from(viewport_height);
@@ -1184,7 +1259,23 @@ impl Element for EditorElement {
             let selection = view.selection_range();
             let has_selection = view.has_selection();
             let cursor_display_row = view.cursor.row;
-            let search_matches: Vec<Range<usize>> = view.search.matches().to_vec();
+            // Real matches as buffer ranges; phantom ones by (hunk, line), so a
+            // phantom row finds its own without scanning the buffer ones.
+            let search_matches: Vec<Range<usize>> = view.search.buffer_matches();
+            let mut phantom_matches: HashMap<(usize, usize), Vec<Range<usize>>> = HashMap::new();
+            for found in view.search.matches() {
+                if let MatchLocation::Phantom {
+                    hunk_ix,
+                    line_ix,
+                    range,
+                } = found
+                {
+                    phantom_matches
+                        .entry((*hunk_ix, *line_ix))
+                        .or_default()
+                        .push(range.clone());
+                }
+            }
             let current_match = view.search.current();
             let marked_range = view.marked_range.clone();
             let show_whitespace = view.settings().show_whitespace;
@@ -1335,6 +1426,18 @@ impl Element for EditorElement {
                     _ => (Vec::new(), added_word),
                 };
 
+                // The git bar covers every segment of a wrapped line; phantom
+                // rows do not exist on disk and never get one.
+                let git_bar = match cell {
+                    DisplayCell::Buffer(buffer_row) => git_hunks
+                        .iter()
+                        .find(|hunk| {
+                            hunk.kind != GitGutterKind::Deleted && hunk.rows.contains(&buffer_row)
+                        })
+                        .map(|hunk| (hunk.kind, theme::color(git_colors.color(hunk.kind)))),
+                    DisplayCell::Phantom { .. } => None,
+                };
+
                 let mut layout = RowLayout {
                     wrap_row,
                     display_row,
@@ -1349,6 +1452,7 @@ impl Element for EditorElement {
                     row_text,
                     words: Vec::new(),
                     background,
+                    git_bar,
                 };
 
                 let row_bounds = |from: u32, to: u32| -> Bounds<Pixels> {
@@ -1402,7 +1506,28 @@ impl Element for EditorElement {
                     }
                 }
 
-                // Search matches, for real rows only.
+                let matches_before = matches.len();
+                // Search matches on a phantom row (07-etapa5 §10.2): searched and
+                // highlighted like real ones, never replaced.
+                if let DisplayCell::Phantom { hunk_ix, line_ix } = cell
+                    && let Some(found) = phantom_matches.get(&(hunk_ix, line_ix))
+                {
+                    for found in found {
+                        let from = (found.start as u32).max(range.start);
+                        let to = (found.end as u32).min(range.end);
+                        if from >= to {
+                            continue;
+                        }
+                        let is_current = matches!(
+                            &current_match,
+                            Some(MatchLocation::Phantom { hunk_ix: h, line_ix: l, range: r })
+                                if *h == hunk_ix && *l == line_ix && r == found
+                        );
+                        matches.push((row_bounds(from, to), is_current));
+                    }
+                }
+
+                // Search matches, brackets and marked text, for real rows.
                 if let DisplayCell::Buffer(_) = cell {
                     let row_start = base;
                     let row_end = base + layout.row_text.len() as usize;
@@ -1429,9 +1554,10 @@ impl Element for EditorElement {
                         if from >= to {
                             continue;
                         }
-                        let is_current = current_match
-                            .as_ref()
-                            .is_some_and(|current| current == found);
+                        let is_current = matches!(
+                            &current_match,
+                            Some(MatchLocation::Buffer(current)) if current == found
+                        );
                         matches.push((row_bounds(from, to), is_current));
                     }
                     // Marked (IME) text.
@@ -1475,6 +1601,11 @@ impl Element for EditorElement {
                         word_diffs: words.len(),
                         background: layout.background.is_some(),
                         monospace: row_font == view.style.font,
+                        git_bar: layout.git_bar.map(|(kind, _)| kind),
+                        search_matches: matches.len() - matches_before,
+                        current_search_match: matches[matches_before..]
+                            .iter()
+                            .any(|(_, current)| *current),
                     });
                 }
                 layout.words = words;
@@ -1491,6 +1622,62 @@ impl Element for EditorElement {
 
             // The 2 px border of every visible hunk, in the kind's colour.
             let wrap_y = |wrap_row: WrapRow| top + line_height * (wrap_row - first_row) as f32;
+
+            // Deletion marks of the git column: 3 × 6 px centred on the
+            // boundary between the rows the deleted lines sat between, plus
+            // a 1 px line across the column. Pushed inside the real row when
+            // the neighbour across the boundary is a phantom row (or there is
+            // none: the top of the file, below its last row).
+            let mut git_deleted = Vec::new();
+            let buffer_rows = view.display_map.buffer_row_count();
+            for hunk in git_hunks
+                .iter()
+                .filter(|hunk| hunk.kind == GitGutterKind::Deleted)
+            {
+                let row = hunk.rows.start;
+                let (boundary, real_above, real_below) = if row < buffer_rows {
+                    let display_row = view.display_map.to_display_row(row);
+                    let above = display_row > 0
+                        && matches!(
+                            view.display_map.to_buffer(display_row - 1),
+                            DisplayCell::Buffer(_)
+                        );
+                    (view.wrap.to_wrap_row(display_row, 0), above, true)
+                } else if buffer_rows > 0 {
+                    let display_row = view.display_map.to_display_row(buffer_rows - 1);
+                    (
+                        view.wrap.to_wrap_row(display_row, u32::MAX) + 1,
+                        true,
+                        false,
+                    )
+                } else {
+                    continue;
+                };
+                if boundary < first_row || boundary > last_row {
+                    continue;
+                }
+                let y = wrap_y(boundary);
+                let height = px(GIT_DELETED_MARK_HEIGHT);
+                let mark_top = match (real_above, real_below) {
+                    (true, true) => y - height / 2.,
+                    (false, _) => y,
+                    (true, false) => y - height,
+                };
+                let line_top = match (real_above, real_below) {
+                    (false, _) => y,
+                    (true, false) => y - px(1.),
+                    (true, true) => y - px(0.5),
+                };
+                let color = theme::color(git_colors.deleted);
+                git_deleted.push((
+                    Bounds::new(point(git_x, mark_top), size(px(GIT_BAR_WIDTH), height)),
+                    color,
+                ));
+                git_deleted.push((
+                    Bounds::new(point(git_x, line_top), size(px(GIT_BAR_WIDTH), px(1.))),
+                    color,
+                ));
+            }
             let border_x = text_origin_x - px(GUTTER_TEXT_GAP / 2. + HUNK_BORDER_WIDTH / 2.);
             let mut hunk_borders = Vec::new();
             for (hunk_ix, hunk) in view.review.hunks.iter().enumerate() {
@@ -1756,6 +1943,28 @@ impl Element for EditorElement {
                 }
             }
             let placeholder_painted = placeholder.is_some();
+            let git_marks = if probe {
+                let bars = rows.iter().filter_map(|row| {
+                    row.git_bar.map(|(kind, _)| {
+                        (
+                            kind,
+                            Bounds::new(
+                                point(git_x, row.origin_y),
+                                size(px(GIT_BAR_WIDTH), line_height),
+                            ),
+                        )
+                    })
+                });
+                // Every other entry of `git_deleted` is the 1 px line of the
+                // mark before it.
+                let marks = git_deleted
+                    .iter()
+                    .step_by(2)
+                    .map(|(bounds, _)| (GitGutterKind::Deleted, *bounds));
+                bars.chain(marks).collect()
+            } else {
+                Vec::new()
+            };
             view.end_frame(
                 probe_rows,
                 review_frame,
@@ -1766,6 +1975,7 @@ impl Element for EditorElement {
                     text_width,
                 },
                 placeholder_painted,
+                git_marks,
             );
 
             EditorPrepaint {
@@ -1776,6 +1986,8 @@ impl Element for EditorElement {
                 bar,
                 tooltip,
                 hunk_borders,
+                git_deleted,
+                git_x,
                 numbers_right,
                 placeholder,
                 cursor,
@@ -1793,8 +2005,26 @@ impl Element for EditorElement {
                 max_scroll_x,
                 scrollbar,
                 theme,
+                margin_hitboxes: Vec::new(),
             }
         });
+
+        // The margins that are not text: the gutter (numbers, git column,
+        // review icons) and the scrollbar's strip, whether or not the bar is
+        // showing right now (the text never runs under it).
+        let gutter = Bounds::new(
+            bounds.origin,
+            size(prepaint.gutter_width, bounds.size.height),
+        );
+        let scrollbar_strip = Bounds::new(
+            point(bounds.right() - px(SCROLLBAR_WIDTH), bounds.top()),
+            size(px(SCROLLBAR_WIDTH), bounds.size.height),
+        );
+        prepaint.margin_hitboxes = [gutter, scrollbar_strip]
+            .into_iter()
+            .filter(|margin| margin.size.width > px(0.))
+            .map(|margin| window.insert_hitbox(margin, HitboxBehavior::Normal))
+            .collect();
 
         // Real hitboxes for the review buttons, inserted on top of the editor.
         // Disabled controls get none, so a click on them does nothing.
@@ -1895,7 +2125,19 @@ impl Element for EditorElement {
                     window.paint_quad(fill(*quad, *color));
                 }
 
-                // Gutter diff bar.
+                // Git column, after the row background and before the
+                // agent's bar, each in its own column.
+                if let Some((_, color)) = row.git_bar {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(prepaint.git_x, row.origin_y),
+                            size(px(GIT_BAR_WIDTH), line_height),
+                        ),
+                        color,
+                    ));
+                }
+
+                // Gutter diff bar of the agent.
                 if let Some(color) = match row.kind {
                     RowKind::Phantom(_) => Some(theme::color(theme.diff_deleted)),
                     RowKind::Added(_) => Some(theme::color(theme.diff_added)),
@@ -1903,12 +2145,22 @@ impl Element for EditorElement {
                 } {
                     window.paint_quad(fill(
                         Bounds::new(
-                            point(bounds.left() + px(GUTTER_PADDING_LEFT), row.origin_y),
+                            point(
+                                bounds.left()
+                                    + px(GUTTER_PADDING_LEFT + GIT_BAR_WIDTH + GIT_BAR_GAP),
+                                row.origin_y,
+                            ),
                             size(px(GUTTER_BAR_WIDTH), line_height),
                         ),
                         color,
                     ));
                 }
+            }
+
+            // Git deletion marks: over the row boundaries, so after every
+            // row background.
+            for (quad, color) in &prepaint.git_deleted {
+                window.paint_quad(fill(*quad, *color));
             }
 
             // Per-hunk border of the gutter.
@@ -2166,13 +2418,18 @@ impl Element for EditorElement {
         // Mouse cursors of the review controls: the pointing hand on what
         // reacts, the arrow on the rest of a pill or of the bar and on what is
         // disabled — never the text's I-beam. Later requests win, so the
-        // surfaces go first and their buttons after.
+        // surfaces go first and their buttons after. The margins that are
+        // not text (gutter, scrollbar) go before everything: the arrow there,
+        // and the gutter's `+`/`−` still get their hand on top.
         let mut control_cursors: Vec<(Bounds<Pixels>, CursorStyle)> = Vec::new();
         {
             let mut set = |hitbox: &Hitbox, style: CursorStyle, window: &mut Window| {
                 window.set_cursor_style(style, hitbox);
                 control_cursors.push((hitbox.bounds, style));
             };
+            for hitbox in &prepaint.margin_hitboxes {
+                set(hitbox, CursorStyle::Arrow, window);
+            }
             for pill in &prepaint.pills {
                 if let Some(hitbox) = &pill.surface_hitbox {
                     set(hitbox, CursorStyle::Arrow, window);

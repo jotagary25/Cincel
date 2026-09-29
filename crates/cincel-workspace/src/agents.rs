@@ -83,9 +83,18 @@ use crate::conversations::{ConversationStore, format_when, new_conversation_id, 
 use crate::project::Project;
 use crate::review::Review;
 
+/// The Connections section of the settings tab (§4.4 of spec 07).
+mod settings_bridge;
+
 /// How often the open conversation is written to disk when it changed
 /// (`docs/etapas/etapa-2.md`, "Transcript persistence").
 const TRANSCRIPT_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// What the chat says while a prompt waits for the review's photo of the
+/// project (`docs/specs/03-arquitectura.md` §4, v2).
+pub const PREPARING_REVIEW: &str = "Preparando la revisión…";
+/// How long a prompt may wait for that photo before the chat says so.
+const PREPARING_REVIEW_AFTER: Duration = Duration::from_secs(1);
 
 /// What this module has to remember about the conversation on screen; its
 /// entries live in the panel and are only pulled out when it is saved.
@@ -164,6 +173,12 @@ pub struct Agents {
     /// (mode, config option, authentication, session) went out too, so an
     /// `AgentEvent::Error` is no longer known to be the prompt's.
     side_request_in_turn: bool,
+    /// The id of a prompt waiting for the review's photo of the project
+    /// before it goes out (`docs/specs/03-arquitectura.md` §4, v2). Its task
+    /// sends it only while this still names it; a cancel clears it.
+    deferred_prompt: Option<u64>,
+    /// Ids for [`Agents::deferred_prompt`].
+    next_deferred_prompt: u64,
 
     last_saved_conversation: Option<String>,
 
@@ -190,6 +205,11 @@ pub struct Agents {
     /// own stderr via `debugLogger.error`, never into the ACP error). Reset
     /// on every [`Agents::spawn_active`] so it never mixes agents.
     recent_stderr: std::collections::VecDeque<String>,
+
+    /// What the settings tab's Connections section needs: its handle, the
+    /// last registry check and the update in flight
+    /// (`docs/specs/07-etapa5-productividad.md` §4.4).
+    settings: settings_bridge::SettingsBridge,
 }
 
 /// How many stderr lines [`Agents::recent_stderr`] keeps.
@@ -258,13 +278,19 @@ impl Agents {
             policy,
             prompt_in_flight: false,
             side_request_in_turn: false,
+            deferred_prompt: None,
+            next_deferred_prompt: 0,
             last_saved_conversation: None,
             background,
             event_task: None,
             transcript_task: None,
             _subscriptions: subscriptions,
             recent_stderr: std::collections::VecDeque::new(),
+            settings: settings_bridge::SettingsBridge::new(background),
         };
+        // Nothing runs yet, so every adapter and runtime version that is not
+        // `current` can go (§10.4 of spec 07, D13).
+        agents.prune_unused_versions();
         agents.refresh_connections(cx);
         tracing::info!(
             conexiones = agents.chat.read(cx).connections().len(),
@@ -404,6 +430,8 @@ impl Agents {
             return;
         }
         tracing::info!("se detuvo el proceso del agente de la conexión anterior");
+        // Nothing runs now: versions an update left behind can go (D13).
+        self.prune_unused_versions();
         self.end_orphaned_turn(cx);
         self.chat.update(cx, |chat, cx| {
             chat.set_status(AgentStatus::Disconnected, cx)
@@ -477,6 +505,8 @@ impl Agents {
             chat.set_preselected_connection(preselected, cx);
         });
         self.refresh_conversations(cx);
+        // The settings tab lists the same rows.
+        self.push_settings_view(cx);
     }
 
     /// The badge of one connection: what the profile says, overridden by
@@ -538,7 +568,7 @@ impl Agents {
                 self.spawn_active(&connection, cx);
             }
             ConnectionStatus::Connected | ConnectionStatus::SessionExpired => {
-                self.show_expired(cx);
+                self.show_expired(None, cx);
             }
             ConnectionStatus::Unavailable { reason } => self.show_unavailable(reason, cx),
         }
@@ -621,8 +651,13 @@ impl Agents {
         });
     }
 
-    /// F4: "La sesión de «X» venció" for the active connection.
-    fn show_expired(&mut self, cx: &mut Context<Self>) {
+    /// F4: "La sesión de «X» venció" for the active connection. `reason` is
+    /// the agent's own explanation for the `auth_required` error, already
+    /// redacted and clipped (`AgentEvent::AuthRequired`'s handler below,
+    /// `docs/specs/07-etapa5-productividad.md` §10.1); every other caller
+    /// passes `None`, since none of them come from a fresh `AuthRequired`
+    /// with a message of its own.
+    fn show_expired(&mut self, reason: Option<String>, cx: &mut Context<Self>) {
         let Some(active) = self.active.clone() else {
             return;
         };
@@ -632,6 +667,7 @@ impl Agents {
                 Some(ConnectionBanner::Expired {
                     id: active.id.to_string(),
                     label: active.label.clone(),
+                    reason,
                 }),
                 cx,
             );
@@ -718,8 +754,11 @@ impl Agents {
             }
             ModalEvent::Renamed { .. } => self.refresh_connections(cx),
             ModalEvent::Closed => {
-                self.chat
-                    .update(cx, |chat, cx| chat.focus_input(window, cx));
+                // Opened from the settings tab: the keyboard goes back there.
+                if !self.refocus_settings_after_modal(window, cx) {
+                    self.chat
+                        .update(cx, |chat, cx| chat.focus_input(window, cx));
+                }
             }
         }
     }
@@ -1098,6 +1137,78 @@ impl Agents {
                 return;
             }
         };
+        if matches!(owned, AgentCommand::Cancel { .. }) && self.deferred_prompt.take().is_some() {
+            // The prompt never left: there is nothing to cancel on the
+            // agent's side, only the review turn and the chat to free.
+            self.clear_preparing_notice(cx);
+            self.end_orphaned_turn(cx);
+            return;
+        }
+        if matches!(owned, AgentCommand::Prompt { .. })
+            && let Some(ready) = self.review.update(cx, |review, _| review.photo_waiter())
+        {
+            self.defer_prompt(owned, ready, cx);
+            return;
+        }
+        self.dispatch(owned);
+    }
+
+    /// Holds a prompt until the review's photo of the project is ready
+    /// (`docs/specs/03-arquitectura.md` §4, v2): what the agent changes has
+    /// to be compared with the project as it was before the message. Past a
+    /// second the chat says "Preparando la revisión…".
+    fn defer_prompt(
+        &mut self,
+        command: AgentCommand,
+        ready: tokio::sync::oneshot::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.next_deferred_prompt;
+        self.next_deferred_prompt += 1;
+        self.deferred_prompt = Some(id);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PREPARING_REVIEW_AFTER).await;
+            let _ = this.update(cx, |agents, cx| {
+                if agents.deferred_prompt == Some(id) {
+                    agents.chat.update(cx, |chat, cx| {
+                        chat.set_history_notice(Some(PREPARING_REVIEW.to_string()), cx)
+                    });
+                }
+            });
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            // A dropped sender (the photo was abandoned) releases it too.
+            let _ = ready.await;
+            let _ = this.update(cx, |agents, cx| {
+                if agents.deferred_prompt != Some(id) {
+                    return;
+                }
+                agents.deferred_prompt = None;
+                agents.clear_preparing_notice(cx);
+                if agents.connection.is_none() {
+                    // The agent went away while the photo was being taken.
+                    agents.end_orphaned_turn(cx);
+                    return;
+                }
+                agents.dispatch(command);
+            });
+        })
+        .detach();
+    }
+
+    /// Takes "Preparando la revisión…" off the chat, if it is there.
+    fn clear_preparing_notice(&mut self, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| {
+            if chat.history_notice() == Some(PREPARING_REVIEW) {
+                chat.set_history_notice(None, cx);
+            }
+        });
+    }
+
+    /// Pushes a command onto the worker's channel, keeping track of the
+    /// prompt in flight.
+    fn dispatch(&mut self, owned: AgentCommand) {
         match &owned {
             AgentCommand::Prompt { .. } => {
                 self.prompt_in_flight = true;
@@ -1244,19 +1355,25 @@ impl Agents {
                     );
                 });
             }
-            AgentEvent::AuthRequired { ref methods } => {
+            AgentEvent::AuthRequired {
+                ref methods,
+                ref message,
+            } => {
                 // F4: the connection's session is gone. The chat's old
                 // "Hace falta autenticarse" card is not used any more: the
                 // banner's "Volver a conectar" repeats the login on the same
                 // profile.
                 //
-                // `AgentEvent::AuthRequired` carries no message of its own
-                // (the ACP error text that triggered it is discarded when
-                // `cincel-acp` maps `ErrorCode::AuthRequired` to this
-                // variant), so the announced methods and whatever the agent
-                // wrote to its own stderr are the only diagnostic left:
-                // gemini-cli, for one, logs the real rejection reason (e.g.
-                // a Code Assist eligibility error) through
+                // `docs/specs/07-etapa5-productividad.md` §10.1: `message`
+                // is the agent's own reason for `auth_required` (`cincel-acp`
+                // already unwraps it from the RPC error's `data`/`message`);
+                // redacted like a login line (`redact_line`: token/code/state
+                // query params and one-time codes, plus every URL's query)
+                // and clipped to 240 chars before it reaches the log or the
+                // banner. Without one, the announced methods and whatever
+                // the agent wrote to its own stderr are the only diagnostic
+                // left: gemini-cli, for one, logs the real rejection reason
+                // (e.g. a Code Assist eligibility error) through
                 // `debugLogger.error`, never in the RPC error.
                 let method_ids: Vec<&str> = methods
                     .iter()
@@ -1268,12 +1385,18 @@ impl Agents {
                         _ => "?",
                     })
                     .collect();
+                let reason = message.as_deref().and_then(|text| {
+                    let redacted = cincel_connections::redact_line(text, &[]);
+                    let clipped: String = redacted.chars().take(240).collect();
+                    (!clipped.trim().is_empty()).then_some(clipped)
+                });
                 tracing::warn!(
                     metodos = ?method_ids,
+                    motivo = ?reason,
                     stderr_reciente = %self.recent_stderr_tail(),
                     "el agente pide autenticación: sesión vencida"
                 );
-                self.show_expired(cx);
+                self.show_expired(reason, cx);
             }
             AgentEvent::AuthFailed { method_id, message } => {
                 tracing::warn!(metodo = %method_id, %message, "falló la autenticación del agente");
@@ -1295,7 +1418,7 @@ impl Agents {
                 if self.prompt_in_flight && !self.side_request_in_turn {
                     self.end_orphaned_turn(cx);
                 }
-                self.show_expired(cx);
+                self.show_expired(None, cx);
             }
             AgentEvent::AuthSucceeded { method_id } => {
                 if let Some(active) = &self.active {
@@ -1312,7 +1435,7 @@ impl Agents {
                     chat.handle_event(AgentEvent::LoggedOut { ok }, cx)
                 });
                 if ok {
-                    self.show_expired(cx);
+                    self.show_expired(None, cx);
                 }
             }
             AgentEvent::AuthStatus {
@@ -1333,7 +1456,7 @@ impl Agents {
                     "estado de autenticación del agente"
                 );
                 match (&kind, account) {
-                    (AuthStatusKind::None, _) => self.show_expired(cx),
+                    (AuthStatusKind::None, _) => self.show_expired(None, cx),
                     (_, Some(account)) => {
                         let identity = Identity {
                             email: account.email,
@@ -1471,7 +1594,7 @@ impl Agents {
                 });
                 if asks_for_login {
                     tracing::warn!("el agente pide iniciar sesión en el navegador: sesión vencida");
-                    self.show_expired(cx);
+                    self.show_expired(None, cx);
                 }
             }
             other => {
@@ -1536,6 +1659,10 @@ impl Agents {
     /// the review captures their base; when it completes (or fails, which may
     /// still have written something) the files are re-read from disk. The
     /// `diff` the agent sends is only a UI signal and is never applied.
+    ///
+    /// Since v2 this is only a hint: every change the agent makes on disk is
+    /// reviewed against the photo of the project taken before the prompt,
+    /// whatever tool made it (`execute` included); see `crate::review`.
     fn review_tool_call(&mut self, update: &SessionUpdate, cx: &mut Context<Self>) {
         let as_update = match update {
             SessionUpdate::ToolCall(call) => ToolCallUpdate::from(call.clone()),
@@ -2162,7 +2289,7 @@ mod tests {
                 .cloned()
                 .unwrap()
         });
-        assert_eq!(row.identity.as_deref(), Some("gary@example.com · max"));
+        assert_eq!(row.identity.as_deref(), Some("ana@example.com · max"));
         assert!(row.last_used.starts_with("Usado"), "{}", row.last_used);
     }
 
@@ -2924,6 +3051,7 @@ mod tests {
             agents.handle_agent_event(
                 AgentEvent::AuthRequired {
                     methods: Vec::new(),
+                    message: None,
                 },
                 cx,
             )
@@ -2941,6 +3069,83 @@ mod tests {
         assert_eq!(
             h.chat.read_with(cx, |chat, _| chat.status()),
             AgentStatus::AuthRequired
+        );
+    }
+
+    /// `docs/specs/07-etapa5-productividad.md` §10.1: the agent's own
+    /// `auth_required` message reaches the banner, redacted (a login URL's
+    /// query is masked, like a login line) and clipped to 240 characters.
+    #[gpui::test]
+    fn auth_required_message_reaches_the_banner_redacted_and_clipped(cx: &mut TestAppContext) {
+        let dir = sample_project();
+        let (h, cx) = harness(dir.path(), cx);
+        let _session = spawn_and_connect(&h, cx);
+        h.agents.update(cx, |agents, cx| {
+            agents.handle_agent_event(
+                AgentEvent::AuthRequired {
+                    methods: Vec::new(),
+                    message: Some("token revoked".to_string()),
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            h.chat.read_with(cx, |chat, _| chat
+                .banner()
+                .and_then(ConnectionBanner::reason_text)),
+            Some("El agente dijo: «token revoked»".to_string())
+        );
+
+        // A login link's query is masked the same way a login line is
+        // (`cincel_connections::redact_line`), never shown verbatim. No
+        // need to relaunch: `handle_agent_event` is driven directly, and
+        // `self.active` stays set after the first `AuthRequired`.
+        h.agents.update(cx, |agents, cx| {
+            agents.handle_agent_event(
+                AgentEvent::AuthRequired {
+                    methods: Vec::new(),
+                    message: Some(
+                        "sesión perdida: reingresá en https://x.test/login?code=abc123&state=xyz"
+                            .to_string(),
+                    ),
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let reason = h
+            .chat
+            .read_with(cx, |chat, _| {
+                chat.banner().and_then(ConnectionBanner::reason_text)
+            })
+            .expect("hay motivo");
+        assert!(!reason.contains("code=abc123"), "{reason}");
+        assert!(!reason.contains("state=xyz"), "{reason}");
+
+        // 240-character clip: a much longer message is cut, not shown whole.
+        let long_message = "x".repeat(400);
+        h.agents.update(cx, |agents, cx| {
+            agents.handle_agent_event(
+                AgentEvent::AuthRequired {
+                    methods: Vec::new(),
+                    message: Some(long_message),
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let reason = h
+            .chat
+            .read_with(cx, |chat, _| {
+                chat.banner().and_then(ConnectionBanner::reason_text)
+            })
+            .expect("hay motivo");
+        // "El agente dijo: «" + up to 240 chars + "»".
+        assert_eq!(
+            reason.chars().filter(|c| *c == 'x').count(),
+            240,
+            "{reason}"
         );
     }
 

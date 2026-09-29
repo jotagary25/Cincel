@@ -25,6 +25,7 @@ mod color;
 mod config;
 mod context;
 mod defaults;
+mod edit;
 mod issue;
 mod jsonc;
 mod keymap;
@@ -38,8 +39,9 @@ pub use color::Rgba;
 pub use config::Config;
 pub use context::ContextExpr;
 pub use defaults::{default_keymap_jsonc, default_settings_jsonc};
+pub use edit::{EditError, SettingsEdit, apply_edit, write_edit};
 pub use issue::{Loaded, SettingsIssue};
-pub use keymap::{KeyBinding, Keymap, KeymapSection, Keystroke};
+pub use keymap::{EffectiveBinding, KeyBinding, Keymap, KeymapOrigin, KeymapSection, Keystroke};
 pub use migration::{MigratedRoot, MigrationOutcome, XdgRoot, migrate_xdg_dirs};
 pub use paths::{
     Paths, config_dir, data_dir, keymap_path, recents_path, settings_path, state_dir, themes_dir,

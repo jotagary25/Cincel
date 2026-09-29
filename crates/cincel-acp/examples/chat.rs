@@ -246,7 +246,10 @@ async fn print_capabilities(
                 print_auth_methods(&auth_methods, launch);
                 return Ok(ExitCode::SUCCESS);
             }
-            AgentEvent::AuthRequired { methods } => {
+            AgentEvent::AuthRequired { methods, message } => {
+                if let Some(message) = message {
+                    println!("el agente dijo: {message}");
+                }
                 print_auth_methods(&methods, launch);
                 return Ok(ExitCode::from(3));
             }
@@ -298,9 +301,12 @@ async fn event_loop(
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            AgentEvent::AuthRequired { methods } => {
+            AgentEvent::AuthRequired { methods, message } => {
                 println!("---");
                 println!("hace falta autenticarse antes de crear la sesión.");
+                if let Some(message) = message {
+                    println!("el agente dijo: {message}");
+                }
                 print_auth_methods(&methods, &session.launch);
                 return Ok(ExitCode::from(3));
             }

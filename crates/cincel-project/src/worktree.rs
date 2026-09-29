@@ -525,29 +525,18 @@ impl Worktree {
 
     /// A walker configured like the project wants it.
     fn walk_builder(&self, root: &Path) -> WalkBuilder {
-        let mut builder = WalkBuilder::new(root);
-        let rules = self.rules.clone();
-        builder
-            .hidden(!self.config.show_hidden)
-            .parents(self.config.respect_gitignore)
-            .git_ignore(self.config.respect_gitignore)
-            // `.gitignore` applies even before `git init`, which is what a
-            // user expects from a file tree (ripgrep's `--no-require-git`).
-            .require_git(false)
-            .git_global(self.config.respect_gitignore)
-            .git_exclude(self.config.respect_gitignore)
-            .follow_links(self.config.follow_symlinks)
-            .threads(self.config.threads)
-            // `files.exclude` is applied here rather than through
-            // `Override` so that one implementation answers both the walk and
-            // the watcher's "is this path interesting?".
-            .filter_entry(move |entry| {
-                entry.depth() == 0
-                    || !rules
-                        .excludes()
-                        .matches(&rules.relative(entry.path()).unwrap_or_default())
-            });
-        builder
+        project_walk_builder(root, &self.rules, &self.config)
+    }
+
+    /// What [`ProjectSnapshot::capture`](crate::ProjectSnapshot::capture)
+    /// needs to walk the project exactly like this tree does (same rules,
+    /// same `files.exclude`), as a `Send` value for a background thread.
+    pub fn snapshot_source(&self) -> crate::SnapshotSource {
+        crate::SnapshotSource {
+            root: self.root.clone(),
+            rules: self.rules.clone(),
+            config: self.config.clone(),
+        }
     }
 
     /// Converts a walker entry into a tree entry, skipping the root.
@@ -646,6 +635,40 @@ impl Worktree {
             .expect("no se pudo lanzar el hilo de recorrido");
         WorktreeScan { receiver }
     }
+}
+
+/// A walker over `root` configured like the project tree: `.gitignore` and
+/// friends when `config` asks for them, hidden files, symlinks, threads, and
+/// `files.exclude` through `rules`. The tree and the review snapshot share it
+/// so both see exactly the same files.
+pub(crate) fn project_walk_builder(
+    root: &Path,
+    rules: &Arc<IgnoreRules>,
+    config: &WorktreeConfig,
+) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    let rules = rules.clone();
+    builder
+        .hidden(!config.show_hidden)
+        .parents(config.respect_gitignore)
+        .git_ignore(config.respect_gitignore)
+        // `.gitignore` applies even before `git init`, which is what a
+        // user expects from a file tree (ripgrep's `--no-require-git`).
+        .require_git(false)
+        .git_global(config.respect_gitignore)
+        .git_exclude(config.respect_gitignore)
+        .follow_links(config.follow_symlinks)
+        .threads(config.threads)
+        // `files.exclude` is applied here rather than through
+        // `Override` so that one implementation answers both the walk and
+        // the watcher's "is this path interesting?".
+        .filter_entry(move |entry| {
+            entry.depth() == 0
+                || !rules
+                    .excludes()
+                    .matches(&rules.relative(entry.path()).unwrap_or_default())
+        });
+    builder
 }
 
 /// Buffers entries so the channel sees one message per [`BATCH`], and flushes

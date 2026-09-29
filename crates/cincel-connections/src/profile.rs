@@ -644,14 +644,14 @@ mod tests {
         assert!(profile.offline_identity().is_none());
         std::fs::write(
             profile.credentials_file(),
-            r#"{"refresh_token":"z","email":"gary@example.com"}"#,
+            r#"{"refresh_token":"z","email":"ana@example.com"}"#,
         )
         .expect("write");
         assert_eq!(
             profile
                 .offline_identity()
                 .and_then(|identity| identity.email),
-            Some("gary@example.com".to_string())
+            Some("ana@example.com".to_string())
         );
         assert!(
             Profile::new(AgentKind::Claude, dir.path())

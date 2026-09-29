@@ -11,8 +11,9 @@ Tipos y carga de configuración. Sin GPUI.
   "buffer_font_family": "JetBrains Mono", "buffer_font_size": 14, "buffer_line_height": 1.5,
   "text_rendering": "subpixel" | "grayscale",
   "editor": { "soft_wrap": false, "tab_size": 4, "insert_spaces": true, "show_whitespace": false, "ruler": 100, "cursor_blink": true },
-  "files": { "exclude": ["**/.git", "**/target", "**/node_modules"], "autosave": "off" | "on_focus_change" },
-  "review": { "jump_to_next_on_decide": true, "max_file_size_kb": 2048, "max_lines": 50000,
+  "files": { "exclude": ["**/.git", "**/target", "**/node_modules"], "autosave": "off" | "on_focus_change" | "after_delay", "autosave_delay_ms": 1000 },
+  "review": { "jump_to_next_on_decide": false, "max_file_size_kb": 2048, "max_lines": 50000,
+              "snapshot_max_total_mb": 300,
               "sensitive_paths": ["**/.env*", "**/.git/**", "**/Cargo.lock", "**/package-lock.json"] },
   "connections": { "default_label": null,
                     "runtime": { "node_version": "lts" },
@@ -23,13 +24,35 @@ Tipos y carga de configuración. Sin GPUI.
 - La sección `agents` (Etapa 2/3) se renombró a `connections` en la Etapa 4 (`docs/specs/06-etapa4-conexiones-y-cincel.md` §9): `default`, `custom` y `registry_url` desaparecieron (el sistema de conexiones que los reemplaza es un workstream posterior); `mcp_servers` se mudó tal cual. `registry_url` no se movió a `connections` porque el registro (`cincel-acp::registry`) usa una URL fija, no lee ese ajuste.
 - Un archivo que todavía trae la sección vieja `agents` (en cualquier forma, incluido un `agents.autonomy` suelto) carga igual y avisa una sola vez, en `agents`: "ajuste retirado: la sección «agents» ahora se llama «connections» … se ignora, podés borrarlo". `agents.autonomy` en sí se había retirado en la Etapa 3 (la política de permisos es fija, `01-producto.md §F5`).
 - `~/.config/cincel/keymap.json`: lista de `{ context, bindings }` (`modulos/workspace.md`).
-- `~/.config/cincel/themes/*.json`: tokens de `02-visual.md §2` + colores de sintaxis.
+- `~/.config/cincel/themes/*.json`: tokens de `02-visual.md §2` + colores de sintaxis; desde la Etapa 5 suma `git.added`, `git.modified`, `git.deleted` (un tema de usuario sin esas claves usa los del tema incluido de su apariencia).
 
 ## Responsabilidades
 - Tipos `Settings`, `Keymap`, `Theme` con `Default` completo y `serde` con `#[serde(default)]`.
 - `load()` tolerante: un valor inválido se reporta (ruta JSON + motivo) y se usa el predeterminado; nunca impide arrancar.
 - Watcher de los tres archivos → `SettingsEvent::Changed`.
 - `cincel --print-default-settings` imprime el JSON predeterminado con comentarios.
+
+## Etapa 5: edición del archivo desde la interfaz y keymap efectivo
+
+Detalle, verificación y desviaciones en `docs/etapas/etapa-5.md`. Spec:
+`docs/specs/07-etapa5-productividad.md` §4.3 y §5.2.
+
+- **`edit.rs`**: `SettingsEdit::{Set, Remove}`, `apply_edit(text, edit) ->
+  Result<String, EditError>` (puro, sobre el CST de `jsonc-parser` 0.33,
+  feature `cst`) y `write_edit(paths, edit) -> Result<(), EditError>`
+  (lectura-modificación-escritura atómica: archivo temporal en el mismo
+  directorio + `rename`). Conserva comentarios, orden de claves, comas
+  finales y claves desconocidas byte a byte fuera del valor tocado. Un
+  archivo vacío o inexistente arranca del documento con el comentario
+  explicativo (`cincel --print-default-settings` te muestra todos), no de
+  `{}` a secas. `EditError::Syntax { line, column, message }` da la posición
+  1-indexada del error para el banner de la pestaña de configuración
+  (`modulos/workspace.md`).
+- **`Keymap::effective_bindings()`**: `KeymapSection` gana
+  `origin: KeymapOrigin { Default, User }` (no se serializa); esta función da
+  una fila por (tecla, contexto) con la de nivel más alto ganando, más
+  `replaces` (qué comando de nivel inferior tenía esa misma tecla), para el
+  modal de atajos.
 
 ## Criterios de aceptación
 - [ ] Un `settings.json` vacío, inexistente o con un error de sintaxis produce los valores por defecto y un aviso.

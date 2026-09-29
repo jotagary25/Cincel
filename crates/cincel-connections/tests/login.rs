@@ -360,7 +360,7 @@ impl IdentityProbe for FixedProbe {
 fn identity_probe_result_is_attached_to_completed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let identity = Identity {
-        email: Some("gary@example.com".to_string()),
+        email: Some("ana@example.com".to_string()),
         plan: Some("Claude Max".to_string()),
         organization: None,
     };
@@ -629,7 +629,7 @@ fn acp_login_reports_an_email_when_the_token_has_one() {
     let session = LoginSession::spawn_acp(
         fx.login(&[
             ("FAKE_AUTH_URL", AGY_URL),
-            ("FAKE_TOKEN_EMAIL", "gary@example.com"),
+            ("FAKE_TOKEN_EMAIL", "ana@example.com"),
         ]),
         fx.options("acp-email"),
     );
@@ -638,7 +638,7 @@ fn acp_login_reports_an_email_when_the_token_has_one() {
         events.last(),
         Some(&LoginEvent::Completed {
             identity: Some(Identity {
-                email: Some("gary@example.com".to_string()),
+                email: Some("ana@example.com".to_string()),
                 plan: None,
                 organization: None,
             })

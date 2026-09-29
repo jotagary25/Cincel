@@ -16,10 +16,35 @@ El elemento editor de código sobre GPUI. Propio, no derivado de otro editor. Re
 
 ## Reglas de la revisión en el editor
 - Hunk bajo el cursor = el hunk cuyo `buffer_range` o filas fantasma contienen la fila del cursor. Si el cursor está en una línea concreta de un hunk multi-línea y la acción es `accept_line`/`reject_line`, aplica a ese `LinePair`.
-- Al aceptar o rechazar, el cursor salta al siguiente hunk pendiente si `review.jump_to_next_on_decide` (por defecto `true`).
+- Al aceptar o rechazar, el cursor salta al siguiente hunk pendiente si `review.jump_to_next_on_decide` (por defecto `false` desde la Etapa 5).
 - Mientras el turno está activo (`ReviewStore::turn_active(path)`), pill y barra muestran spinner y las acciones de review están deshabilitadas; la edición manual sigue permitida.
 - Word diffs se pintan encima del fondo de línea, solo cuando `Hunk.word_diffs` existe.
 - Al hacer clic en el pill o en `+`/`−`, el foco vuelve al editor (no se pierde el cursor).
+
+## Etapa 5: git en el margen, buscar y reemplazar
+
+Detalle, verificación y desviaciones en `docs/etapas/etapa-5.md`. Spec:
+`docs/specs/07-etapa5-productividad.md` §6 y §10.2.
+
+- **Git en el margen** (`git_gutter.rs`): `EditorView::set_git_diff(Option<Vec<GitGutterHunk>>,
+  cx)` recibe filas del archivo **guardado**, en su propia columna de 3 px
+  (`GitGutterKind::{Added, Modified, Deleted}`), sin cambiar el ancho del
+  gutter (`GUTTER_PADDING_LEFT` y el `GUTTER_BAR_GAP` de la barra del agente
+  ceden 5 px repartidos, no se agranda el gutter). El editor no conoce git:
+  ancla las filas recibidas al buffer (`cincel_text::Buffer::track_anchor`) y
+  las traslada a la versión actual del texto cuando hay ediciones sin
+  guardar, así que siguen los cambios entre un cálculo y el siguiente. Las
+  filas fantasma nunca llevan barra de git. Colores por
+  `GitGutterColors`/`EditorView::set_git_colors` (tokens `git.added`,
+  `git.modified`, `git.deleted`).
+- **Buscar y reemplazar con filas fantasma** (`search.rs`, `Ctrl+H`):
+  `MatchLocation::{Buffer, Phantom}` en orden de pantalla; la búsqueda
+  recorre también el texto de las filas fantasma (las líneas que el agente
+  quitó), que se resaltan y cuentan pero **no se reemplazan** — reemplazar
+  ahí avisa en la barra y salta a la siguiente coincidencia real. "Reemplazar
+  todo" es una única transacción del buffer (`EditSource::User`, un
+  `Ctrl+Z` la deshace entera). Reemplaza la limitación de etapas anteriores
+  de que la búsqueda no recorría las filas fantasma y no tenía reemplazar.
 
 ## Criterios de aceptación
 - [ ] Abrir un archivo de 5 000 líneas y hacer scroll de punta a punta mantiene 60 fps (medido con el instrumentador de GPUI) y no aloca layouts fuera del rango visible.

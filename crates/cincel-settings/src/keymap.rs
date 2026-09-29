@@ -147,6 +147,18 @@ pub struct KeyBinding {
     pub command: Option<String>,
 }
 
+/// Where a [`KeymapSection`] came from, for the shortcuts modal
+/// (`docs/specs/07-etapa5-productividad.md` §5.2). Not serialized: it is
+/// derived while loading, never written back to a file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeymapOrigin {
+    /// Built into Cincel (`DEFAULT_KEYMAP_JSONC`).
+    #[default]
+    Default,
+    /// Loaded from the user's `keymap.json`.
+    User,
+}
+
 /// A group of bindings that share a context.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeymapSection {
@@ -154,12 +166,20 @@ pub struct KeymapSection {
     pub context: ContextExpr,
     /// The bindings, sorted by keystroke so the file round-trips.
     pub bindings: Vec<KeyBinding>,
+    /// Whether this section is built in or came from the user's file.
+    pub origin: KeymapOrigin,
 }
 
 impl KeymapSection {
-    /// A section for `context` with `bindings`, sorted.
+    /// A section for `context` with `bindings`, sorted. Its [`KeymapOrigin`]
+    /// starts at [`KeymapOrigin::Default`]; [`Keymap::mark_origin`] relabels
+    /// a whole document's sections once it is known to be the user's.
     pub fn new(context: ContextExpr, bindings: Vec<KeyBinding>) -> Self {
-        let mut section = Self { context, bindings };
+        let mut section = Self {
+            context,
+            bindings,
+            origin: KeymapOrigin::Default,
+        };
         section
             .bindings
             .sort_by(|a, b| a.keystroke.cmp(&b.keystroke));
@@ -176,6 +196,25 @@ impl KeymapSection {
             .find(|binding| &binding.keystroke == keystroke)
             .map(|binding| binding.command.as_deref())
     }
+}
+
+/// One row of the shortcuts modal (`docs/specs/07-etapa5-productividad.md`
+/// §5.2): a single (keystroke, context) slot with whichever layer's binding
+/// wins there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveBinding {
+    /// The keystroke this row is about.
+    pub keystroke: Keystroke,
+    /// The context the winning binding was declared under.
+    pub context: ContextExpr,
+    /// The command that runs, or `None` when the user unbound it (`null`).
+    pub command: Option<String>,
+    /// Whether the winning binding is built in or the user's.
+    pub origin: KeymapOrigin,
+    /// The command a lower layer bound at the same (keystroke, context),
+    /// if any — what this row's binding replaces (or disables, when
+    /// `command` is `None`).
+    pub replaces: Option<String>,
 }
 
 /// The keymap: the default sections plus the user's, in that order.
@@ -262,6 +301,60 @@ impl Keymap {
         seen
     }
 
+    /// Relabels every section's [`KeymapOrigin`] to `origin`, in place.
+    ///
+    /// Used by [`Keymap::load_from`]: a file is parsed with [`Keymap::parse`]
+    /// (which always produces [`KeymapOrigin::Default`] sections, since it
+    /// does not know which file it came from), then marked as the user's.
+    fn mark_origin(mut self, origin: KeymapOrigin) -> Self {
+        for section in &mut self.sections {
+            section.origin = origin;
+        }
+        self
+    }
+
+    /// Every binding the keymap declares, one row per distinct (keystroke,
+    /// context) pair, for the shortcuts modal
+    /// (`docs/specs/07-etapa5-productividad.md` §5.2).
+    ///
+    /// Sections are walked from the default layer up: a later section with
+    /// the exact same keystroke *and* context expression as an earlier one
+    /// overrides that row (its `origin` and `command` win, and `replaces`
+    /// remembers what it overrode) rather than adding a second row. This is
+    /// a display grouping, not [`Keymap::resolve`]'s runtime precedence: two
+    /// bindings only collapse into one row when their contexts are written
+    /// identically, since that is what the modal shows side by side.
+    pub fn effective_bindings(&self) -> Vec<EffectiveBinding> {
+        let mut rows: Vec<EffectiveBinding> = Vec::new();
+        for section in &self.sections {
+            for binding in &section.bindings {
+                let existing = rows.iter().position(|row| {
+                    row.keystroke == binding.keystroke && row.context == section.context
+                });
+                match existing {
+                    Some(index) => {
+                        let replaces = rows[index].command.clone();
+                        rows[index] = EffectiveBinding {
+                            keystroke: binding.keystroke.clone(),
+                            context: section.context.clone(),
+                            command: binding.command.clone(),
+                            origin: section.origin,
+                            replaces,
+                        };
+                    }
+                    None => rows.push(EffectiveBinding {
+                        keystroke: binding.keystroke.clone(),
+                        context: section.context.clone(),
+                        command: binding.command.clone(),
+                        origin: section.origin,
+                        replaces: None,
+                    }),
+                }
+            }
+        }
+        rows
+    }
+
     /// Every command the keymap mentions, sorted and deduplicated.
     pub fn commands(&self) -> Vec<&str> {
         let mut commands: Vec<&str> = self
@@ -300,7 +393,7 @@ impl Keymap {
             },
         };
         Loaded {
-            value: Keymap::default().layered(user.value),
+            value: Keymap::default().layered(user.value.mark_origin(KeymapOrigin::User)),
             issues: user.issues,
         }
     }
@@ -653,6 +746,105 @@ mod tests {
         assert_eq!(
             keymap.resolve(&key("ctrl-shift-e"), &[]),
             Some("workspace::toggle_tree")
+        );
+    }
+
+    #[test]
+    fn default_keymap_sections_are_all_default_origin() {
+        for section in Keymap::default().sections() {
+            assert_eq!(section.origin, KeymapOrigin::Default);
+        }
+    }
+
+    #[test]
+    fn loading_a_user_file_marks_only_its_own_sections_as_user_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keymap.json");
+        std::fs::write(
+            &path,
+            r#"[{ "context": "Editor", "bindings": { "ctrl-s": "editor::save_all" } }]"#,
+        )
+        .unwrap();
+        let keymap = Keymap::load_from(&path).value;
+        let sections = keymap.sections();
+        // Every built-in section still comes first, unchanged.
+        let default_count = Keymap::default().sections().len();
+        for section in &sections[..default_count] {
+            assert_eq!(section.origin, KeymapOrigin::Default);
+        }
+        // The user's own section, layered on top, is marked as such.
+        let user_section = sections.last().unwrap();
+        assert_eq!(user_section.origin, KeymapOrigin::User);
+        assert_eq!(user_section.context, ContextExpr::parse("Editor").unwrap());
+    }
+
+    #[test]
+    fn effective_bindings_keeps_one_row_per_keystroke_and_context() {
+        let base = Keymap::parse(
+            r#"[{ "bindings": { "ctrl-s": "editor::save", "ctrl-w": "workspace::close_tab" } }]"#,
+        )
+        .value;
+        let rows = base.effective_bindings();
+        assert_eq!(rows.len(), 2);
+        let save = rows
+            .iter()
+            .find(|row| row.keystroke == key("ctrl-s"))
+            .unwrap();
+        assert_eq!(save.command.as_deref(), Some("editor::save"));
+        assert_eq!(save.origin, KeymapOrigin::Default);
+        assert_eq!(save.replaces, None);
+    }
+
+    #[test]
+    fn effective_bindings_reports_a_user_override_and_what_it_replaces() {
+        let base =
+            Keymap::parse(r#"[{ "bindings": { "ctrl-shift-a": "workspace::toggle_chat" } }]"#)
+                .value;
+        let user =
+            Keymap::parse(r#"[{ "bindings": { "ctrl-shift-a": "workspace::toggle_tree" } }]"#)
+                .value
+                .mark_origin(KeymapOrigin::User);
+        let rows = base.layered(user).effective_bindings();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.command.as_deref(), Some("workspace::toggle_tree"));
+        assert_eq!(row.origin, KeymapOrigin::User);
+        assert_eq!(row.replaces.as_deref(), Some("workspace::toggle_chat"));
+    }
+
+    #[test]
+    fn effective_bindings_reports_a_null_override_as_disabled() {
+        let base = Keymap::parse(
+            r#"[{ "context": "Editor", "bindings": { "ctrl-g": "editor::go_to_line" } }]"#,
+        )
+        .value;
+        let user = Keymap::parse(r#"[{ "context": "Editor", "bindings": { "ctrl-g": null } }]"#)
+            .value
+            .mark_origin(KeymapOrigin::User);
+        let rows = base.layered(user).effective_bindings();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.command, None, "un `null` desliga el comando");
+        assert_eq!(row.origin, KeymapOrigin::User);
+        assert_eq!(row.replaces.as_deref(), Some("editor::go_to_line"));
+    }
+
+    #[test]
+    fn effective_bindings_keeps_separate_rows_for_different_contexts() {
+        let keymap = Keymap::parse(
+            r#"[
+              { "bindings": { "ctrl-enter": "editor::insert_newline" } },
+              { "context": "Editor && review_hunk_under_cursor",
+                "bindings": { "ctrl-enter": "review::accept_hunk" } },
+            ]"#,
+        )
+        .value;
+        let rows = keymap.effective_bindings();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows.iter()
+                .all(|row| row.keystroke == key("ctrl-enter") && row.replaces.is_none()),
+            "distinct contexts do not override one another: {rows:?}"
         );
     }
 }

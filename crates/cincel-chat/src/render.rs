@@ -355,13 +355,30 @@ impl ChatPanel {
             .border_1()
             .border_color(theme.status_warning)
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .min_w(px(0.))
-                    .whitespace_normal()
-                    .text_size(s.px(TEXT_SMALL))
-                    .text_color(theme.text)
-                    .child(SharedString::from(banner.text())),
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .whitespace_normal()
+                            .text_size(s.px(TEXT_SMALL))
+                            .text_color(theme.text)
+                            .child(SharedString::from(banner.text())),
+                    )
+                    // "El agente dijo: «motivo»" (§10.1): only an `Expired`
+                    // banner whose `AuthRequired` carried a message has one.
+                    .when_some(banner.reason_text(), |this, reason| {
+                        this.child(
+                            div()
+                                .id("chat-connection-banner-reason")
+                                .debug_selector(|| "chat-connection-banner-reason".to_string())
+                                .whitespace_normal()
+                                .text_size(s.px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(reason)),
+                        )
+                    }),
             )
             .child(action)
             .into_any_element()
@@ -967,7 +984,7 @@ impl ChatPanel {
                             .flex_1()
                             .min_w(px(0.))
                             .truncate()
-                            .child(SharedString::from(call.title.clone())),
+                            .child(SharedString::from(one_line_summary(&call.title))),
                     )
                     .children(tool_stat(call, &theme, &s))
                     .child(status_glyph(call.status, &theme, &s))
@@ -1018,6 +1035,15 @@ impl ChatPanel {
             .then(|| exit_code_in(&output))
             .flatten()
             .map(|code| SharedString::from(format!("salió {code}")));
+        // A multi-line command (a `python3 - <<'EOF'` heredoc, say) must not
+        // spill its extra lines past the one-line row: the text layout
+        // breaks at an embedded newline regardless of `.truncate()`'s
+        // `whitespace_nowrap`, painting them over the cards below
+        // (`docs/etapas/etapa-2.md` § correcciones). The row shows only the
+        // first non-empty line plus a line count; the full command, with its
+        // own line breaks, only shows once expanded.
+        let multiline_command = command.lines().count() > 1;
+        let command_row_text = one_line_summary(&command);
 
         v_flex()
             .id(("command", index))
@@ -1029,6 +1055,7 @@ impl ChatPanel {
             .child(
                 h_flex()
                     .id(("command-row", index))
+                    .debug_selector(move || format!("command-row-{index}"))
                     .h(s.px(TOOL_ROW_HEIGHT))
                     .px_1p5()
                     .gap_1p5()
@@ -1048,7 +1075,7 @@ impl ChatPanel {
                             .truncate()
                             .font_family(mono_family(cx))
                             .text_size(s.px(TEXT_CODE))
-                            .child(SharedString::from(format!("$ {command}"))),
+                            .child(SharedString::from(format!("$ {command_row_text}"))),
                     )
                     .children(exit_code.map(|label| {
                         div()
@@ -1067,6 +1094,23 @@ impl ChatPanel {
                         this.toggle_entry(index, cx);
                     })),
             )
+            .when(expanded && multiline_command, |this| {
+                this.child(
+                    div()
+                        .id(("command-full", index))
+                        .debug_selector(move || format!("command-full-{index}"))
+                        .w_full()
+                        .px_1p5()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_editor)
+                        .font_family(mono_family(cx))
+                        .text_size(s.px(TEXT_CODE))
+                        .text_color(theme.text)
+                        .child(SharedString::from(command.clone())),
+                )
+            })
             .when(expanded && !output.is_empty(), |this| {
                 this.child(self.render_output(index, &output, call.output_expanded, &theme, cx))
             })
@@ -2099,7 +2143,9 @@ fn file_popover_row(
                     .truncate()
                     .text_size(s.px(TEXT_LABEL))
                     .text_color(theme.text_muted)
-                    .child(parent),
+                    // A path component may legally hold a newline on Linux;
+                    // the same one-line rule as a tool call's title applies.
+                    .child(SharedString::from(one_line_summary(&parent))),
             )
         })
 }
@@ -2138,6 +2184,26 @@ fn is_closing_punctuation(ch: char) -> bool {
 /// fenced code blocks with (the workspace points it at the buffer font), so
 /// a command, an output and a code block share one face. A bare
 /// `"monospace"` is not a family gpui resolves.
+/// The first non-empty line of possibly multi-line text, followed by "… N
+/// líneas" when there was more than one line. A one-line row painted with
+/// `.truncate()` still breaks visually at an embedded newline (GPUI's text
+/// layout honours `\n` regardless of `whitespace_nowrap`), so any text that
+/// might carry line breaks — a shell command, a tool call's title — must be
+/// reduced to a single line before it reaches such a row. The text is never
+/// altered where it is shown in full (an expanded card, a monospaced block).
+fn one_line_summary(text: &str) -> String {
+    let total = text.lines().count();
+    let first = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    if total <= 1 {
+        first.to_string()
+    } else {
+        format!("{first} … {total} líneas")
+    }
+}
+
 fn mono_family(cx: &App) -> SharedString {
     gpui_kit::base::Theme::global(cx)
         .tokens
@@ -2359,4 +2425,30 @@ pub(crate) fn user_pieces(blocks: &[MessageBlock]) -> Vec<UserPiece> {
 #[must_use]
 pub fn opens_editor(kind: ToolKind) -> bool {
     matches!(kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::one_line_summary;
+
+    #[test]
+    fn one_line_summary_keeps_a_single_line_untouched() {
+        assert_eq!(one_line_summary("ls -la"), "ls -la");
+        assert_eq!(one_line_summary(""), "");
+    }
+
+    #[test]
+    fn one_line_summary_collapses_a_multiline_command() {
+        let command = "python3 - <<'EOF'\nprint(1)\nprint(2)\nprint(3)\nprint(4)\nEOF";
+        assert_eq!(
+            one_line_summary(command),
+            "python3 - <<'EOF' … 6 líneas",
+            "solo la primera línea, sin saltos, mas el total"
+        );
+    }
+
+    #[test]
+    fn one_line_summary_skips_leading_blank_lines() {
+        assert_eq!(one_line_summary("\n\nhola\nchau"), "hola … 4 líneas");
+    }
 }

@@ -351,6 +351,7 @@ impl DemoReview {
             turn_active: self.turn_active,
             pending_in_other_files: OTHER_FILES_PENDING,
             current_index: None,
+            file_actions: false,
         }
     }
 
@@ -425,8 +426,9 @@ impl DemoReview {
                 }
                 rejected = true;
             }
-            ReviewAction::AcceptFile => self.base = current.clone(),
-            ReviewAction::RejectFile => {
+            // The demo has one file, so its turn is the file.
+            ReviewAction::AcceptFile | ReviewAction::AcceptTurn => self.base = current.clone(),
+            ReviewAction::RejectFile | ReviewAction::RejectTurn => {
                 current = self.base.clone();
                 rejected = true;
             }

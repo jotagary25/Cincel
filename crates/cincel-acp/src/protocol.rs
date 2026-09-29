@@ -515,6 +515,48 @@ pub fn parse_auth_status_update(params: &serde_json::Value) -> Option<AuthStatus
     })
 }
 
+/// The reason an `auth_required` (-32000) JSON-RPC error gives, if any.
+///
+/// Precedence: a text field `message` or `reason` of an object `data`, or
+/// `data` itself when it is a string (agents put the specific reason there
+/// and keep the generic "Authentication required" in `message`); then the
+/// error's `message`. Blank texts count as absent. The text is returned
+/// trimmed but otherwise verbatim (not redacted).
+#[must_use]
+pub fn auth_required_message(message: &str, data: Option<&serde_json::Value>) -> Option<String> {
+    let non_blank = |text: &str| {
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    };
+    let from_data = data.and_then(|data| match data {
+        serde_json::Value::String(text) => non_blank(text),
+        serde_json::Value::Object(map) => ["message", "reason"].iter().find_map(|key| {
+            map.get(*key)
+                .and_then(serde_json::Value::as_str)
+                .and_then(non_blank)
+        }),
+        _ => None,
+    });
+    from_data.or_else(|| non_blank(message))
+}
+
+/// The text a logged-out `_auth/status_update` carries (`detail`, else
+/// `label`), used as the fallback reason of [`AgentEvent::AuthRequired`].
+/// `None` for any other kind or when both are blank.
+#[must_use]
+pub fn logged_out_status_text(status: &AuthStatus) -> Option<String> {
+    if status.kind != AuthStatusKind::None {
+        return None;
+    }
+    status
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .or_else(|| Some(status.label.trim()).filter(|text| !text.is_empty()))
+        .map(str::to_string)
+}
+
 /// Parse a `session_info_update`'s `_meta` for a matching
 /// `agentFileChangeReport`. Returns `None` when absent, malformed, or for a
 /// different `requestId` (stale/duplicate reports must be ignored per spec).
@@ -691,6 +733,13 @@ pub enum AgentEvent {
     AuthRequired {
         /// Methods the user can choose from.
         methods: Vec<AuthMethod>,
+        /// Why the agent asked for authentication, verbatim (see
+        /// [`auth_required_message`]): the error's `data.message` /
+        /// `data.reason` (or `data` itself when it is a string), else the
+        /// error's `message`, else the text of the last logged-out
+        /// `_auth/status_update`. `None` when the agent gave no text. Not
+        /// redacted: the UI must redact it before showing or logging it.
+        message: Option<String>,
     },
     /// A session was created, loaded or resumed and is ready for prompts.
     SessionCreated {
@@ -886,6 +935,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auth_required_message_prefers_data_then_message() {
+        let data = serde_json::json!({ "reason": "token revoked" });
+        assert_eq!(
+            auth_required_message("Authentication required", Some(&data)).as_deref(),
+            Some("token revoked")
+        );
+        let data = serde_json::json!({ "message": "  expired  ", "reason": "otro" });
+        assert_eq!(
+            auth_required_message("Authentication required", Some(&data)).as_deref(),
+            Some("expired")
+        );
+        let data = serde_json::json!("sesión vencida");
+        assert_eq!(
+            auth_required_message("", Some(&data)).as_deref(),
+            Some("sesión vencida")
+        );
+        let data = serde_json::json!({ "message": " ", "code": 7 });
+        assert_eq!(
+            auth_required_message("Authentication required", Some(&data)).as_deref(),
+            Some("Authentication required")
+        );
+        assert_eq!(auth_required_message("   ", None), None);
+        assert_eq!(
+            auth_required_message("", Some(&serde_json::json!(42))),
+            None
+        );
+    }
+
+    #[test]
+    fn logged_out_status_text_only_for_kind_none() {
+        let status = |kind, label: &str, detail: Option<&str>| AuthStatus {
+            kind,
+            label: label.to_string(),
+            detail: detail.map(str::to_string),
+            account: None,
+        };
+        assert_eq!(
+            logged_out_status_text(&status(
+                AuthStatusKind::None,
+                "Not logged in",
+                Some("revoked")
+            ))
+            .as_deref(),
+            Some("revoked")
+        );
+        assert_eq!(
+            logged_out_status_text(&status(AuthStatusKind::None, "Not logged in", Some(" ")))
+                .as_deref(),
+            Some("Not logged in")
+        );
+        assert_eq!(
+            logged_out_status_text(&status(AuthStatusKind::None, "", None)),
+            None
+        );
+        assert_eq!(
+            logged_out_status_text(&status(AuthStatusKind::Account, "Max", Some("x"))),
+            None
+        );
+    }
+
+    #[test]
     fn build_prompt_content_prepends_wrapped_feedback() {
         let blocks = vec![PromptBlock::Text("hola".to_string())];
         let content = build_prompt_content(blocks, Some("cambiá esto".to_string()));
@@ -1034,14 +1144,14 @@ mod tests {
             "authStatus": {
                 "kind": "account",
                 "label": "Claude Max",
-                "account": { "email": "gary@example.com", "organization": "Org", "plan": "max" }
+                "account": { "email": "ana@example.com", "organization": "Org", "plan": "max" }
             }
         });
         let status = parse_auth_status_update(&params).expect("status");
         assert_eq!(status.kind, AuthStatusKind::Account);
         assert_eq!(status.label, "Claude Max");
         let account = status.account.expect("account");
-        assert_eq!(account.email.as_deref(), Some("gary@example.com"));
+        assert_eq!(account.email.as_deref(), Some("ana@example.com"));
         assert_eq!(account.organization.as_deref(), Some("Org"));
         assert_eq!(account.plan.as_deref(), Some("max"));
     }

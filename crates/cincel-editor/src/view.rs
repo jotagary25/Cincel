@@ -16,8 +16,9 @@ use cincel_text::{Buffer, BufferEvent, BufferSnapshot, EditSource, Point};
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
-    Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Render, Rgba, ShapedLine,
-    SharedString, Styled, Subscription, Task, TextRun, UTF16Selection, Window, div, px,
+    Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
+    Render, Rgba, ShapedLine, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    TextRun, UTF16Selection, Window, div, px,
 };
 
 use crate::actions::*;
@@ -28,7 +29,10 @@ use crate::display_map::{
 };
 use crate::element::EditorElement;
 use crate::review::{ReviewAction, ReviewHunkView, ReviewView};
-use crate::search::SearchState;
+use crate::search::{
+    MatchLocation, PHANTOM_REPLACE_NOTICE, PhantomLines, SearchField, SearchState,
+    replace_all_message,
+};
 use crate::settings::{EditorChrome, EditorSettings, SharedBuffer, detect_indentation};
 use crate::theme::{self, EditorTheme};
 use crate::wrap_map::{WRAP_UNITS_PER_PX, WrapMap, WrapRow, WrapSource};
@@ -69,6 +73,16 @@ const RENDER_FRAME_HISTORY: usize = 64;
 pub const REVIEW_NOTICE_DURATION: Duration = Duration::from_secs(3);
 /// Step of the review spinner while the agent writes the file.
 pub const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+/// Height of the search bar and of the "Ir a la línea" prompt, in pixels.
+///
+/// The bar pushes the text down by exactly this much while it is open, in
+/// search mode and in replace mode alike: replace mode splits the same strip
+/// into two fields side by side instead of adding a row
+/// (`docs/specs/07-etapa5-productividad.md` §10.2, decision D16).
+pub const SEARCH_BAR_HEIGHT: f32 = 28.;
+/// Below this editor width the "Reemplazar" / "Reemplazar todo" buttons turn
+/// into glyphs with a tooltip and "Esc cierra" hides.
+pub const SEARCH_BAR_COMPACT_WIDTH: f32 = 720.;
 
 /// Highlight spans of one row or byte range, as `SyntaxState` returns them.
 pub type HighlightSpans = Vec<(Range<usize>, HighlightId)>;
@@ -230,6 +244,12 @@ pub struct RowRender {
     /// Whether it was painted with the code font while a prose font is set
     /// (always `true` without one).
     pub monospace: bool,
+    /// The bar of the git column painted on it, if any.
+    pub git_bar: Option<crate::git_gutter::GitGutterKind>,
+    /// Search matches highlighted on this segment (phantom rows included).
+    pub search_matches: usize,
+    /// Whether one of them is the current match.
+    pub current_search_match: bool,
 }
 
 /// An accept/reject pill, as the render probe saw it.
@@ -326,6 +346,9 @@ pub struct FrameRender {
     /// bounds intersected with every mask of its ancestors. `None` until
     /// the frame is painted.
     pub paint_clip: Option<Bounds<Pixels>>,
+    /// The git column: one entry per bar painted (one per wrap row) and one
+    /// per deletion mark (its 3 × 6 px quad), bars first, top to bottom.
+    pub git_marks: Vec<(crate::git_gutter::GitGutterKind, Bounds<Pixels>)>,
 }
 
 /// Geometry of one frame handed to [`EditorView::end_frame`].
@@ -594,6 +617,10 @@ pub struct EditorView {
     pub(crate) blink_visible: bool,
     last_input: Instant,
     pub(crate) autoscroll: bool,
+    /// The pending autoscroll centres the cursor row vertically (a jump to a
+    /// change) instead of just bringing it into view. Consumed with
+    /// `autoscroll` by the next prepaint.
+    pub(crate) autoscroll_center: bool,
     pub(crate) selecting: bool,
     pub(crate) select_mode: SelectMode,
     select_origin: Range<DisplayPoint>,
@@ -611,6 +638,8 @@ pub struct EditorView {
     /// Mouse cursor of every review control painted on the last frame, in
     /// paint order (the last one containing a point wins).
     pub(crate) control_cursors: Vec<(Bounds<Pixels>, CursorStyle)>,
+    /// The git column of the gutter ([`EditorView::set_git_diff`]).
+    pub(crate) git_gutter: crate::git_gutter::GitGutterState,
     _blink_task: Option<Task<()>>,
     _fade_task: Option<Task<()>>,
     _spinner_task: Option<Task<()>>,
@@ -652,6 +681,7 @@ impl EditorView {
         let style = EditorStyle::from_settings(&settings, cx);
         let auto_close_pairs = settings.auto_close_pairs;
 
+        let git_gutter = crate::git_gutter::GitGutterState::new(buffer.clone());
         let mut this = Self {
             buffer,
             snapshot,
@@ -706,6 +736,7 @@ impl EditorView {
             blink_visible: true,
             last_input: Instant::now(),
             autoscroll: false,
+            autoscroll_center: false,
             selecting: false,
             select_mode: SelectMode::Character,
             select_origin: DisplayPoint::default()..DisplayPoint::default(),
@@ -719,6 +750,7 @@ impl EditorView {
             auto_closers: Vec::new(),
             bracket_cache: None,
             control_cursors: Vec::new(),
+            git_gutter,
             _blink_task: None,
             _fade_task: None,
             _spinner_task: None,
@@ -927,8 +959,9 @@ impl EditorView {
     /// The mouse cursor the editor shows at a window position, as of the last
     /// painted frame: the pointing hand over an enabled review control (pill
     /// buttons, the gutter `+`/`−`, the floating bar's buttons), the arrow over
-    /// the rest of a pill or of the bar and over a disabled control, and the
-    /// I-beam over the text.
+    /// the rest of a pill or of the bar, over a disabled control and over the
+    /// gutter and the vertical scrollbar (track and thumb), and the I-beam
+    /// over the text.
     pub fn cursor_style_at(&self, position: gpui::Point<Pixels>) -> CursorStyle {
         if let Some((_, style)) = self
             .control_cursors
@@ -1136,11 +1169,6 @@ impl EditorView {
         self.rebuild_display_map();
         self.invalidate_layout();
         self.request_reparse(cx);
-        if !self.search.query.is_empty() {
-            let text = self.snapshot.text();
-            let from = self.edit_offset(self.cursor);
-            self.search.refresh(&text, from);
-        }
         self.update_dirty(cx);
         cx.notify();
     }
@@ -1496,6 +1524,7 @@ impl EditorView {
         mut review: ReviewFrame,
         geometry: FrameGeometry,
         placeholder: bool,
+        git_marks: Vec<(crate::git_gutter::GitGutterKind, Bounds<Pixels>)>,
     ) {
         if self.render_probe {
             if self.render_frames.len() >= RENDER_FRAME_HISTORY {
@@ -1514,6 +1543,7 @@ impl EditorView {
                 text_width: geometry.text_width,
                 wrap_rows: self.wrap_row_count(),
                 paint_clip: None,
+                git_marks,
             });
         }
         self.frame_counter += 1;
@@ -1778,6 +1808,45 @@ impl EditorView {
         // only costs an approximate vertical movement.
         self.cursor = self.clip_point(self.cursor);
         self.selection_anchor = self.clip_point(self.selection_anchor);
+        // The phantom rows may have changed with the map: the search follows.
+        self.research();
+    }
+
+    /// Recomputes the search matches (buffer and phantom rows) from the
+    /// cursor, keeping the current match when it survives. Does nothing while
+    /// there is no query.
+    pub(crate) fn research(&mut self) {
+        if self.search.query.is_empty() {
+            return;
+        }
+        let from = self.edit_offset(self.cursor);
+        self.recompute_search(from);
+    }
+
+    /// Recomputes the search matches over the buffer and the phantom rows of
+    /// the display map, selecting the first one at or after `from` when the
+    /// current one is gone.
+    fn recompute_search(&mut self, from: usize) {
+        let text = self.snapshot.text();
+        let len = text.len();
+        let line_count = self.snapshot.line_count();
+        let snapshot = &self.snapshot;
+        let phantoms: Vec<PhantomLines<'_>> = self
+            .display_map
+            .diff()
+            .hunks()
+            .iter()
+            .map(|hunk| PhantomLines {
+                insert_offset: if hunk.insert_before_buffer_row < line_count {
+                    snapshot.line_start_offset(hunk.insert_before_buffer_row)
+                } else {
+                    len
+                },
+                lines: &hunk.deleted_text,
+            })
+            .collect();
+        self.search
+            .refresh_with_phantoms(&text, &phantoms, from.min(len));
     }
 
     /// Version of the text the view is showing.
@@ -2019,11 +2088,9 @@ impl EditorView {
         self.apply_syntax_events(&events);
         self.request_reparse(cx);
         self.invalidate_layout();
-        if !self.search.query.is_empty() {
-            let text = self.snapshot.text();
-            let from = self.edit_offset(self.cursor);
-            self.search.refresh(&text, from);
-        }
+        // The search matches are recomputed by `rebuild_display_map`, which
+        // every caller runs next, once the hunks (and so the phantom rows)
+        // have followed the edit.
         self.update_dirty(cx);
     }
 
@@ -2061,6 +2128,9 @@ impl EditorView {
         self.last_input = Instant::now();
         self.blink_visible = true;
         self.autoscroll = true;
+        // A plain move only brings the cursor into view; a jump to a change
+        // asks for the centring again right after this.
+        self.autoscroll_center = false;
         cx.emit(EditorEvent::CursorMoved {
             point: self.cursor_point(),
         });
@@ -2434,8 +2504,14 @@ impl EditorView {
             return;
         }
         if self.search_open {
-            self.search.query.pop();
-            self.refresh_search(cx);
+            self.search.set_status(None);
+            if self.replace_field_active() {
+                self.search.replacement.pop();
+                cx.notify();
+            } else {
+                self.search.query.pop();
+                self.refresh_search(cx);
+            }
             return;
         }
         if self.backspace_pair(cx) {
@@ -2640,11 +2716,7 @@ impl EditorView {
             self.selection_anchor = self.cursor;
         }
         self.auto_closers.clear();
-        if !self.search.query.is_empty() {
-            let text = self.snapshot.text();
-            let from = self.edit_offset(self.cursor);
-            self.search.refresh(&text, from);
-        }
+        self.research();
         self.update_dirty(cx);
         self.after_input(cx);
     }
@@ -2669,6 +2741,13 @@ impl EditorView {
     }
 
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if self.search_open {
+            // The bar has the keyboard: the clipboard goes to its active field.
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.type_into_search(&text, cx);
+            }
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             // A multi-line paste takes the indentation of where it lands.
             let text = self.paste_text(&text);
@@ -2741,6 +2820,8 @@ impl EditorView {
         if self.search_open {
             self.search_open = false;
             self.search.clear();
+            self.search.replace_open = false;
+            self.search.field = SearchField::Find;
             cx.notify();
             return;
         }
@@ -2757,7 +2838,39 @@ impl EditorView {
             cx.propagate();
             return;
         }
+        // `Ctrl+F` is the plain search bar, as before replace existed: from
+        // replace mode it goes back to search only (the strip keeps its
+        // height either way).
+        self.search.replace_open = false;
+        self.search.field = SearchField::Find;
+        self.open_search_bar(cx);
+    }
+
+    /// `editor::find_replace` (`Ctrl+H`): opens the bar in replace mode with
+    /// the keyboard in "Buscar…", or, when the bar was already open, moves the
+    /// keyboard to "Reemplazar…".
+    fn on_find_replace(&mut self, _: &FindReplace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.chrome == EditorChrome::Minimal {
+            cx.propagate();
+            return;
+        }
+        let was_open = self.search_open;
+        self.search.replace_open = true;
+        if was_open {
+            self.search.field = SearchField::Replace;
+            self.search.set_status(None);
+            cx.notify();
+        } else {
+            self.search.field = SearchField::Find;
+            self.open_search_bar(cx);
+        }
+    }
+
+    /// Opens the bar from the selection: a one-line selection becomes the
+    /// query.
+    fn open_search_bar(&mut self, cx: &mut Context<Self>) {
         self.search_open = true;
+        self.search.set_status(None);
         self.search_from = self.edit_offset(self.selection_range().start);
         if self.has_selection() {
             let selected = self.selected_text();
@@ -2769,23 +2882,40 @@ impl EditorView {
     }
 
     pub(crate) fn refresh_search(&mut self, cx: &mut Context<Self>) {
-        let text = self.snapshot.text();
-        let from = self.search_from.min(text.len());
-        self.search.refresh(&text, from);
-        if let Some(range) = self.search.current() {
-            self.select_buffer_range(range);
+        let from = self.search_from;
+        self.recompute_search(from);
+        if let Some(found) = self.search.current() {
+            self.select_match(&found);
         }
         self.autoscroll = true;
         cx.notify();
+    }
+
+    /// Whether typed text goes to "Reemplazar…".
+    fn replace_field_active(&self) -> bool {
+        self.search.replace_open && self.search.field == SearchField::Replace
+    }
+
+    /// Text typed or pasted while the bar is open goes to its active field.
+    fn type_into_search(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.search.set_status(None);
+        if self.replace_field_active() {
+            self.search.replacement.push_str(text);
+            cx.notify();
+        } else {
+            self.search.query.push_str(text);
+            self.refresh_search(cx);
+        }
     }
 
     fn on_find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
         if !self.search_open {
             self.search_open = true;
         }
-        if let Some(range) = self.search.next_match() {
-            self.search_from = range.start;
-            self.select_buffer_range(range);
+        self.search.set_status(None);
+        if let Some(found) = self.search.next_match() {
+            self.search_from = self.search.position(&found);
+            self.select_match(&found);
         }
         self.autoscroll = true;
         cx.notify();
@@ -2795,10 +2925,121 @@ impl EditorView {
         if !self.search_open {
             self.search_open = true;
         }
-        if let Some(range) = self.search.previous_match() {
-            self.search_from = range.start;
-            self.select_buffer_range(range);
+        self.search.set_status(None);
+        if let Some(found) = self.search.previous_match() {
+            self.search_from = self.search.position(&found);
+            self.select_match(&found);
         }
+        self.autoscroll = true;
+        cx.notify();
+    }
+
+    fn on_search_next_field(
+        &mut self,
+        _: &SearchNextField,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.switch_search_field(cx);
+    }
+
+    fn on_search_prev_field(
+        &mut self,
+        _: &SearchPrevField,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.switch_search_field(cx);
+    }
+
+    /// `Tab` / `Shift+Tab` in the bar: with two fields they alternate; with
+    /// one there is nowhere to go, and the key is swallowed all the same so
+    /// it never indents the file.
+    fn switch_search_field(&mut self, cx: &mut Context<Self>) {
+        if !self.search_open {
+            return;
+        }
+        if self.search.replace_open {
+            self.search.field = match self.search.field {
+                SearchField::Find => SearchField::Replace,
+                SearchField::Replace => SearchField::Find,
+            };
+            cx.notify();
+        }
+    }
+
+    fn on_replace_next(&mut self, _: &ReplaceNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.replace_next(cx);
+    }
+
+    fn on_replace_all(&mut self, _: &ReplaceAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.replace_all(cx);
+    }
+
+    /// "Reemplazar": replaces the current match (one undo step) and moves to
+    /// the next one. A phantom match is never replaced (D12): the bar says so
+    /// and the next real match becomes the current one, if there is any.
+    pub(crate) fn replace_next(&mut self, cx: &mut Context<Self>) {
+        if !self.search_open || !self.search.replace_open || self.read_only {
+            return;
+        }
+        let Some(ix) = self.search.current_index() else {
+            return;
+        };
+        let Some(found) = self.search.current() else {
+            return;
+        };
+        match found {
+            MatchLocation::Phantom { .. } => {
+                self.search
+                    .set_status(Some(PHANTOM_REPLACE_NOTICE.to_string()));
+                if let Some(next) = self.search.next_buffer_match_after(ix) {
+                    self.search.set_current(next);
+                    if let Some(found) = self.search.current() {
+                        self.search_from = self.search.position(&found);
+                        self.select_match(&found);
+                    }
+                }
+                self.autoscroll = true;
+                cx.notify();
+            }
+            MatchLocation::Buffer(range) => {
+                let text = self.snapshot.text();
+                let replacement = self.search.replacement_at(&text, range.clone());
+                let end = range.start + replacement.len();
+                self.search.set_status(None);
+                self.replace_buffer_range(range, &replacement, cx);
+                // The next match is the first one after the inserted text, so
+                // a replacement that contains the query is not visited again.
+                self.search_from = end;
+                self.search.select_at_or_after(end);
+                if let Some(found) = self.search.current() {
+                    self.select_match(&found);
+                }
+                self.autoscroll = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// "Reemplazar todo": every real match in one `EditSource::User`
+    /// transaction (one `Ctrl+Z` undoes it whole); phantom matches are left
+    /// alone and the counter says how many (D12). The cursor lands after the
+    /// first replacement.
+    pub(crate) fn replace_all(&mut self, cx: &mut Context<Self>) {
+        if !self.search_open || !self.search.replace_open || self.read_only {
+            return;
+        }
+        let text = self.snapshot.text();
+        let (edits, phantom) = self.search.replace_all_edits(&text);
+        let replaced = edits.len();
+        if let Some((range, replacement)) = edits.first() {
+            let cursor = range.start + replacement.len();
+            self.search_from = cursor;
+            self.apply_edits(edits, cursor, cursor, cx);
+        }
+        self.search
+            .set_status(Some(replace_all_message(replaced, phantom)));
         self.autoscroll = true;
         cx.notify();
     }
@@ -2810,6 +3051,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.search.regex = !self.search.regex;
+        self.search.set_status(None);
         self.refresh_search(cx);
     }
 
@@ -2820,7 +3062,28 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.search.case_sensitive = !self.search.case_sensitive;
+        self.search.set_status(None);
         self.refresh_search(cx);
+    }
+
+    /// Selects a match: a buffer range, or a range of a phantom row in
+    /// display coordinates (the cursor can sit on phantom rows).
+    fn select_match(&mut self, found: &MatchLocation) {
+        match found {
+            MatchLocation::Buffer(range) => self.select_buffer_range(range.clone()),
+            MatchLocation::Phantom {
+                hunk_ix,
+                line_ix,
+                range,
+            } => {
+                if *hunk_ix >= self.display_map.diff().hunks().len() {
+                    return;
+                }
+                let row = self.display_map.diff().phantom_start(*hunk_ix) + *line_ix as u32;
+                self.selection_anchor = self.clip_point(DisplayPoint::new(row, range.start as u32));
+                self.cursor = self.clip_point(DisplayPoint::new(row, range.end as u32));
+            }
+        }
     }
 
     fn select_buffer_range(&mut self, range: Range<usize>) {
@@ -2925,9 +3188,15 @@ impl EditorView {
             }
         } else if let Some(ix) = self.review.current_index
             && current != previous_current
-            && self.hunk_under_cursor() != Some(ix)
         {
-            self.jump_to_hunk(ix, cx);
+            if self.hunk_under_cursor() == Some(ix) {
+                // The host pointed at the hunk the cursor is already in: the
+                // cursor stays, but the change still has to be on screen.
+                self.autoscroll = true;
+                self.autoscroll_center = true;
+            } else {
+                self.jump_to_hunk(ix, cx);
+            }
         }
         cx.notify();
     }
@@ -3001,7 +3270,18 @@ impl EditorView {
 
     fn jump_to_hunk(&mut self, ix: usize, cx: &mut Context<Self>) {
         let row = self.display_map.diff().hunk_display_range(ix).start;
+        self.jump_to_row(row, cx);
+    }
+
+    /// Every jump to a pending change lands here (deciding with
+    /// `jump_to_next_on_decide`, `Alt+J`/`Alt+K`, the review panel's
+    /// "Revisar", `Alt+L` to the next file): the cursor goes to the start of
+    /// `row` and the next prepaint centres it vertically, like Zed's
+    /// `scroll_to_center`, unless it is already in the middle third of the
+    /// viewport.
+    fn jump_to_row(&mut self, row: DisplayRow, cx: &mut Context<Self>) {
         self.move_cursor(DisplayPoint::new(row, 0), false, cx);
+        self.autoscroll_center = true;
     }
 
     fn start_spinner(&mut self, cx: &mut Context<Self>) {
@@ -3208,7 +3488,7 @@ impl EditorView {
             .find(|start| *start > current)
             .or_else(|| starts.first().copied());
         if let Some(row) = next {
-            self.move_cursor(DisplayPoint::new(row, 0), false, cx);
+            self.jump_to_row(row, cx);
         }
         self.emit_review(ReviewAction::NextHunk, cx);
     }
@@ -3225,7 +3505,7 @@ impl EditorView {
             .find(|start| *start < current)
             .or_else(|| starts.last().copied());
         if let Some(row) = previous {
-            self.move_cursor(DisplayPoint::new(row, 0), false, cx);
+            self.jump_to_row(row, cx);
         }
         self.emit_review(ReviewAction::PrevHunk, cx);
     }
@@ -3522,6 +3802,9 @@ impl EditorView {
         let mut context = String::from("Editor");
         if self.search_open {
             context.push_str(" searching");
+            if self.replace_field_active() {
+                context.push_str(" replacing");
+            }
         }
         if self.hunk_under_cursor().is_some() {
             context.push_str(" review_hunk_under_cursor");
@@ -3529,61 +3812,220 @@ impl EditorView {
         context
     }
 
-    fn render_search_bar(&self) -> impl IntoElement {
+    /// Whether the search bar uses its compact form (glyph buttons with a
+    /// tooltip, no "Esc cierra"): the editor is narrower than
+    /// [`SEARCH_BAR_COMPACT_WIDTH`].
+    pub(crate) fn search_bar_compact(&self) -> bool {
+        self.layout
+            .as_ref()
+            .is_some_and(|layout| f32::from(layout.bounds.size.width) < SEARCH_BAR_COMPACT_WIDTH)
+    }
+
+    /// The search bar: one strip of [`SEARCH_BAR_HEIGHT`] in both modes. In
+    /// replace mode "Buscar…" and "Reemplazar…" share it side by side (flex 1
+    /// each), followed by the `.*` / `Aa` toggles, the counter (or the status
+    /// message) and the "Reemplazar" / "Reemplazar todo" buttons.
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
-        let counter = self.search.counter().unwrap_or_default();
-        let query = if self.search.query.is_empty() {
-            SharedString::from("Buscar…")
-        } else {
-            SharedString::from(self.search.query.clone())
-        };
-        let query_color = if self.search.query.is_empty() {
-            theme::color(theme.text_muted)
-        } else {
-            theme::color(theme.text)
-        };
+        let replace = self.search.replace_open;
+        let compact = self.search_bar_compact();
+        let counter = self.search.status_or_counter().unwrap_or_default();
+        let muted = theme::color(theme.text_muted);
         let toggle = |label: &'static str, on: bool| {
             div()
+                .flex_none()
                 .px(px(6.))
                 .py(px(1.))
                 .text_color(if on {
                     theme::color(theme.text_accent)
                 } else {
-                    theme::color(theme.text_muted)
+                    muted
                 })
                 .child(label)
         };
-        div()
+        // A field's text: what was typed (line breaks shown as `⏎`), or the
+        // muted placeholder.
+        let field_text = |value: &str, placeholder: &'static str| {
+            if value.is_empty() {
+                (SharedString::from(placeholder), muted)
+            } else {
+                (
+                    SharedString::from(value.replace('\n', "⏎")),
+                    theme::color(theme.text),
+                )
+            }
+        };
+        let (query, query_color) = field_text(&self.search.query, "Buscar…");
+
+        let bar = div()
             .flex()
+            .flex_none()
             .flex_row()
             .items_center()
             .gap(px(8.))
             .w_full()
-            .h(px(28.))
+            .h(px(SEARCH_BAR_HEIGHT))
             .px(px(8.))
             .bg(theme::color(theme.surface))
             .border_b(px(1.))
             .border_color(theme::color(theme.border))
             .text_size(self.style.font_size)
-            .font_family(self.style.font.family.clone())
-            .child(
-                div()
-                    .text_color(theme::color(theme.text_muted))
-                    .child("Buscar"),
-            )
-            .child(div().flex_1().text_color(query_color).child(query))
-            .child(toggle(".*", self.search.regex))
-            .child(toggle("Aa", self.search.case_sensitive))
-            .child(
-                div()
-                    .text_color(theme::color(theme.text_muted))
-                    .child(SharedString::from(counter)),
-            )
-            .child(
-                div()
-                    .text_color(theme::color(theme.text_muted))
-                    .child("Esc cierra"),
-            )
+            .font_family(self.style.font.family.clone());
+
+        if !replace {
+            // Search mode: exactly the bar of before replace existed.
+            return bar
+                .child(div().flex_none().text_color(muted).child("Buscar"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(query_color)
+                        .child(query),
+                )
+                .child(toggle(".*", self.search.regex))
+                .child(toggle("Aa", self.search.case_sensitive))
+                .child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .truncate()
+                        .text_color(muted)
+                        .child(SharedString::from(counter)),
+                )
+                .when(!compact, |bar| {
+                    bar.child(div().flex_none().text_color(muted).child("Esc cierra"))
+                })
+                .into_any_element();
+        }
+
+        let (replacement, replacement_color) = field_text(&self.search.replacement, "Reemplazar…");
+        let field_box = |id: &'static str,
+                         text: SharedString,
+                         color: Hsla,
+                         active: bool,
+                         field: SearchField,
+                         cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex_1()
+                .min_w(px(60.))
+                .h(px(SEARCH_BAR_HEIGHT - 8.))
+                .flex()
+                .items_center()
+                .px(px(6.))
+                .rounded(px(3.))
+                .border_1()
+                .border_color(if active {
+                    theme::color(theme.border_focus)
+                } else {
+                    theme::color(theme.border)
+                })
+                .overflow_hidden()
+                .child(div().min_w_0().truncate().text_color(color).child(text))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.search.field = field;
+                        window.focus(&this.focus_handle, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+        };
+        let tooltip_colors = (
+            theme::color(theme.elevated),
+            theme::color(theme.border),
+            theme::color(theme.text),
+        );
+        let button = |id: &'static str,
+                      label: &'static str,
+                      glyph: &'static str,
+                      all: bool,
+                      cx: &mut Context<Self>| {
+            let button = div()
+                .id(id)
+                .flex_none()
+                .px(px(6.))
+                .h(px(SEARCH_BAR_HEIGHT - 8.))
+                .flex()
+                .items_center()
+                .rounded(px(3.))
+                .border_1()
+                .border_color(theme::color(theme.border))
+                .text_color(theme::color(theme.text))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(theme::color(theme.elevated)))
+                .child(if compact { glyph } else { label })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        window.focus(&this.focus_handle, cx);
+                        cx.stop_propagation();
+                        if all {
+                            this.replace_all(cx);
+                        } else {
+                            this.replace_next(cx);
+                        }
+                    }),
+                );
+            if compact {
+                let (background, border, text) = tooltip_colors;
+                button
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| BarTooltip {
+                            text: SharedString::from(label),
+                            background,
+                            border,
+                            color: text,
+                        })
+                        .into()
+                    })
+                    .into_any_element()
+            } else {
+                button.into_any_element()
+            }
+        };
+        let field = self.search.field;
+        bar.child(field_box(
+            "search-find-field",
+            query,
+            query_color,
+            field == SearchField::Find,
+            SearchField::Find,
+            cx,
+        ))
+        .child(field_box(
+            "search-replace-field",
+            replacement,
+            replacement_color,
+            field == SearchField::Replace,
+            SearchField::Replace,
+            cx,
+        ))
+        .child(toggle(".*", self.search.regex))
+        .child(toggle("Aa", self.search.case_sensitive))
+        .child(
+            div()
+                .flex_shrink(1.)
+                .min_w_0()
+                .truncate()
+                .text_color(muted)
+                .child(SharedString::from(counter)),
+        )
+        .child(button("search-replace-next", "Reemplazar", "⇄", false, cx))
+        .child(button(
+            "search-replace-all",
+            "Reemplazar todo",
+            "⇶",
+            true,
+            cx,
+        ))
+        .when(!compact, |bar| {
+            bar.child(div().flex_none().text_color(muted).child("Esc cierra"))
+        })
+        .into_any_element()
     }
 
     fn render_prompt(&self) -> impl IntoElement {
@@ -3598,7 +4040,7 @@ impl EditorView {
             .items_center()
             .gap(px(8.))
             .w_full()
-            .h(px(28.))
+            .h(px(SEARCH_BAR_HEIGHT))
             .px(px(8.))
             .bg(theme::color(theme.surface))
             .border_b(px(1.))
@@ -3624,12 +4066,35 @@ impl EditorView {
     }
 }
 
+/// The tooltip of a compact search-bar button ("Reemplazar",
+/// "Reemplazar todo").
+struct BarTooltip {
+    text: SharedString,
+    background: Hsla,
+    border: Hsla,
+    color: Hsla,
+}
+
+impl Render for BarTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(6.))
+            .py(px(2.))
+            .rounded(px(4.))
+            .bg(self.background)
+            .border_1()
+            .border_color(self.border)
+            .text_color(self.color)
+            .child(self.text.clone())
+    }
+}
+
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let context = self.key_context();
         let background = theme::color(self.theme.background);
         let search_bar = if self.search_open {
-            Some(self.render_search_bar())
+            Some(self.render_search_bar(cx))
         } else {
             None
         };
@@ -3698,6 +4163,11 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_find))
             .on_action(cx.listener(Self::on_find_next))
             .on_action(cx.listener(Self::on_find_prev))
+            .on_action(cx.listener(Self::on_find_replace))
+            .on_action(cx.listener(Self::on_replace_next))
+            .on_action(cx.listener(Self::on_replace_all))
+            .on_action(cx.listener(Self::on_search_next_field))
+            .on_action(cx.listener(Self::on_search_prev_field))
             .on_action(cx.listener(Self::on_toggle_search_regex))
             .on_action(cx.listener(Self::on_toggle_search_case))
             .on_action(cx.listener(Self::on_go_to_line))
@@ -3792,8 +4262,7 @@ impl EntityInputHandler for EditorView {
             return;
         }
         if self.search_open {
-            self.search.query.push_str(new_text);
-            self.refresh_search(cx);
+            self.type_into_search(new_text, cx);
             return;
         }
         // Plain typing (no IME composition, no explicit range) goes through

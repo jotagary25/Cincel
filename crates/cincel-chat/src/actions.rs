@@ -47,7 +47,9 @@ named_actions!(chat, [
     Newline => "newline",
     /// Cancels the running turn (`Esc`).
     CancelTurn => "cancel_turn",
-    /// Moves the focus to the input (`Ctrl+L`).
+    /// Moves the focus to the input. Unbound by default: `Ctrl+L` is the
+    /// workspace's focus wheel (`docs/specs/07-etapa5-productividad.md` §9.2,
+    /// D8), and a `Chat` binding would outrank it from inside the chat.
     FocusInput => "focus_input",
     /// Starts a new session with the active agent.
     NewSession => "new_session",
@@ -82,7 +84,6 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", Send, chat),
         KeyBinding::new("shift-enter", Newline, chat),
         KeyBinding::new("escape", CancelTurn, chat),
-        KeyBinding::new("ctrl-l", FocusInput, chat),
         KeyBinding::new("ctrl-shift-n", NewSession, chat),
         // The popover (`@`, `/`, the selectors) owns the arrows while it is open.
         KeyBinding::new("down", PopoverNext, chat),

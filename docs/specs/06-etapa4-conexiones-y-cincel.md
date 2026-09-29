@@ -39,7 +39,7 @@ Connection {
 
 ### F1. Conectar
 Botón **"Conectar"** en el encabezado del chat (donde hoy está el selector de agente). Abre un popover con:
-- Una fila por conexión: icono del proveedor, **etiqueta**, identidad en gris si existe ("gary@… · Max"), "Usado hace 2 h", insignia de estado (Conectada / Sesión vencida / No disponible).
+- Una fila por conexión: icono del proveedor, **etiqueta**, identidad en gris si existe ("ana@… · Max"), "Usado hace 2 h", insignia de estado (Conectada / Sesión vencida / No disponible).
 - Al pie: **"Conectar nuevo agente…"** y **"Eliminar conexión…"**.
 Elegir una fila: se lanza el proceso del agente con el perfil de esa conexión, se abre una conversación nueva, la barra de estado muestra el chip de la conexión. Si estaba activa otra, se detiene su proceso (sin borrar nada).
 
@@ -53,7 +53,7 @@ Elegir una fila: se lanza el proceso del agente con el perfil de esa conexión, 
    En la pty el enlace se extrae con una expresión regular sobre la salida.
 4. **"Abrí este enlace y aprobá el acceso"**: enlace en monoespaciada, botones **"Copiar"** y **"Abrir en el navegador"** (portal xdg). Según el agente: Claude muestra además el campo **"Pegá acá el código que te dio el navegador"** (se envía al proceso); Codex termina solo por su callback local; Antigravity termina solo por su servidor local de redirección, sin campo de código ("Cuando apruebes el acceso, Google vuelve a Cincel solo: no hay código que pegar"). Un desplegable **"Ver detalles técnicos"** muestra la salida (redactada) del login.
 5. **"Esperando que apruebes en el navegador…"** con spinner y **"Cancelar"** (mata el grupo de procesos y borra el perfil a medio crear). Éxito: Claude y Codex, el proceso termina con código 0 (y, si el agente la manda, la identidad por `_auth/status_update`); Antigravity, la respuesta correcta de `authenticate` más el archivo de token en el perfil (sin identidad: no anuncia `_auth/status_update` y su token no trae email). El propio Antigravity corta su servidor de redirección a los 5 minutos: `authenticate` responde con error y el modal ofrece "Reintentar".
-6. **"Listo"**: "Conectado como gary@… (Claude Max)" si hay identidad; si no, solo "Conectado". Campo **"Nombre de la conexión"** con sugerencia; botón **"Guardar"**. Recién ahí se persiste la conexión y se activa (F1).
+6. **"Listo"**: "Conectado como ana@… (Claude Max)" si hay identidad; si no, solo "Conectado". Campo **"Nombre de la conexión"** con sugerencia; botón **"Guardar"**. Recién ahí se persiste la conexión y se activa (F1).
 Errores: tiempo de espera agotado (15 min), proceso terminado con error, `authenticate` rechazado, sin red, sin espacio en disco, sin navegador. Cada uno con mensaje claro y **"Reintentar"**.
 Los logins de un mismo proveedor se serializan (Codex usa un puerto local fijo).
 

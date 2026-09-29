@@ -134,6 +134,14 @@ fn open_default(
     open(cx, text, review, EditorSettings::default())
 }
 
+/// The settings with `jump_to_next_on_decide` on (it is off by default).
+fn jumping() -> EditorSettings {
+    EditorSettings {
+        jump_to_next_on_decide: true,
+        ..Default::default()
+    }
+}
+
 fn set_review(view: &Entity<EditorView>, cx: &mut VisualTestContext, review: ReviewView) {
     cx.update(|_window, cx| view.update(cx, |view, cx| view.set_review(review, cx)));
     cx.run_until_parked();
@@ -585,9 +593,43 @@ fn the_bar_lists_the_actions_and_the_position(cx: &mut TestAppContext) {
     let painted = frame(&view, &mut visual);
     assert_eq!(
         painted.review.bar.as_deref(),
-        Some("✓ Aceptar Ctrl+↵ · ✗ Rechazar Ctrl+⌫ · ↑ Alt+K ↓ Alt+J · 2/3 cambios · Revisar todo")
+        Some(
+            "✓ Aceptar todo Ctrl+Alt+↵ · ✗ Rechazar todo Ctrl+Alt+⌫ · ↑ Alt+K ↓ Alt+J · \
+             cambio 2 de 3 · Revisar todo"
+        )
     );
     assert!(painted.review.bar_enabled);
+}
+
+/// A file decided only as a whole (an agent deletion) leads the bar with its
+/// own accept and reject buttons, before the turn's.
+#[gpui::test]
+fn the_bar_offers_the_file_decision_when_asked(cx: &mut TestAppContext) {
+    let mut whole = review(vec![hunk(40, &["x", "y"], 0..0)]);
+    whole.file_actions = true;
+    let (view, handle, mut visual) = open_default(cx, "", whole);
+    let painted = frame(&view, &mut visual);
+    assert_eq!(
+        painted.review.bar.as_deref(),
+        Some(
+            "✓ Aceptar archivo ✗ Rechazar archivo · ✓ Aceptar todo Ctrl+Alt+↵ · \
+             ✗ Rechazar todo Ctrl+Alt+⌫ · ↑ Alt+K ↓ Alt+J · cambio 1 de 1 · Revisar todo"
+        )
+    );
+    let buttons: Vec<String> = painted
+        .review
+        .bar_buttons
+        .iter()
+        .map(|button| button.text.clone())
+        .collect();
+    assert_eq!(buttons[0], "✓ Aceptar archivo");
+    assert_eq!(buttons[1], "✗ Rechazar archivo");
+
+    // The file decision answers the keyboard too (`review::accept_file`).
+    let events = record(&view, &mut visual);
+    cx.simulate_keystrokes(handle, "ctrl-shift-enter");
+    visual.run_until_parked();
+    assert_eq!(*events.borrow(), vec![ReviewAction::AcceptFile]);
 }
 
 #[gpui::test]
@@ -595,7 +637,7 @@ fn the_bar_counts_the_next_hunk_when_the_cursor_is_outside(cx: &mut TestAppConte
     let (view, _handle, mut visual) = open_default(cx, TEXT, two_hunks());
     set_cursor(&view, &mut visual, DisplayPoint::new(5, 0));
     let bar = frame(&view, &mut visual).review.bar.unwrap();
-    assert!(bar.contains("2/2 cambios"), "{bar}");
+    assert!(bar.contains("cambio 2 de 2"), "{bar}");
 }
 
 #[gpui::test]
@@ -719,7 +761,7 @@ fn the_cursor_keeps_its_line_when_a_hunk_above_goes_away(cx: &mut TestAppContext
 
 #[gpui::test]
 fn after_a_decision_the_cursor_jumps_to_the_next_hunk(cx: &mut TestAppContext) {
-    let (view, handle, mut visual) = open_default(cx, TEXT, two_hunks());
+    let (view, handle, mut visual) = open(cx, TEXT, two_hunks(), jumping());
     set_cursor(&view, &mut visual, DisplayPoint::new(3, 0));
     cx.simulate_keystrokes(handle, "ctrl-enter");
     visual.run_until_parked();
@@ -781,23 +823,7 @@ fn the_hunk_follows_rows_typed_above_it(cx: &mut TestAppContext) {
     assert_eq!(start, 2, "the phantom block moved down with it");
 }
 
-#[gpui::test]
-fn search_does_not_match_inside_phantom_rows(cx: &mut TestAppContext) {
-    let (view, handle, mut visual) = open_default(
-        cx,
-        "uno\nfoo\n",
-        review(vec![hunk(1, &["foo viejo"], 1..2)]),
-    );
-    cx.simulate_keystrokes(handle, "ctrl-f");
-    cx.simulate_input(handle, "foo");
-    visual.run_until_parked();
-    let (matches, cursor) = visual.update(|_window, cx| {
-        let view = view.read(cx);
-        (view.search.matches().to_vec(), view.cursor)
-    });
-    assert_eq!(matches, vec![4..7], "only the buffer row matches");
-    assert_eq!(cursor, DisplayPoint::new(2, 3));
-}
+// Search over phantom rows (07-etapa5 §10.2) lives in `search_tests.rs`.
 
 #[gpui::test]
 fn legacy_set_hunks_still_feeds_the_review(cx: &mut TestAppContext) {
@@ -822,7 +848,7 @@ fn legacy_set_hunks_still_feeds_the_review(cx: &mut TestAppContext) {
     );
     assert_eq!(review.hunks.len(), 1);
     assert_eq!(review.hunks[0].kind, ReviewHunkKind::Modified);
-    assert!(bar.unwrap().contains("1/1 cambios"));
+    assert!(bar.unwrap().contains("cambio 1 de 1"));
 }
 
 // -- mouse cursors ----------------------------------------------------------------
@@ -991,12 +1017,12 @@ fn the_bar_buttons_read_as_enabled_and_highlight_on_hover(cx: &mut TestAppContex
     let buttons = frame(&view, &mut visual).review.bar_buttons;
     let accept = buttons
         .iter()
-        .find(|button| button.text == "✓ Aceptar")
-        .expect("Aceptar");
+        .find(|button| button.text == "✓ Aceptar todo")
+        .expect("Aceptar todo");
     let reject = buttons
         .iter()
-        .find(|button| button.text == "✗ Rechazar")
-        .expect("Rechazar");
+        .find(|button| button.text == "✗ Rechazar todo")
+        .expect("Rechazar todo");
     assert_eq!(accept.glyph_color, crate::theme::color(theme.status_ok));
     assert_eq!(accept.label_color, crate::theme::color(theme.text));
     assert_eq!(reject.glyph_color, crate::theme::color(theme.status_error));
@@ -1015,6 +1041,41 @@ fn the_bar_buttons_read_as_enabled_and_highlight_on_hover(cx: &mut TestAppContex
         .map(|button| button.text.as_str())
         .collect();
     assert_eq!(hovered, vec!["Revisar todo"]);
+}
+
+/// The bar's two buttons decide the whole turn (`workspace::accept_turn` /
+/// `reject_turn`), not the hunk under the cursor: that one has its pill and
+/// `Ctrl+↵` / `Ctrl+⌫`.
+#[gpui::test]
+fn the_bar_buttons_decide_the_whole_turn(cx: &mut TestAppContext) {
+    let (view, _handle, mut visual) = open_default(cx, TEXT, two_hunks());
+    let events = record(&view, &mut visual);
+    let (_, _, bounds) = geometry(&view, &mut visual);
+    let y = f32::from(bounds.bottom()) - BAR_MARGIN - 15.;
+    // Walks the bar from its right end until the mouse is over `label`.
+    let find = |visual: &mut VisualTestContext, label: &str| -> f32 {
+        let mut x = f32::from(bounds.right()) - BAR_MARGIN - 4.;
+        while x > f32::from(bounds.left()) {
+            hover(visual, x, y);
+            let buttons = frame(&view, visual).review.bar_buttons;
+            if buttons
+                .iter()
+                .any(|button| button.hovered && button.text == label)
+            {
+                return x;
+            }
+            x -= 4.;
+        }
+        panic!("no se encontró «{label}» en la barra");
+    };
+    let accept = find(&mut visual, "✓ Aceptar todo");
+    click(&mut visual, accept, y);
+    let reject = find(&mut visual, "✗ Rechazar todo");
+    click(&mut visual, reject, y);
+    assert_eq!(
+        *events.borrow(),
+        vec![ReviewAction::AcceptTurn, ReviewAction::RejectTurn]
+    );
 }
 
 // -- line icons over the numbers (etapa-3 § correcciones) -----------------------
@@ -1188,4 +1249,167 @@ fn a_pure_deletion_places_the_pill_on_its_phantom_rows(cx: &mut TestAppContext) 
     // Display rows 1 and 2 are the phantom rows; the second is short.
     assert_eq!(pill.display_row, 2);
     assert!(!pill.compact);
+}
+
+// -- centring the target of a jump -----------------------------------------
+
+/// `(cursor wrap row, first visible wrap row, visible rows)` after the last
+/// frame.
+fn jump_geometry(view: &Entity<EditorView>, cx: &mut VisualTestContext) -> (f32, f32, f32) {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.update(|_window, cx| {
+        let view = view.read(cx);
+        let visible = view.layout.as_ref().expect("laid out").visible_row_count;
+        (view.cursor_wrap_row() as f32, view.scroll_row(), visible)
+    })
+}
+
+/// The cursor row sits in the middle of the viewport (within one row).
+fn assert_centred((cursor, scroll, visible): (f32, f32, f32)) {
+    let offset = cursor + 0.5 - scroll;
+    assert!(
+        (offset - visible / 2.).abs() <= 1.,
+        "row {cursor} at {offset} of {visible} visible rows (scroll {scroll})"
+    );
+}
+
+fn long_text() -> String {
+    (0..300).map(|row| format!("fila {row}\n")).collect()
+}
+
+#[gpui::test]
+fn a_host_jump_centres_the_target_row(cx: &mut TestAppContext) {
+    let far = review(vec![hunk(1, &["x"], 2..3), hunk(2, &["y"], 200..201)]);
+    let (view, _handle, mut visual) = open_default(cx, &long_text(), far.clone());
+    let mut current = far;
+    current.current_index = Some(1);
+    set_review(&view, &mut visual, current);
+    let geometry = jump_geometry(&view, &mut visual);
+    assert_eq!(
+        visual.update(|_window, cx| view.read(cx).hunk_under_cursor()),
+        Some(1)
+    );
+    assert_centred(geometry);
+}
+
+#[gpui::test]
+fn alt_j_and_alt_k_centre_the_hunk(cx: &mut TestAppContext) {
+    let far = review(vec![hunk(1, &["x"], 100..101), hunk(2, &["y"], 200..201)]);
+    let (view, handle, mut visual) = open_default(cx, &long_text(), far);
+    set_cursor(&view, &mut visual, DisplayPoint::new(0, 0));
+    cx.simulate_keystrokes(handle, "alt-j");
+    visual.run_until_parked();
+    assert_centred(jump_geometry(&view, &mut visual));
+    cx.simulate_keystrokes(handle, "alt-j");
+    visual.run_until_parked();
+    assert_centred(jump_geometry(&view, &mut visual));
+    cx.simulate_keystrokes(handle, "alt-k");
+    visual.run_until_parked();
+    let geometry = jump_geometry(&view, &mut visual);
+    assert_eq!(
+        visual.update(|_window, cx| view.read(cx).hunk_under_cursor()),
+        Some(0)
+    );
+    assert_centred(geometry);
+}
+
+#[gpui::test]
+fn deciding_centres_the_next_hunk(cx: &mut TestAppContext) {
+    let two = review(vec![hunk(1, &["x"], 3..4), hunk(2, &["y"], 200..201)]);
+    let (view, handle, mut visual) = open(cx, &long_text(), two, jumping());
+    set_cursor(&view, &mut visual, DisplayPoint::new(4, 0));
+    cx.simulate_keystrokes(handle, "ctrl-enter");
+    visual.run_until_parked();
+    // The host applied it: hunk 1 is gone.
+    set_review(&view, &mut visual, review(vec![hunk(2, &["y"], 199..200)]));
+    let geometry = jump_geometry(&view, &mut visual);
+    assert_eq!(
+        visual.update(|_window, cx| view.read(cx).hunk_under_cursor()),
+        Some(0)
+    );
+    assert_centred(geometry);
+}
+
+#[gpui::test]
+fn a_hunk_at_the_end_scrolls_as_far_as_the_document_allows(cx: &mut TestAppContext) {
+    let text = long_text();
+    let last = review(vec![hunk(1, &["x"], 299..300)]);
+    let (view, handle, mut visual) = open_default(cx, &text, last);
+    set_cursor(&view, &mut visual, DisplayPoint::new(0, 0));
+    cx.simulate_keystrokes(handle, "alt-j");
+    visual.run_until_parked();
+    let (cursor, scroll, visible) = jump_geometry(&view, &mut visual);
+    let rows = visual.update(|_window, cx| view.read(cx).wrap_row_count()) as f32;
+    // Clamped at the bottom of the document, with the row on screen.
+    assert!(
+        (scroll - (rows - visible)).abs() < 0.01,
+        "scroll {scroll}, {rows} rows, {visible} visible"
+    );
+    assert!(cursor >= scroll && cursor + 1. <= scroll + visible);
+}
+
+#[gpui::test]
+fn a_hunk_already_in_the_middle_third_does_not_scroll(cx: &mut TestAppContext) {
+    let (view, handle, mut visual) = open_default(cx, &long_text(), ReviewView::default());
+    let (_, _, visible) = jump_geometry(&view, &mut visual);
+    // A hunk whose phantom row lands in the middle of a viewport that starts
+    // at row 0.
+    let middle = (visible / 2.) as u32;
+    set_review(
+        &view,
+        &mut visual,
+        review(vec![hunk(1, &["x"], middle..middle + 1)]),
+    );
+    set_cursor(&view, &mut visual, DisplayPoint::new(0, 0));
+    cx.simulate_keystrokes(handle, "alt-j");
+    visual.run_until_parked();
+    let (cursor, scroll, visible) = jump_geometry(&view, &mut visual);
+    assert_eq!(cursor, middle as f32);
+    assert!(cursor >= visible / 3. && cursor + 1. <= visible * 2. / 3.);
+    assert_eq!(scroll, 0., "already in the middle third: no scroll");
+}
+
+#[gpui::test]
+fn the_gutter_and_the_scrollbar_show_the_arrow(cx: &mut TestAppContext) {
+    let text = long_text();
+    let (view, _handle, mut visual) = open_default(cx, &text, review(vec![hunk(1, &["x"], 2..3)]));
+    let (line_height, text_x, bounds) = geometry(&view, &mut visual);
+    let right = f32::from(bounds.right());
+    let left = f32::from(bounds.left());
+    let middle = f32::from(bounds.center().y);
+    // The document scrolls, so the bar is there once the mouse moves.
+    hover(&mut visual, right - 4., middle);
+    assert!(
+        frame(&view, &mut visual).rows.len() > 1,
+        "a long document is painted"
+    );
+    assert_eq!(
+        cursor_at(&view, &mut visual, right - 4., middle),
+        CursorStyle::Arrow,
+        "the scrollbar track"
+    );
+    assert_eq!(
+        cursor_at(&view, &mut visual, right - 4., f32::from(bounds.top()) + 4.),
+        CursorStyle::Arrow,
+        "the thumb (at the top while the scroll is 0)"
+    );
+    assert_eq!(
+        cursor_at(&view, &mut visual, left + 4., middle),
+        CursorStyle::Arrow,
+        "the gutter"
+    );
+    assert_eq!(
+        cursor_at(&view, &mut visual, text_x + 40., middle),
+        CursorStyle::IBeam,
+        "the text keeps the I-beam"
+    );
+    // The review icons of the gutter keep their hand on top of the arrow
+    // (display row 2 is the hunk's phantom row).
+    let y = line_height * 2.5;
+    let (plus, _) = icon_centers(&view, &mut visual, y);
+    assert_eq!(
+        cursor_at(&view, &mut visual, plus, y),
+        CursorStyle::PointingHand
+    );
 }

@@ -9,6 +9,8 @@
 //! Key contexts (`docs/specs/modulos/editor.md`):
 //! - `Editor`: always,
 //! - `Editor && searching`: while the search bar is open,
+//! - `Editor && searching && replacing`: while the bar is in replace mode and
+//!   the "Reemplazar…" field has the keyboard,
 //! - `Editor && review_hunk_under_cursor`: while the cursor is inside a hunk.
 //!
 //! `Ctrl+Enter` and `Ctrl+Backspace` are bound to the review actions **only**
@@ -21,6 +23,9 @@ use gpui::KeyBinding;
 pub const CONTEXT_EDITOR: &str = "Editor";
 /// Key-binding context predicate while the search bar is open.
 pub const CONTEXT_SEARCHING: &str = "Editor && searching";
+/// Key-binding context predicate while the replace field of the search bar
+/// has the keyboard (`docs/specs/07-etapa5-productividad.md` §10.2).
+pub const CONTEXT_REPLACING: &str = "Editor && searching && replacing";
 /// Key-binding context predicate while the cursor is inside a review hunk.
 pub const CONTEXT_REVIEW: &str = "Editor && review_hunk_under_cursor";
 
@@ -117,6 +122,20 @@ named_actions!(editor, [
     FindNext => "find_next",
     /// Goes to the previous search match.
     FindPrev => "find_prev",
+    /// Opens the search bar in replace mode ("Buscar…" and "Reemplazar…" side
+    /// by side); with the bar already open, moves the keyboard to
+    /// "Reemplazar…".
+    FindReplace => "find_replace",
+    /// Replaces the current match and moves to the next one. On a match in a
+    /// phantom row it replaces nothing and moves to the next real match.
+    ReplaceNext => "replace_next",
+    /// Replaces every real match in one undo step; phantom rows are left
+    /// alone.
+    ReplaceAll => "replace_all",
+    /// Moves the keyboard to the other field of the search bar (`Tab`).
+    SearchNextField => "search_next_field",
+    /// Moves the keyboard to the other field of the search bar (`Shift+Tab`).
+    SearchPrevField => "search_prev_field",
     /// Toggles the regular-expression mode of the search bar.
     ToggleSearchRegex => "toggle_search_regex",
     /// Toggles case sensitivity of the search bar.
@@ -203,6 +222,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
     let editor = Some(CONTEXT_EDITOR);
     let searching = Some(CONTEXT_SEARCHING);
     let review = Some(CONTEXT_REVIEW);
+    let replacing = Some(CONTEXT_REPLACING);
     vec![
         // Movement.
         KeyBinding::new("left", MoveLeft, editor),
@@ -263,6 +283,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-|", MoveToMatchingBracket, editor),
         // Search, go to line, view.
         KeyBinding::new("ctrl-f", Find, editor),
+        KeyBinding::new("ctrl-h", FindReplace, editor),
         KeyBinding::new("f3", FindNext, editor),
         KeyBinding::new("shift-f3", FindPrev, editor),
         KeyBinding::new("ctrl-g", GoToLine, editor),
@@ -276,6 +297,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("alt-r", ToggleSearchRegex, searching),
         KeyBinding::new("alt-c", ToggleSearchCase, searching),
         KeyBinding::new("backspace", Backspace, searching),
+        // `Tab` never reaches the file while the bar is open.
+        KeyBinding::new("tab", SearchNextField, searching),
+        KeyBinding::new("shift-tab", SearchPrevField, searching),
         // Review: the per-hunk and per-line decisions are only bound while the
         // cursor is inside a hunk (phantom rows count).
         KeyBinding::new("ctrl-enter", AcceptHunk, review),
@@ -292,6 +316,30 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-f7", PrevHunk, editor),
         KeyBinding::new("alt-l", NextFile, editor),
         KeyBinding::new("alt-shift-u", UndoLastReject, editor),
+        // The replace field comes after the review and the search bar, so its
+        // `Enter` / `Ctrl+Enter` win while it has the keyboard.
+        KeyBinding::new("enter", ReplaceNext, replacing),
+        KeyBinding::new("ctrl-enter", ReplaceAll, replacing),
+    ]
+}
+
+/// The search-bar bindings whose context is narrower than `Editor`, as
+/// `(keystroke, context predicate, action)`: `Tab` / `Shift+Tab` in
+/// `Editor && searching` and `Enter` / `Ctrl+Enter` in
+/// `Editor && searching && replacing`.
+///
+/// They are part of [`default_key_bindings`] too. A host that loads a keymap
+/// *after* those defaults (the workspace's `keymap.json`, whose `Editor`
+/// section binds `tab`, `enter` and `ctrl-enter` for plain editing) binds
+/// these again on top of it, so the plain-editing meaning of those keys never
+/// reaches the file while the bar has the keyboard — unless the keymap itself
+/// binds the same keystroke in the same context.
+pub fn search_bar_bindings() -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
+    vec![
+        ("tab", CONTEXT_SEARCHING, Box::new(SearchNextField)),
+        ("shift-tab", CONTEXT_SEARCHING, Box::new(SearchPrevField)),
+        ("enter", CONTEXT_REPLACING, Box::new(ReplaceNext)),
+        ("ctrl-enter", CONTEXT_REPLACING, Box::new(ReplaceAll)),
     ]
 }
 
