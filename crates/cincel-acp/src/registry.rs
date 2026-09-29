@@ -715,12 +715,23 @@ mod tests {
     fn npx_launch_command_keeps_pinned_version() {
         let registry = AgentRegistry::parse(SAMPLE).expect("parse");
         let descriptor = registry.get("claude-acp").expect("claude");
-        let spec = registry.launch_command(descriptor).expect("spec");
-        assert_eq!(spec.program, "npx");
-        assert_eq!(
-            spec.args,
-            vec!["-y", "@agentclientprotocol/claude-agent-acp@0.79.0"]
-        );
+        // The system-Node path needs `node` on `PATH`; a bare CI runner may
+        // not have it, and then `NodeMissing` is the only right answer.
+        match registry.launch_command(descriptor) {
+            Ok(spec) => {
+                assert!(ensure_node_available().is_ok());
+                assert_eq!(spec.program, "npx");
+                assert_eq!(
+                    spec.args,
+                    vec!["-y", "@agentclientprotocol/claude-agent-acp@0.79.0"]
+                );
+            }
+            Err(AcpError::NodeMissing { .. }) => {
+                assert!(ensure_node_available().is_err());
+                eprintln!("sin node en PATH: se comprueba solo el error");
+            }
+            Err(other) => panic!("error inesperado: {other:?}"),
+        }
     }
 
     #[test]
@@ -774,9 +785,18 @@ mod tests {
     fn npx_launch_command_pins_missing_version_and_keeps_args() {
         let registry = AgentRegistry::parse(SAMPLE).expect("parse");
         let descriptor = registry.get("sin-version").expect("sin-version");
-        let spec = registry.launch_command(descriptor).expect("spec");
-        assert_eq!(spec.args, vec!["-y", "@scope/pkg@1.2.3", "--acp"]);
-        assert_eq!(spec.env.get("A").map(String::as_str), Some("1"));
+        match registry.launch_command(descriptor) {
+            Ok(spec) => {
+                assert!(ensure_node_available().is_ok());
+                assert_eq!(spec.args, vec!["-y", "@scope/pkg@1.2.3", "--acp"]);
+                assert_eq!(spec.env.get("A").map(String::as_str), Some("1"));
+            }
+            Err(AcpError::NodeMissing { .. }) => {
+                assert!(ensure_node_available().is_err());
+                eprintln!("sin node en PATH: se comprueba solo el error");
+            }
+            Err(other) => panic!("error inesperado: {other:?}"),
+        }
     }
 
     #[test]
@@ -808,10 +828,21 @@ mod tests {
         )
         .expect("parse");
         let descriptor = registry.get("uvx-agent").expect("uvx-agent");
-        // This test machine always has `uv`/`uvx` installed (dev prerequisite).
-        let spec = registry.launch_command(descriptor).expect("spec");
-        assert_eq!(spec.program, "uvx");
-        assert_eq!(spec.args, vec!["some-acp-agent@2.0.0"]);
+        // `uvx` is a dev prerequisite here but not on a bare CI runner: the
+        // launch command needs it on `PATH`, so without it the only right
+        // answer is `UvMissing`, and that is what gets checked instead.
+        match registry.launch_command(descriptor) {
+            Ok(spec) => {
+                assert!(uv_available(), "sin uvx no debería haber comando");
+                assert_eq!(spec.program, "uvx");
+                assert_eq!(spec.args, vec!["some-acp-agent@2.0.0"]);
+            }
+            Err(AcpError::UvMissing) => {
+                assert!(!uv_available(), "con uvx debería haber comando");
+                eprintln!("sin uvx en PATH: se comprueba solo el error");
+            }
+            Err(other) => panic!("error inesperado: {other:?}"),
+        }
     }
 
     #[test]
