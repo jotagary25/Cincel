@@ -7,11 +7,11 @@ version = "1.0.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.90"
-# D22: `<usuario>` is a placeholder the author replaces once the
+# D22: `jotagary25` is a placeholder the author replaces once the
 # repository is created (docs/publicacion.md, step 5) — never guessed or
 # filled in ahead of time.
-repository = "https://github.com/<usuario>/cincel"
-homepage = "https://github.com/<usuario>/cincel"
+repository = "https://github.com/jotagary25/cincel"
+homepage = "https://github.com/jotagary25/cincel"
 description = "Code editor where you review every change an AI agent makes"
 
 [workspace.dependencies]

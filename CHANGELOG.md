@@ -59,4 +59,4 @@ del plan de trabajo, `docs/specs/05-plan-etapas.md`):
 - A tarball installer (`install.sh`) and a `.deb` package, both built on
   Ubuntu 22.04, with no vendored libraries and a dedicated app icon.
 
-[1.0.0]: https://github.com/<usuario>/cincel/releases/tag/v1.0.0
+[1.0.0]: https://github.com/jotagary25/cincel/releases/tag/v1.0.0

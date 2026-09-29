@@ -32,8 +32,8 @@ Besides editing and chatting with agents:
 ## Installation
 
 Download the latest release from the [Releases
-page](https://github.com/<usuario>/cincel/releases) (the author replaces
-`<usuario>` once the repository is public — `docs/publicacion.md`).
+page](https://github.com/jotagary25/cincel/releases) (the author replaces
+`jotagary25` once the repository is public — `docs/publicacion.md`).
 
 ### Tarball
 

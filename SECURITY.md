@@ -6,8 +6,8 @@ Please **do not** open a public issue for a security vulnerability.
 
 Use GitHub's private vulnerability reporting for this repository instead:
 go to the **Security** tab → **Report a vulnerability**, or open
-`https://github.com/<usuario>/cincel/security/advisories/new` directly
-once the repository is public (`<usuario>`: see `docs/publicacion.md`).
+`https://github.com/jotagary25/cincel/security/advisories/new` directly
+once the repository is public (`jotagary25`: see `docs/publicacion.md`).
 This opens a private draft advisory that only the maintainers can see
 until it is resolved and published together.
 

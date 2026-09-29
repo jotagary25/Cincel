@@ -56,7 +56,7 @@ A vos solo te quedan dos cosas: crear el repositorio siguiendo `docs/publicacion
 | D19 | Avisos de licencias de dependencias: `THIRD-PARTY-LICENSES.html` generado con `cargo-about` en el release e incluido en los dos paquetes; `about.toml` acepta las mismas licencias que `deny.toml`. | MIT y Apache-2.0 piden acompañar el aviso de copyright al distribuir binarios. |
 | D20 | Control de datos personales: `tools/privacy-check.sh` busca en el árbol **y en la historia de git** el usuario del sistema, el nombre del equipo y el correo de `git config`, leídos **en el momento** (nunca escritos en el repo), más patrones genéricos (rutas `/home/<nombre>/` que no sean los nombres de ejemplo del repo, correos que no sean `@example.com`/`@example.invalid`, prefijos de tokens conocidos). | Buscar el nombre real exige saberlo; escribirlo en el script sería justamente publicarlo. |
 | D21 | Capturas del README tomadas **en el banco** (D1) con `grim` sobre la salida del escritorio invisible, con un proyecto de demostración y un turno sintético (`cincel --bench demo`, §3.4: rojo y verde sin ningún agente real). Nunca de la sesión del autor. | Sin datos personales y reproducibles. El chat con un agente real no se captura: necesitaría una cuenta del autor. |
-| D22 | Nombre sugerido del repositorio: `cincel`. La URL (`https://github.com/<usuario>/cincel`) queda con el marcador `<usuario>` en un solo lugar por archivo, listado en `docs/publicacion.md`, y la completa el autor (o el orquestador cuando el autor le diga su usuario). | No se adivina ni se escribe la cuenta del autor. |
+| D22 | Nombre sugerido del repositorio: `cincel`. La URL (`https://github.com/jotagary25/cincel`) queda con el marcador `jotagary25` en un solo lugar por archivo, listado en `docs/publicacion.md`, y la completa el autor (o el orquestador cuando el autor le diga su usuario). | No se adivina ni se escribe la cuenta del autor. |
 
 ---
 
@@ -340,7 +340,7 @@ Llevar `git.added`/`git.modified`/`git.deleted` de `GitGutterColors` a `EditorTh
 - `CODE_OF_CONDUCT.md`: adopta el Contributor Covenant 2.1 **por referencia** (enlace a la versión oficial, sin copiar el texto), con el canal de contacto "reporte privado de GitHub" (sin correo).
 - `SECURITY.md`: cómo reportar una vulnerabilidad (reporte privado de GitHub; sin correo).
 - `.github/ISSUE_TEMPLATE/{bug_report.yml, feature_request.yml, config.yml}`: formularios en inglés con etiquetas en español entre paréntesis; el de errores pide versión (`cincel --version`), distribución, escritorio, GPU y las últimas líneas del log (`~/.local/state/cincel/log/`) **recordando borrar datos personales**. `.github/pull_request_template.md`.
-- `Cargo.toml`: `repository` y `homepage` = `https://github.com/<usuario>/cincel` (D22), `description`.
+- `Cargo.toml`: `repository` y `homepage` = `https://github.com/jotagary25/cincel` (D22), `description`.
 - `.gitignore`: sin cambios salvo que E6-H use una carpeta de salida fuera de `target/` (en ese caso se agrega).
 - `tools/privacy-check.sh` (D20): sale con 1 si encuentra algo, imprimiendo archivo y línea (o commit) **sin** repetir el valor encontrado completo (lo enmascara).
 
@@ -365,7 +365,7 @@ Lista numerada con cada paso, qué ver en pantalla y qué hacer si algo sale dis
 2. **Decidir la historia de git**: publicarla tal cual o publicar una historia nueva de un solo commit (comandos para las dos opciones). Recomendación: historia nueva si el control encontró algo en commits viejos o si el correo de tus commits es uno que no querés público.
 3. Configurar el correo privado de GitHub (`usuario@users.noreply.github.com`) en `git config user.email` para los commits que se publiquen.
 4. Crear el repositorio en GitHub: nombre `cincel`, público, **sin** README, licencia ni `.gitignore` iniciales (ya están); por la web o con `gh repo create cincel --public --source . --remote origin`.
-5. Completar `<usuario>`: el comando `grep -rn "<usuario>"` lista los lugares; un `sed` los reemplaza todos (o pedírselo a Cincel).
+5. Completar `jotagary25`: el comando `grep -rn "jotagary25"` lista los lugares; un `sed` los reemplaza todos (o pedírselo a Cincel).
 6. `git push -u origin main`.
 7. Ajustes del repo: Actions habilitado con permisos de lectura por defecto; regla de protección de `main` (sin *force push*, sin borrado, CI obligatorio para pull requests; el autor puede seguir empujando directo); reporte privado de vulnerabilidades activado; descripción y temas (`editor`, `rust`, `gpui`, `acp`, `ai-agents`).
 8. Esperar el CI en verde (qué hacer si falla: abrir el job, copiar el error y pasárselo a Cincel).

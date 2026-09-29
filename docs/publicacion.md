@@ -76,22 +76,22 @@ Por la web (github.com → New repository), o con `gh`:
 gh repo create cincel --public --source . --remote origin
 ```
 
-## 5. Completar `<usuario>` en todo el repo
+## 5. Completar `jotagary25` en todo el repo
 
-Varios archivos tienen el marcador `<usuario>` en la URL
-`https://github.com/<usuario>/cincel` (D22): `Cargo.toml` (campos
+Varios archivos tienen el marcador `jotagary25` en la URL
+`https://github.com/jotagary25/cincel` (D22): `Cargo.toml` (campos
 `repository` y `homepage`), `README.md`, `SECURITY.md` y
 `.github/ISSUE_TEMPLATE/config.yml`. Para verlos todos:
 
 ```sh
-grep -rn "<usuario>" --include="*.md" --include="*.toml" --include="*.yml" .
+grep -rn "jotagary25" --include="*.md" --include="*.toml" --include="*.yml" .
 ```
 
 Reemplazalos todos con tu usuario real de GitHub:
 
 ```sh
-grep -rl "<usuario>" --include="*.md" --include="*.toml" --include="*.yml" . \
-    | xargs sed -i "s/<usuario>/TU-USUARIO-DE-GITHUB/g"
+grep -rl "jotagary25" --include="*.md" --include="*.toml" --include="*.yml" . \
+    | xargs sed -i "s/jotagary25/TU-USUARIO-DE-GITHUB/g"
 ```
 
 (o pedíselo a Cincel/Claude, dándole tu usuario en el chat).
