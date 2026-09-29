@@ -619,9 +619,21 @@ fn rust_5000_lines_parses_cold_and_reparses_fast() {
         warm[0],
         warm[warm.len() - 1],
     );
-    assert!(cold < Duration::from_millis(30), "cold parse took {cold:?}");
+    // `CINCEL_PERF_BUDGET_FACTOR` widens the budget on slower, shared machines
+    // (the CI sets it); unset, the reference machine gets the real one.
+    let factor = std::env::var("CINCEL_PERF_BUDGET_FACTOR")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|factor| factor.is_finite() && *factor >= 1.)
+        .unwrap_or(1.);
+    let cold_budget = Duration::from_millis(30).mul_f64(factor);
+    let median_budget = Duration::from_millis(2).mul_f64(factor);
     assert!(
-        median < Duration::from_millis(2),
-        "median single-char reparse took {median:?}"
+        cold < cold_budget,
+        "cold parse took {cold:?} (budget {cold_budget:?})"
+    );
+    assert!(
+        median < median_budget,
+        "median single-char reparse took {median:?} (budget {median_budget:?})"
     );
 }
