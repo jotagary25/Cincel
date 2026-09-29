@@ -3,7 +3,7 @@
 All notable changes to Cincel are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.0.0] - 2026-09-29
+## [0.1.0] - 2026-09-29
 
 Primera versión. Resumen en español de lo que trae, por área (etapas 1 a 6
 del plan de trabajo, `docs/specs/05-plan-etapas.md`):
@@ -59,4 +59,4 @@ del plan de trabajo, `docs/specs/05-plan-etapas.md`):
 - A tarball installer (`install.sh`) and a `.deb` package, both built on
   Ubuntu 22.04, with no vendored libraries and a dedicated app icon.
 
-[1.0.0]: https://github.com/jotagary25/cincel/releases/tag/v1.0.0
+[0.1.0]: https://github.com/jotagary25/cincel/releases/tag/v0.1.0

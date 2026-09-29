@@ -21,7 +21,7 @@ body:
     attributes:
       label: Cincel version (versión de Cincel)
       description: Output of `cincel --version`.
-      placeholder: "cincel 1.0.0"
+      placeholder: "cincel 0.1.0"
     validations:
       required: true
   - type: input
