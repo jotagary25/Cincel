@@ -285,9 +285,10 @@ fn clicking_the_pill_emits_accept_and_reject(cx: &mut TestAppContext) {
     });
     // The pill sits on the first display row of each hunk (1 and 4), right
     // aligned: inset by the scrollbar (8 px) plus its own margin (12 px).
+    // Three equal parts (spec 09 §6.3): "Rechazar" is the middle one.
     let pill_right = right - 8. - 12.;
-    let accept_x = pill_right - 190. + 40.;
-    let reject_x = pill_right - 20.;
+    let accept_x = pill_right - crate::element::PILL_WIDTH + 40.;
+    let reject_x = pill_right - crate::element::PILL_WIDTH / 2.;
 
     // The pill of a hunk shows while the mouse is over it.
     let at = gpui::point(gpui::px(accept_x), gpui::px(line_height * 1.5));

@@ -94,6 +94,11 @@ pub struct EditorSettings {
     /// the code font; the rest (and the placeholder) use this one, and soft
     /// wrap measures real glyph advances instead of monospace columns.
     pub prose_font_family: Option<Vec<String>>,
+    /// Zoom of the interface (`Ctrl+=` / `Ctrl+-`), 1 by default: the comment
+    /// boxes, the comment mark and the hunk buttons are scaled by it, as the
+    /// rest of the interface is (`02-visual.md` §7). The code itself already
+    /// comes scaled in [`Self::font_size`].
+    pub ui_scale: f32,
 }
 
 impl Default for EditorSettings {
@@ -119,11 +124,21 @@ impl Default for EditorSettings {
             chrome: EditorChrome::Full,
             auto_height: None,
             prose_font_family: None,
+            ui_scale: 1.,
         }
     }
 }
 
 impl EditorSettings {
+    /// [`Self::ui_scale`], never below a tenth.
+    pub fn scale(&self) -> f32 {
+        if self.ui_scale.is_finite() {
+            self.ui_scale.max(0.1)
+        } else {
+            1.
+        }
+    }
+
     /// The string one indent level inserts.
     pub fn indent_unit(&self) -> String {
         if self.insert_spaces {

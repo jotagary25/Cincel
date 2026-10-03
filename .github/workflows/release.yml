@@ -1,6 +1,6 @@
 name: Release
 
-# Triggered by a version tag (`git tag v0.1.0 && git push origin v0.1.0`,
+# Triggered by a version tag (`git tag v0.2.0 && git push origin v0.2.0`,
 # see docs/publicacion.md). Builds the release binary and both
 # distributable packages directly on the ubuntu-22.04 runner (it already
 # is the same Ubuntu 22.04 / glibc 2.35 that packaging/docker/Dockerfile.build

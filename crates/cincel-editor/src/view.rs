@@ -14,14 +14,16 @@ use cincel_syntax::{
 };
 use cincel_text::{Buffer, BufferEvent, BufferSnapshot, EditSource, Point};
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
-    Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
-    Render, Rgba, ShapedLine, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    App, AppContext, Bounds, Context, CursorStyle, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Render,
+    Rgba, ShapedLine, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
     TextRun, UTF16Selection, Window, div, px,
 };
 
 use crate::actions::*;
+use crate::block_map::{BlockMap, VisualCell, VisualRow};
+use crate::comments::{CommentAction, CommentBlockKind, ReviewCommentView, texts};
 use crate::decorations::{Decorator, TextDecorations};
 use crate::display_map::{
     DiffTransformMap, DisplayCell, DisplayMap, DisplayPoint, DisplayRow, PhantomHunk, RowKind,
@@ -38,9 +40,21 @@ use crate::theme::{self, EditorTheme};
 use crate::wrap_map::{WRAP_UNITS_PER_PX, WrapMap, WrapRow, WrapSource};
 use gpui::prelude::FluentBuilder as _;
 
+mod comments;
 mod editing;
 
+pub(crate) use comments::{BlockLayout, CommentDraft};
+pub use comments::{
+    COMMENT_BOX_GAP, COMMENT_BOX_PADDING, COMMENT_BOX_RADIUS, COMMENT_BOX_RIGHT_MARGIN,
+    COMMENT_BUTTONS_WIDTH, COMMENT_FIELD_PADDING, COMMENT_FIELD_ROWS, COMMENT_FOLDED_PADDING_X,
+    COMMENT_FOLDED_PADDING_Y, COMMENT_FONT_SIZE, COMMENT_FOOTER_HEIGHT, COMMENT_ICON_SIZE,
+    COMMENT_LINE_HEIGHT, COMMENT_SMALL_FONT_SIZE, COMMENT_TITLE_HEIGHT, block_rows,
+    comment_text_line_height, expanded_box_height, field_frame_height, folded_box_height,
+    open_box_height,
+};
 pub use editing::MAX_BRACKET_SCAN;
+#[cfg(test)]
+pub(crate) use editing::{LineClipboard, LineCopyMetadata};
 
 /// How long the cursor keeps blinking after the last input (02-visual §5).
 pub const BLINK_IDLE: Duration = Duration::from_secs(5);
@@ -73,6 +87,9 @@ const RENDER_FRAME_HISTORY: usize = 64;
 pub const REVIEW_NOTICE_DURATION: Duration = Duration::from_secs(3);
 /// Step of the review spinner while the agent writes the file.
 pub const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+/// Pause after the last move or edit before the occurrences of the word under
+/// the cursor show (`docs/specs/10-etapa7-ronda2.md` §7.1, R11).
+pub const OCCURRENCE_DELAY: Duration = Duration::from_millis(150);
 /// Height of the search bar and of the "Ir a la línea" prompt, in pixels.
 ///
 /// The bar pushes the text down by exactly this much while it is open, in
@@ -222,7 +239,7 @@ pub(crate) struct CachedLine {
 ///
 /// See [`EditorView::set_render_probe`]. It exists so a test can assert that no
 /// frame ever painted a row that had highlights without them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowRender {
     /// The display row painted.
     pub display_row: DisplayRow,
@@ -250,6 +267,8 @@ pub struct RowRender {
     pub search_matches: usize,
     /// Whether one of them is the current match.
     pub current_search_match: bool,
+    /// Top of the row on screen (comment blocks above it push it down).
+    pub y: Pixels,
 }
 
 /// An accept/reject pill, as the render probe saw it.
@@ -279,6 +298,50 @@ pub struct PillRender {
     /// The half under the mouse (`Some(true)` = accept), painted on
     /// `bg.surface`.
     pub hovered: Option<bool>,
+    /// Where "✓ Aceptar" (or the compact `✓`) was painted: its click area.
+    pub accept_bounds: Bounds<Pixels>,
+    /// Where "✗ Rechazar" (or the compact `✗`) was painted.
+    pub reject_bounds: Bounds<Pixels>,
+    /// Where the third part, "Comentar" (or its compact icon), was painted:
+    /// the full pill splits into three equal parts.
+    pub comment_bounds: Bounds<Pixels>,
+    /// Whether the mouse is over "Comentar" (painted on `bg.surface`). It
+    /// reacts while the agent writes too: commenting is not a decision.
+    pub comment_hovered: bool,
+    /// Colour of the "Comentar" icon (`text.accent`).
+    pub comment_icon_color: Hsla,
+    /// Colour of the word "Comentar" (`text`).
+    pub comment_label_color: Hsla,
+}
+
+/// A comment block (an open, folded or expanded box), as the render probe saw
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CommentBlockRender {
+    /// The comment (or [`crate::comments::NEW_COMMENT_BLOCK`]).
+    pub id: u64,
+    /// Open, folded or expanded.
+    pub kind: CommentBlockKind,
+    /// First visual row of the block.
+    pub visual_row: u32,
+    /// Whole rows it takes.
+    pub rows: u32,
+    /// The rows' strip (`rows × line height`, from the text's left edge to
+    /// 12 px before the scrollbar).
+    pub bounds: Bounds<Pixels>,
+    /// Height of the box drawn inside the strip.
+    pub box_height: Pixels,
+}
+
+/// A comment mark of the margin, as the render probe saw it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CommentMarkRender {
+    /// The comment it opens.
+    pub id: u64,
+    /// The display row it sits on.
+    pub display_row: DisplayRow,
+    /// Where the icon was painted.
+    pub bounds: Bounds<Pixels>,
 }
 
 /// A button of the floating bar, as the render probe saw it.
@@ -316,6 +379,10 @@ pub struct ReviewFrame {
     pub tooltip: Option<String>,
     /// Hunks of the review state the frame was painted from.
     pub hunks: Vec<u64>,
+    /// Comment blocks painted, top to bottom.
+    pub blocks: Vec<CommentBlockRender>,
+    /// Comment marks painted in the margin, top to bottom.
+    pub comment_marks: Vec<CommentMarkRender>,
 }
 
 /// One painted frame, as the render probe saw it.
@@ -342,6 +409,10 @@ pub struct FrameRender {
     pub text_width: Pixels,
     /// Wrap rows of the whole buffer at [`FrameRender::text_width`].
     pub wrap_rows: u32,
+    /// Visual rows: the wrap rows plus the rows of the comment blocks.
+    pub visual_rows: u32,
+    /// The vertical scroll the frame was painted at, in pixels.
+    pub scroll_top: f32,
     /// The effective content mask the element painted under: its own
     /// bounds intersected with every mask of its ancestors. `None` until
     /// the frame is painted.
@@ -375,7 +446,8 @@ pub(crate) struct LayoutSnapshot {
     pub text_origin_x: Pixels,
     pub line_height: Pixels,
     pub char_width: Pixels,
-    pub first_wrap_row: WrapRow,
+    /// The first laid-out visual row (blocks included).
+    pub first_visual_row: VisualRow,
     /// One entry per laid-out wrap row: the shaped segment and what it maps to.
     pub rows: Vec<(WrapRow, DisplayRow, u32, ShapedLine)>,
     pub visible_row_count: f32,
@@ -516,6 +588,17 @@ fn shift_spans(
     });
 }
 
+/// What [`EditorView::clean_up_for_save`] does to the text before it is
+/// written (`files.trim_trailing_whitespace_on_save` and
+/// `files.ensure_final_newline_on_save`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SaveCleanup {
+    /// Remove the spaces and tabs at the end of every row.
+    pub trim_trailing_whitespace: bool,
+    /// End a non-empty text with a line break if it lacks one.
+    pub ensure_final_newline: bool,
+}
+
 /// `((text version, cursor), matching brackets)` of the last bracket match.
 type BracketCache = ((u64, DisplayPoint), Option<(usize, usize)>);
 
@@ -558,6 +641,31 @@ pub struct EditorView {
     pub(crate) hover_pill_zone: Option<u64>,
     /// Index of the floating bar button under the mouse.
     pub(crate) hover_bar: Option<usize>,
+    /// Hunk whose pill's "Comentar" is under the mouse.
+    pub(crate) hover_pill_comment: Option<u64>,
+    /// The unsent comments of the file ([`EditorView::set_comments`]), by row.
+    pub(crate) comments: Vec<ReviewCommentView>,
+    /// Which saved comments show their whole text.
+    pub(crate) comment_expanded: HashMap<u64, bool>,
+    /// The comment box being written, if any (one per view).
+    pub(crate) comment_draft: Option<CommentDraft>,
+    /// File name for the titles of the boxes.
+    pub(crate) display_name: Option<SharedString>,
+    /// Whether this view is the field of a comment box (its key context adds
+    /// `comment_box`).
+    pub(crate) comment_box: bool,
+    /// The comment blocks between the text rows, as of the last frame.
+    pub(crate) blocks: BlockMap,
+    /// How each block of [`Self::blocks`] is painted.
+    pub(crate) block_layouts: Vec<BlockLayout>,
+    /// Comment box under the mouse ("Editar" and "Borrar" show).
+    pub(crate) hover_comment: Option<u64>,
+    /// Comment whose margin mark is under the mouse (its tooltip shows).
+    pub(crate) hover_mark: Option<u64>,
+    /// A block to bring into view on the next frame (a box just opened).
+    pub(crate) autoscroll_block: Option<u64>,
+    /// The context menu, while it is open.
+    pub(crate) context_menu: Option<crate::view::comments::EditorContextMenu>,
     /// Backgrounds set with [`EditorView::set_row_backgrounds`].
     row_backgrounds: Vec<(Range<u32>, Rgba)>,
     /// The host's [`Decorator`], if any.
@@ -653,10 +761,27 @@ pub struct EditorView {
     _fade_task: Option<Task<()>>,
     _spinner_task: Option<Task<()>>,
     _notice_task: Option<Task<()>>,
+    /// What the occurrences of the word under the cursor are looked for
+    /// with, once [`OCCURRENCE_DELAY`] passed without input (spec 10 §7.1),
+    /// and the `(text version, cursor, anchor)` it was computed for: any
+    /// other state voids it on the very next frame.
+    pub(crate) occurrences: Option<(crate::search::OccurrenceQuery, OccurrenceKey)>,
+    /// The one-shot timer that computes [`Self::occurrences`]; it ends after
+    /// firing, so an editor at rest owns no timer (M8).
+    occurrence_timer: Option<Task<()>>,
+    /// The occurrences the element laid out on the last frame, for the tests.
+    pub(crate) occurrence_ranges: Vec<Range<usize>>,
     _activation: Option<Subscription>,
 }
 
+/// `(text version, cursor, selection anchor)` an [`EditorView::occurrences`]
+/// query belongs to.
+pub(crate) type OccurrenceKey = (u64, DisplayPoint, DisplayPoint);
+
 impl EventEmitter<EditorEvent> for EditorView {}
+
+/// What the user did in a comment box (see [`crate::comments`]).
+impl EventEmitter<CommentAction> for EditorView {}
 
 // -- construction and host API ---------------------------------------------
 
@@ -711,6 +836,18 @@ impl EditorView {
             hover_pill: None,
             hover_pill_zone: None,
             hover_bar: None,
+            hover_pill_comment: None,
+            comments: Vec::new(),
+            comment_expanded: HashMap::new(),
+            comment_draft: None,
+            display_name: None,
+            comment_box: false,
+            blocks: BlockMap::default(),
+            block_layouts: Vec::new(),
+            hover_comment: None,
+            hover_mark: None,
+            autoscroll_block: None,
+            context_menu: None,
             row_backgrounds: Vec::new(),
             decorator: None,
             decorations: None,
@@ -766,6 +903,9 @@ impl EditorView {
             _fade_task: None,
             _spinner_task: None,
             _notice_task: None,
+            occurrences: None,
+            occurrence_timer: None,
+            occurrence_ranges: Vec::new(),
             _activation: None,
         };
         // 02-visual §6.2: the floating bar hides while the window is not
@@ -893,9 +1033,9 @@ impl EditorView {
     /// First visible display row, fractional (`1.5` = the viewport starts in
     /// the middle of row 1).
     ///
-    /// With soft wrap on the unit is the *wrap* row, which is what the element
-    /// scrolls in; with soft wrap off — the default — the two spaces are the
-    /// same. A scroll set before the first layout reads back unclamped.
+    /// The unit is the *visual* row the element scrolls in: the wrap rows
+    /// (one per display row with soft wrap off) plus the rows of the comment
+    /// boxes above. A scroll set before the first layout reads back unclamped.
     pub fn scroll_row(&self) -> f32 {
         if let Some(pending) = self.pending_scroll_row {
             return pending;
@@ -914,8 +1054,7 @@ impl EditorView {
         let line_height = f32::from(self.style.line_height).max(1.);
         match self.layout.as_ref() {
             Some(layout) => {
-                let viewport = f32::from(layout.bounds.size.height);
-                let max_scroll = (self.wrap_row_count() as f32 * line_height - viewport).max(0.);
+                let max_scroll = self.max_scroll_top(f32::from(layout.bounds.size.height));
                 self.scroll_top = (row * line_height).clamp(0., max_scroll);
                 self.pending_scroll_row = None;
             }
@@ -1118,6 +1257,70 @@ impl EditorView {
         self.read_only
     }
 
+    /// Cleans the text up before it is saved
+    /// (`docs/specs/10-etapa7-ronda2.md` §7.8): trailing blanks and the final
+    /// line break, as `options` ask. Rows inside a pending review segment are
+    /// never touched.
+    ///
+    /// All the changes are one `EditSource::User` transaction, so one
+    /// `Ctrl+Z` undoes them (and only them, not the typing before the save);
+    /// the selection follows the text. Returns whether
+    /// anything changed; when nothing needed cleaning there is no
+    /// transaction and the history stays as it was. A read-only view is left
+    /// alone. The line break is a plain `"\n"`: the buffer holds LF and
+    /// `cincel-text` writes it as `\r\n` in a CRLF file.
+    pub fn clean_up_for_save(&mut self, options: SaveCleanup, cx: &mut Context<Self>) -> bool {
+        if self.is_read_only()
+            || !(options.trim_trailing_whitespace || options.ensure_final_newline)
+        {
+            return false;
+        }
+        let text = self.snapshot.text();
+        let ends_with_newline = text.ends_with('\n');
+        let rows: Vec<&str> = if text.is_empty() {
+            Vec::new()
+        } else {
+            text.strip_suffix('\n')
+                .unwrap_or(&text)
+                .split('\n')
+                .collect()
+        };
+        let protected: Vec<Range<u32>> = self
+            .review
+            .hunks
+            .iter()
+            .filter(|hunk| !hunk.buffer_rows.is_empty())
+            .map(|hunk| hunk.buffer_rows.clone())
+            .collect();
+        let edits = crate::ops::save_cleanup_edits(
+            &rows,
+            &protected,
+            options.trim_trailing_whitespace,
+            options.ensure_final_newline,
+            ends_with_newline,
+        );
+        if edits.is_empty() {
+            return false;
+        }
+        // The selection stays on its text: an insertion at its edge (the final
+        // break) never pulls it along.
+        let (anchor, cursor) = self.selection_offsets();
+        let anchor = crate::ops::map_offset_left(anchor, &edits);
+        let cursor = crate::ops::map_offset_left(cursor, &edits);
+        // Consecutive user edits within the grouping window share one undo
+        // step; a save right after typing must not swallow the typing into
+        // the cleanup's step, so the window is closed for this one edit.
+        let grouping = {
+            let mut buffer = self.buffer.lock();
+            let grouping = buffer.group_interval();
+            buffer.set_group_interval(std::time::Duration::ZERO);
+            grouping
+        };
+        self.apply_edits(edits, anchor, cursor, cx);
+        self.buffer.lock().set_group_interval(grouping);
+        true
+    }
+
     /// Replaces the whole text (one undo step) and puts the cursor at the
     /// buffer offset `cursor`, clipped to the text. Does nothing while
     /// read-only.
@@ -1152,7 +1355,7 @@ impl EditorView {
     /// Number of visual rows of the text for the last laid-out width (soft
     /// wrap segments count), at least 1.
     pub fn layout_row_count(&self) -> u32 {
-        self.wrap_row_count().max(1)
+        self.visual_row_count().max(1)
     }
 }
 
@@ -1184,6 +1387,10 @@ impl EditorView {
         self.invalidate_layout();
         self.request_reparse(cx);
         self.update_dirty(cx);
+        // Someone else changed the text: the occurrences wait again.
+        if self.occurrences.is_some() || self.occurrence_timer.is_some() {
+            self.schedule_occurrences(cx);
+        }
         cx.notify();
     }
 
@@ -1556,6 +1763,8 @@ impl EditorView {
                 bounds: geometry.bounds,
                 text_width: geometry.text_width,
                 wrap_rows: self.wrap_row_count(),
+                visual_rows: self.visual_row_count(),
+                scroll_top: self.scroll_top,
                 paint_clip: None,
                 git_marks,
             });
@@ -1873,6 +2082,12 @@ impl EditorView {
         self.snapshot.line_start_offset(buffer_row)
     }
 
+    /// The buffer text of a byte range (the visible rows, for the
+    /// occurrences of the word under the cursor).
+    pub(crate) fn buffer_text_in(&self, range: Range<usize>) -> String {
+        self.snapshot.text_in(range)
+    }
+
     /// Buffer byte range covered by a range of wrap rows, for the highlight
     /// query: only the visible rows are ever asked for.
     pub(crate) fn visible_byte_range(&self, first: WrapRow, last: WrapRow) -> (usize, usize) {
@@ -2032,6 +2247,22 @@ impl EditorView {
         }
     }
 
+    /// The visual row of a wrap row (comment blocks above it counted).
+    pub fn wrap_to_visual_row(&self, wrap_row: WrapRow) -> VisualRow {
+        self.blocks.to_visual_row(wrap_row)
+    }
+
+    /// Number of visual rows: the wrap rows plus the rows of the comment
+    /// blocks of the last frame. The scroll and the total height are in these.
+    pub fn visual_row_count(&self) -> u32 {
+        self.wrap_row_count() + self.blocks.block_row_count()
+    }
+
+    /// The comment blocks between the rows, as the last frame laid them out.
+    pub fn block_map(&self) -> &BlockMap {
+        &self.blocks
+    }
+
     fn page_rows(&self) -> u32 {
         self.layout
             .as_ref()
@@ -2115,6 +2346,7 @@ impl EditorView {
         if delta == 0 {
             return;
         }
+        self.adjust_comments(edit_row, delta);
         let shift = |row: u32| -> u32 { (row as i64 + delta).max(0) as u32 };
         for hunk in &mut self.review.hunks {
             let rows = hunk.buffer_rows.clone();
@@ -2145,6 +2377,7 @@ impl EditorView {
         if self.settings.cursor_blink && !self.blinking {
             self.start_blinking(cx);
         }
+        self.schedule_occurrences(cx);
         self.autoscroll = true;
         // A plain move only brings the cursor into view; a jump to a change
         // asks for the centring again right after this.
@@ -2535,6 +2768,10 @@ impl EditorView {
         if self.backspace_pair(cx) {
             return;
         }
+        // Inside the indentation: back to the previous indent stop (E6).
+        if self.backspace_in_indent(cx) {
+            return;
+        }
         let range = self.edit_range();
         let range = if range.start == range.end {
             self.snapshot.previous_char_boundary(range.start)..range.end
@@ -2607,6 +2844,10 @@ impl EditorView {
             return;
         }
         if self.newline_in_pair(cx) {
+            return;
+        }
+        // A row of only indentation is left empty (E5).
+        if self.newline_on_indent_row(cx) {
             return;
         }
         let row = self.selection_range().start.row;
@@ -2740,22 +2981,12 @@ impl EditorView {
     }
 
     fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        let text = self.selected_text();
-        if !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
+        // The context menu dispatches the same action, so it ends up here too.
+        self.copy_or_cut(false, cx);
     }
 
     fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        let text = self.selected_text();
-        if text.is_empty() {
-            return;
-        }
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        let range = self.edit_range();
-        if range.start != range.end {
-            self.replace_buffer_range(range, "", cx);
-        }
+        self.copy_or_cut(true, cx);
     }
 
     fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
@@ -2766,7 +2997,14 @@ impl EditorView {
             }
             return;
         }
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // A copied whole line goes above the cursor's row (E2).
+        if self.paste_whole_line(&item, cx) {
+            return;
+        }
+        if let Some(text) = item.text() {
             // A multi-line paste takes the indentation of where it lands.
             let text = self.paste_text(&text);
             self.insert_text(&text, cx);
@@ -3618,6 +3856,105 @@ impl EditorView {
         self.blinking
     }
 
+    /// Voids the occurrences of the word under the cursor at once and waits
+    /// [`OCCURRENCE_DELAY`] again before looking for new ones (spec 10 §7.1).
+    /// The timer fires once and ends: nothing keeps running at rest (M8).
+    pub(crate) fn schedule_occurrences(&mut self, cx: &mut Context<Self>) {
+        self.occurrences = None;
+        if self.settings.chrome != EditorChrome::Full || self.read_only {
+            self.occurrence_timer = None;
+            return;
+        }
+        self.occurrence_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OCCURRENCE_DELAY).await;
+            this.update(cx, |this, cx| {
+                // The task is done after this; dropping it here would cancel
+                // the future that is running, so only the result is kept.
+                this.occurrences = this
+                    .occurrence_query()
+                    .map(|query| (query, this.occurrence_key()));
+                if this.occurrences.is_some() {
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The state an occurrence query belongs to.
+    pub(crate) fn occurrence_key(&self) -> OccurrenceKey {
+        (self.snapshot.version(), self.cursor, self.selection_anchor)
+    }
+
+    /// What to look for: the one-row selection, or the word the cursor is in
+    /// or right at the end of. `None` on a phantom row, in a read-only buffer
+    /// (the notice of a binary) and in [`EditorChrome::Minimal`].
+    pub(crate) fn occurrence_query(&self) -> Option<crate::search::OccurrenceQuery> {
+        if self.settings.chrome != EditorChrome::Full || self.read_only {
+            return None;
+        }
+        let range = self.selection_range();
+        if range.start.row != range.end.row {
+            return None;
+        }
+        let DisplayCell::Buffer(buffer_row) = self.display_map.to_buffer(self.cursor.row) else {
+            return None;
+        };
+        let line = self.snapshot.line_text(buffer_row);
+        let line_start = self.snapshot.line_start_offset(buffer_row);
+        if self.has_selection() {
+            let start = (range.start.column as usize).min(line.len());
+            let end = (range.end.column as usize).min(line.len());
+            crate::search::OccurrenceQuery::for_selection(
+                &line[start..end],
+                line_start + start..line_start + end,
+            )
+        } else {
+            crate::search::OccurrenceQuery::for_cursor(
+                &line,
+                line_start,
+                self.cursor.column as usize,
+            )
+        }
+    }
+
+    /// The occurrence query to paint this frame: voided when the cursor, the
+    /// selection or the text moved since it was computed (the frame that
+    /// shows the move shows none), and hidden while the search bar has a
+    /// query (the search wins).
+    pub(crate) fn live_occurrence_query(&mut self) -> Option<&crate::search::OccurrenceQuery> {
+        if self
+            .occurrences
+            .as_ref()
+            .is_some_and(|(_, key)| *key != self.occurrence_key())
+        {
+            self.occurrences = None;
+        }
+        if self.search_open && !self.search.query.is_empty() {
+            return None;
+        }
+        if self.settings.chrome != EditorChrome::Full || self.read_only {
+            return None;
+        }
+        self.occurrences.as_ref().map(|(query, _)| query)
+    }
+
+    /// The occurrences of the word under the cursor the element laid out on
+    /// the last frame, as buffer ranges, ascending.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn occurrence_ranges_for_test(&self) -> Vec<Range<usize>> {
+        self.occurrence_ranges.clone()
+    }
+
+    /// Whether the one-shot occurrence timer is still waiting (a test of M8:
+    /// an editor at rest owns no timer).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_occurrence_timer_pending(&self) -> bool {
+        self.occurrence_timer
+            .as_ref()
+            .is_some_and(|task| !task.is_ready())
+    }
+
     /// Opacity of the scrollbar right now (1 while the mouse is moving, fading
     /// out afterwards).
     pub(crate) fn scrollbar_alpha(&self) -> f32 {
@@ -3665,9 +4002,42 @@ impl EditorView {
             .as_ref()
             .map(|layout| f32::from(layout.bounds.size.height))
             .unwrap_or(0.);
-        let max_scroll = (self.wrap_row_count() as f32 * line_height - viewport).max(0.);
+        let max_scroll = self.max_scroll_top(viewport);
         self.scroll_top = (self.scroll_top + delta_rows * line_height).clamp(0., max_scroll);
         cx.notify();
+    }
+
+    /// Empty space past the last row, in pixels (spec 10 §6): half the
+    /// viewport rounded down to whole rows, so the last row can be scrolled up
+    /// to the middle of the screen. Only a code editor has it; a text field
+    /// ([`EditorChrome::Minimal`]) ends at its last row.
+    pub(crate) fn end_margin(&self, viewport_height: f32) -> f32 {
+        if self.settings.chrome != EditorChrome::Full {
+            return 0.;
+        }
+        let line_height = f32::from(self.style.line_height).max(1.);
+        (viewport_height / line_height / 2.).floor().max(0.) * line_height
+    }
+
+    /// The largest `scroll_top` for a viewport of `viewport_height` pixels:
+    /// every visual row plus the end margin, minus the viewport. The wheel,
+    /// the scrollbar, `set_scroll_row` and `scroll_rows` all clamp to it.
+    pub(crate) fn max_scroll_top(&self, viewport_height: f32) -> f32 {
+        let line_height = f32::from(self.style.line_height).max(1.);
+        let content = self.visual_row_count() as f32 * line_height;
+        (content + self.end_margin(viewport_height) - viewport_height).max(0.)
+    }
+
+    /// `editor::scroll_line_up` / `editor::scroll_line_down`: scrolls one row
+    /// without touching the cursor or the selection. Nothing asks for an
+    /// autoscroll here, so the cursor stays wherever it ends up relative to
+    /// the viewport until the next edit or move.
+    fn on_scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_rows(-1., cx);
+    }
+
+    fn on_scroll_line_down(&mut self, _: &ScrollLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_rows(1., cx);
     }
 
     pub(crate) fn scroll_by(
@@ -3698,7 +4068,13 @@ impl EditorView {
         };
         let relative_y = position.y - layout.bounds.top() + px(self.scroll_top);
         let row = (f32::from(relative_y) / f32::from(layout.line_height)).floor();
-        let wrap_row = (row.max(0.) as u32).min(self.wrap_row_count().saturating_sub(1));
+        // A comment block holds no text: a drag over it lands on the row it
+        // hangs from.
+        let visual_row = (row.max(0.) as u32).min(self.visual_row_count().saturating_sub(1));
+        let wrap_row = self
+            .blocks
+            .nearest_wrap_row(visual_row)
+            .min(self.wrap_row_count().saturating_sub(1));
         let x = position.x - layout.text_origin_x + px(self.scroll_left);
         let (display_row, segment) = self.wrap.to_display(wrap_row);
         let indent = if segment > 0 {
@@ -3744,11 +4120,18 @@ impl EditorView {
             return None;
         }
         let y = f32::from(position.y - layout.bounds.top()) + self.scroll_top;
-        let wrap_row = (y / f32::from(layout.line_height).max(1.)).floor();
-        if wrap_row < 0. || wrap_row as u32 >= self.wrap_row_count() {
+        let visual_row = (y / f32::from(layout.line_height).max(1.)).floor();
+        if visual_row < 0. || visual_row as u32 >= self.visual_row_count() {
             return None;
         }
-        Some(self.wrap.to_display(wrap_row as u32).0)
+        // Over a comment block there is no text row.
+        let VisualCell::Wrap(wrap_row) = self.blocks.from_visual_row(visual_row as u32) else {
+            return None;
+        };
+        if wrap_row >= self.wrap_row_count() {
+            return None;
+        }
+        Some(self.wrap.to_display(wrap_row).0)
     }
 
     pub(crate) fn begin_selection(
@@ -3842,7 +4225,38 @@ impl EditorView {
         if self.hunk_under_cursor().is_some() {
             context.push_str(" review_hunk_under_cursor");
         }
+        if self.comment_box {
+            context.push_str(" comment_box");
+        }
         context
+    }
+
+    /// The entries of the editor's context menu (D12): "Cortar", "Copiar",
+    /// "Pegar", a separator (`None`) and "Comentar selección" (with a
+    /// selection) or "Comentar línea"; in a read-only tab (a deleted file)
+    /// only "Copiar" and "Comentar selección". Empty in a text field.
+    pub fn context_menu_entries(&self) -> Vec<Option<(&'static str, Box<dyn gpui::Action>)>> {
+        if !self.comments_enabled() {
+            return Vec::new();
+        }
+        if self.read_only {
+            return vec![
+                Some((texts::COPY, Box::new(Copy))),
+                Some((texts::COMMENT_SELECTION, Box::new(CommentSelection))),
+            ];
+        }
+        let comment = if self.has_selection() {
+            texts::COMMENT_SELECTION
+        } else {
+            texts::COMMENT_LINE
+        };
+        vec![
+            Some((texts::CUT, Box::new(Cut))),
+            Some((texts::COPY, Box::new(Copy))),
+            Some((texts::PASTE, Box::new(Paste))),
+            None,
+            Some((comment, Box::new(CommentSelection))),
+        ]
     }
 
     /// Whether the search bar uses its compact form (glyph buttons with a
@@ -4147,6 +4561,16 @@ impl Render for EditorView {
                 .overflow_hidden()
                 .child(EditorElement::new(cx.entity()))
         };
+        // The open context menu (D12), floating over everything.
+        let context_menu = self.context_menu.as_ref().map(|menu| {
+            gpui::deferred(
+                gpui::anchored()
+                    .position(menu.position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(menu.menu.clone()),
+            )
+            .with_priority(gpui_kit::base::POPUP_PRIORITY)
+        });
         div()
             .key_context(context.as_str())
             .track_focus(&self.focus_handle)
@@ -4206,6 +4630,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_go_to_line))
             .on_action(cx.listener(Self::on_toggle_soft_wrap))
             .on_action(cx.listener(Self::on_toggle_whitespace))
+            .on_action(cx.listener(Self::on_scroll_line_up))
+            .on_action(cx.listener(Self::on_scroll_line_down))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_confirm))
@@ -4233,9 +4659,14 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::on_uppercase))
             .on_action(cx.listener(Self::on_lowercase))
             .on_action(cx.listener(Self::on_sort_lines))
+            .on_action(cx.listener(Self::on_comment_selection))
+            .on_action(cx.listener(Self::on_comment_hunk))
+            .on_action(cx.listener(Self::on_save_comment))
+            .on_action(cx.listener(Self::on_cancel_comment))
             .children(prompt)
             .children(search_bar)
             .child(body)
+            .children(context_menu)
     }
 }
 
@@ -4298,11 +4729,13 @@ impl EntityInputHandler for EditorView {
             self.type_into_search(new_text, cx);
             return;
         }
-        // Plain typing (no IME composition, no explicit range) goes through
-        // the auto-closed pairs first.
+        // Plain typing (no IME composition, no explicit range): a closer on an
+        // indentation-only row takes one level off first (E4; the step over an
+        // auto-closed closer cannot coincide with it), then the auto-closed
+        // pairs.
         if range_utf16.is_none()
             && self.marked_range.is_none()
-            && self.type_with_pairs(new_text, cx)
+            && (self.outdent_for_closer(new_text, cx) || self.type_with_pairs(new_text, cx))
         {
             return;
         }
@@ -4370,8 +4803,9 @@ impl EntityInputHandler for EditorView {
         let point = self.display_point_for_offset(range.start);
         let (wrap_row, column) = self.point_to_wrap(point);
         let x = layout.text_origin_x + layout.char_width * column as f32 - px(self.scroll_left);
+        let visual_row = self.blocks.to_visual_row(wrap_row);
         let y = element_bounds.top()
-            + layout.line_height * wrap_row.saturating_sub(layout.first_wrap_row) as f32;
+            + layout.line_height * visual_row.saturating_sub(layout.first_visual_row) as f32;
         Some(Bounds::new(
             gpui::point(x, y),
             gpui::size(px(2.), layout.line_height),

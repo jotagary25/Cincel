@@ -34,16 +34,15 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 
 use crate::actions;
+use crate::code_folds::{CODE_FOLD_FADE_HEIGHT, CodeBlockKey, SegmentKind, split_markdown};
 use crate::markdown::markdown_element_scaled;
 use crate::model::*;
-use crate::panel::{
-    COMPOSER_HINT, ChatPanel, Popover, current_label, is_footer_option, select_options,
-};
+use crate::panel::{ChatPanel, Popover, current_label, is_footer_option, select_options};
 use crate::settings::{
     BUBBLE_BORDER_ALPHA, BUBBLE_FILL_ALPHA, BUBBLE_MAX_WIDTH, BUBBLE_RADIUS, CARD_RADIUS,
-    COMMAND_CARD_RADIUS, ChatSettings, INPUT_MIN_HEIGHT, INPUT_RADIUS, MAX_OUTPUT_LINES,
-    MESSAGE_GAP, POPOVER_RADIUS, POPOVER_ROW_HEIGHT, ROW_GAP, TEXT_BODY, TEXT_CODE, TEXT_LABEL,
-    TEXT_SMALL, TOOL_ROW_HEIGHT, TURN_GAP,
+    CODE_BLOCK_RADIUS, COMMAND_CARD_RADIUS, ChatSettings, INPUT_MIN_HEIGHT, INPUT_RADIUS,
+    MAX_OUTPUT_LINES, MESSAGE_GAP, POPOVER_RADIUS, POPOVER_ROW_HEIGHT, ROW_GAP, TEXT_BODY,
+    TEXT_CODE, TEXT_LABEL, TEXT_SMALL, TOOL_ROW_HEIGHT, TURN_GAP,
 };
 use crate::theme::{ChatTheme, alpha};
 
@@ -62,6 +61,9 @@ impl Render for ChatPanel {
         // The header's popovers hang from the header; the composer's (`@`,
         // `/`, selectors) sit right above the composer, however tall it grew.
         let overlay = self.render_overlay(&theme, cx);
+        // A menu that takes the focus gets it now; one that closed while it
+        // had it gives it back (`docs/specs/09-etapa7-…` §4.2).
+        self.sync_popover_focus(overlay.is_some(), window, cx);
         let from_header = matches!(
             self.popover(),
             Popover::Connections | Popover::ConnectionMenu(_) | Popover::Conversations
@@ -75,6 +77,13 @@ impl Render for ChatPanel {
             .id("chat-panel")
             .key_context(self.key_context())
             .track_focus(&self.focus_handle(cx))
+            // Every press over the panel is numbered, so a click on the button
+            // of a menu that the same press just closed is told from an old
+            // dismissal ([`ChatPanel::toggle_popover`]). Capture phase: it runs
+            // before the menu's own "press outside" handler.
+            .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, _, _| {
+                this.press_serial = this.press_serial.wrapping_add(1);
+            }))
             .on_action(cx.listener(Self::on_send))
             .on_action(cx.listener(Self::on_newline))
             .on_action(cx.listener(Self::on_cancel_turn))
@@ -86,6 +95,9 @@ impl Render for ChatPanel {
             .on_action(cx.listener(Self::on_popover_next))
             .on_action(cx.listener(Self::on_popover_prev))
             .on_action(cx.listener(Self::on_popover_confirm))
+            .on_action(cx.listener(|this, _: &actions::AttachImage, _window, cx| {
+                this.request_pick_images(cx);
+            }))
             .size_full()
             .relative()
             .bg(theme.bg_app)
@@ -102,6 +114,11 @@ impl ChatPanel {
     // ------------------------------------------------------------- actions
 
     fn on_send(&mut self, _: &actions::Send, window: &mut Window, cx: &mut Context<Self>) {
+        // With the focus in a header menu or a selector, `Enter` is not the
+        // composer's: it must not send the draft from behind the menu.
+        if self.popover().takes_focus() {
+            return;
+        }
         if self.popover_confirms() {
             self.confirm_popover(window, cx);
         } else {
@@ -151,6 +168,11 @@ impl ChatPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `Esc` with a menu open closes the menu first, as everywhere else.
+        if self.popover() != &Popover::Closed {
+            self.close_popover(cx);
+            return;
+        }
         self.reject_permission(cx);
     }
 
@@ -222,11 +244,13 @@ impl ChatPanel {
     /// The header: the "Conectar" control where the agent selector used to
     /// be (`docs/specs/06-etapa4-conexiones-y-cincel.md` §6). With no active
     /// connection it is a "Conectar" button; with one, the provider icon, the
-    /// label, the identity in muted text and a caret. Both open the popover.
+    /// full connection name and a caret, followed by a single badge with the
+    /// state of the connection (`docs/specs/10-etapa7-ronda2.md` §3). Both
+    /// open the popover.
     fn render_header(&self, theme: &ChatTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *theme;
         let s = *self.settings();
-        let status = self.status();
+        let badge = self.header_badge();
         let active = self.active_connection().cloned();
 
         let control = match &active {
@@ -234,6 +258,7 @@ impl ChatPanel {
                 .id("chat-connection")
                 .debug_selector(|| "chat-connection".to_string())
                 .min_w(px(0.))
+                .flex_shrink(1.)
                 .gap_1()
                 .px_1p5()
                 .py_0p5()
@@ -248,20 +273,24 @@ impl ChatPanel {
                     theme.bg_surface,
                     theme.border,
                 ))
-                .child(
+                // The whole name takes whatever room the badge and the
+                // buttons leave; only a panel too narrow for it cuts it with
+                // "…", and the tooltip carries the full name (R4). The agent
+                // type and the account live in the popover rows.
+                .child({
+                    let name = SharedString::from(connection.label.clone());
+                    let tooltip = name.clone();
                     div()
+                        .id("chat-connection-name")
+                        .debug_selector(|| "chat-connection-name".to_string())
                         .min_w(px(0.))
+                        .flex_shrink(1.)
                         .truncate()
-                        .child(SharedString::from(connection.label.clone())),
-                )
-                .children(connection.identity.clone().map(|identity| {
-                    div()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_size(s.px(TEXT_LABEL))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(identity))
-                }))
+                        .text_size(s.px(TEXT_BODY))
+                        .text_color(theme.text)
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .child(name)
+                })
                 .child(
                     div()
                         .flex_shrink_0()
@@ -272,17 +301,22 @@ impl ChatPanel {
                     this.toggle_popover(Popover::Connections, cx);
                 }))
                 .into_any_element(),
-            None => Button::new("chat-connect")
-                .label("Conectar")
-                .small()
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.toggle_popover(Popover::Connections, cx);
-                }))
+            None => div()
+                .debug_selector(|| "chat-connect".to_string())
+                .child(
+                    Button::new("chat-connect")
+                        .label("Conectar")
+                        .small()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.toggle_popover(Popover::Connections, cx);
+                        })),
+                )
                 .into_any_element(),
         };
 
         h_flex()
             .id("chat-header")
+            .debug_selector(|| "chat-header".to_string())
             .h(s.px(HEADER_HEIGHT))
             .px_2()
             .gap_2()
@@ -291,9 +325,7 @@ impl ChatPanel {
             .border_b_1()
             .border_color(theme.border)
             .child(control)
-            .when(active.is_some(), |this| {
-                this.child(status_pill(status, &theme, &s))
-            })
+            .children(badge.map(|badge| header_badge_pill(&badge, &theme, &s)))
             .child(div().flex_1())
             .child(
                 icon_button(
@@ -384,10 +416,13 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    /// The rows of the "Conectar" popover: icon, label, identity, "Usado hace
-    /// …", badge, and the "Volver a conectar" / "Reparar" shortcut of an
-    /// expired or unavailable connection. A right click opens the row's
-    /// context menu ("Renombrar").
+    /// The rows of the "Conectar" popover: the icon on the left, two lines in
+    /// the middle (the name above, the agent type below in muted text, always,
+    /// even when the name is that very type), the status badge on the right
+    /// and the "Volver a conectar" / "Reparar" shortcut of an expired or
+    /// unavailable connection. Never the account's email, plan or "Usado
+    /// hace…" (Settings → Conexiones shows those). A right click opens the
+    /// row's context menu ("Renombrar"). `docs/specs/10-etapa7-ronda2.md` §4.
     fn render_connection_rows(&self, theme: &ChatTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = *theme;
         let s = *self.settings();
@@ -414,11 +449,6 @@ impl ChatPanel {
                 let menu_id = connection.id.clone();
                 let action_id = connection.id.clone();
                 let selected = highlighted.as_deref() == Some(connection.id.as_str());
-                let badge_color = match connection.badge {
-                    ConnectionBadge::Connected => theme.status_ok,
-                    ConnectionBadge::SessionExpired => theme.status_warning,
-                    ConnectionBadge::Unavailable { .. } => theme.status_error,
-                };
                 let shortcut = match &connection.badge {
                     ConnectionBadge::Connected => None,
                     ConnectionBadge::SessionExpired => Some(
@@ -440,9 +470,12 @@ impl ChatPanel {
                             })),
                     ),
                 };
-                let tooltip = match &connection.badge {
-                    ConnectionBadge::Unavailable { reason } => Some(reason.clone()),
-                    _ => None,
+                // The type is always painted (R3); a saved list from before
+                // `agent_name` existed falls back to the provider's name.
+                let agent_type = if connection.agent_name.trim().is_empty() {
+                    provider_name(&connection.agent_id).to_string()
+                } else {
+                    connection.agent_name.clone()
                 };
                 h_flex()
                     .id(("connection", index))
@@ -455,60 +488,48 @@ impl ChatPanel {
                     .cursor_pointer()
                     .when(selected, |this| this.bg(theme.selection))
                     .hover(move |style| style.bg(theme.selection))
-                    .child(provider_icon(
-                        &connection.agent_id,
-                        s.px(18.),
-                        theme.text,
-                        theme.bg_surface,
-                        theme.border,
-                    ))
+                    .child(
+                        provider_icon(
+                            &connection.agent_id,
+                            s.px(18.),
+                            theme.text,
+                            theme.bg_surface,
+                            theme.border,
+                        )
+                        .debug_selector(move || format!("connection-icon-{index}")),
+                    )
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w(px(0.))
+                            .gap_0p5()
                             .child(
-                                h_flex()
-                                    .gap_1p5()
+                                div()
+                                    .debug_selector(move || format!("connection-name-{index}"))
                                     .min_w(px(0.))
-                                    .child(
-                                        div()
-                                            .min_w(px(0.))
-                                            .truncate()
-                                            .child(SharedString::from(connection.label.clone())),
-                                    )
-                                    .children(connection.identity.clone().map(|identity| {
-                                        div()
-                                            .min_w(px(0.))
-                                            .truncate()
-                                            .text_size(s.px(TEXT_LABEL))
-                                            .text_color(theme.text_muted)
-                                            .child(SharedString::from(identity))
-                                    })),
+                                    .truncate()
+                                    .text_size(s.px(TEXT_BODY))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(connection.label.clone())),
                             )
                             .child(
                                 div()
+                                    .debug_selector(move || format!("connection-type-{index}"))
+                                    .min_w(px(0.))
+                                    .truncate()
                                     .text_size(s.px(TEXT_LABEL))
                                     .text_color(theme.text_muted)
-                                    .child(SharedString::from(connection.last_used.clone())),
+                                    .child(SharedString::from(agent_type)),
                             ),
                     )
                     .child(
-                        div()
-                            .id(("connection-badge", index))
-                            .flex_shrink_0()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded(s.px(CARD_RADIUS))
-                            .bg(alpha(badge_color, 0.15))
-                            .text_size(s.px(TEXT_LABEL))
-                            .text_color(badge_color)
-                            .child(connection.badge.label())
-                            .when_some(tooltip, |this, reason| {
-                                this.tooltip(move |window, cx| {
-                                    Tooltip::new(SharedString::from(reason.clone()))
-                                        .build(window, cx)
-                                })
-                            }),
+                        connection_badge(
+                            ("connection-badge", index),
+                            &connection.badge,
+                            &theme,
+                            &s,
+                        )
+                        .debug_selector(move || format!("connection-badge-{index}")),
                     )
                     .children(shortcut)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -592,8 +613,14 @@ impl ChatPanel {
                 .text_color(theme.text_muted)
                 .child(SharedString::from(text.to_string()))
         });
+        let jump = self
+            .shows_jump_to_end()
+            .then(|| self.render_jump_to_end(&theme, cx));
         v_flex()
             .id("chat-transcript")
+            .debug_selector(|| "chat-transcript".to_string())
+            // The arrow is a layer over the list: it takes no room.
+            .relative()
             .flex_1()
             .min_h(px(0.))
             .w_full()
@@ -606,8 +633,12 @@ impl ChatPanel {
                 this.child(
                     list(
                         self.list.clone(),
-                        cx.processor(|this, index: usize, _window, cx| {
-                            this.render_list_item(index, cx)
+                        cx.processor(|this, index: usize, window, cx| {
+                            // Measured inside the list, under the panel's
+                            // text style, as the code blocks inherit it.
+                            let line =
+                                crate::markdown::code_line_height(window, this.settings().scale);
+                            this.render_list_item(index, line, cx)
                         }),
                     )
                     .flex_1()
@@ -615,21 +646,97 @@ impl ChatPanel {
                     .w_full(),
                 )
             })
+            .children(jump)
     }
 
-    /// One item of the transcript list.
-    fn render_list_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// The "Ir al final" arrow (`docs/specs/10-etapa7-ronda2.md` §9.2): a
+    /// 28 px round button centred 12 px above the bottom of the transcript,
+    /// fading in over 120 ms (`02-visual.md` §4). It is removed when hidden,
+    /// so there is no fade out (deviation noted in the stage report).
+    fn render_jump_to_end(&self, theme: &ChatTheme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *theme;
+        let s = *self.settings();
+        let button = div()
+            .id("chat-jump-to-end")
+            .debug_selector(|| "chat-jump-to-end".to_string())
+            .aria_label("Ir al final")
+            .size(s.px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(theme.bg_elevated)
+            .border_1()
+            .border_color(theme.border)
+            // 02-visual §4: `0 2px 8px #0006`, the popover shadow.
+            .shadow(vec![gpui::BoxShadow {
+                color: gpui::hsla(0., 0., 0., 0.4),
+                offset: gpui::point(px(0.), s.px(2.)),
+                blur_radius: s.px(8.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+            .text_color(theme.text)
+            .cursor_pointer()
+            .hover(move |style| style.bg(theme.bg_surface))
+            .child(gpui_kit::component::Icon::new(IconName::ArrowDown).size(s.px(14.)))
+            .tooltip(|window, cx| Tooltip::new("Ir al final").build(window, cx))
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.jump_to_end(cx);
+            }));
+        let button = gpui::AnimationExt::with_animation(
+            button,
+            "chat-jump-to-end-fade",
+            gpui::Animation::new(std::time::Duration::from_millis(120)),
+            |button, delta| button.opacity(delta),
+        );
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(s.px(12.))
+            .flex()
+            .justify_center()
+            .child(button)
+            .into_any_element()
+    }
+
+    /// One item of the transcript list. The last one carries the activity
+    /// row under it while a turn runs (§8, R5): pinned to the last item, it
+    /// changes no item count and needs no measuring of its own.
+    fn render_list_item(
+        &mut self,
+        index: usize,
+        code_line: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = *self.theme();
+        let s = *self.settings();
         let last = index + 1 == self.entries.len();
+        let activity = if last { self.activity() } else { None };
         match self.entries.get(index) {
             Some(entry) => {
-                let row = self.render_entry(index, entry, &theme, cx);
+                let row = self.render_entry(index, entry, &theme, code_line, cx);
+                let activity_row = activity.map(|activity| {
+                    h_flex()
+                        .debug_selector(|| "chat-activity-row".to_string())
+                        .mt(s.px(ROW_GAP))
+                        .h(s.px(TOOL_ROW_HEIGHT))
+                        .px_1()
+                        .gap_1()
+                        .items_center()
+                        .text_size(s.px(TEXT_SMALL))
+                        .text_color(theme.text_muted)
+                        .child(div().child(Spinner::new().xsmall().color(theme.text_accent)))
+                        .child(div().child(SharedString::from(activity.label())))
+                });
                 div()
                     .w_full()
                     .px_2()
                     .when(index == 0, |this| this.pt_1())
                     .when(last, |this| this.pb_2())
                     .child(row)
+                    .children(activity_row)
                     .into_any_element()
             }
             None => div().into_any_element(),
@@ -666,12 +773,15 @@ impl ChatPanel {
         index: usize,
         entry: &Entry,
         theme: &ChatTheme,
+        code_line: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let s = *self.settings();
         let inner = match entry {
-            Entry::UserMessage(message) => self.render_user_message(index, message, theme, cx),
-            Entry::AgentText(text) => self.render_agent_text(index, text, theme, cx),
+            Entry::UserMessage(message) => {
+                self.render_user_message(index, message, theme, code_line, cx)
+            }
+            Entry::AgentText(text) => self.render_agent_text(index, text, theme, code_line, cx),
             Entry::AgentThought(thought) => self.render_thought(index, thought, theme, cx),
             Entry::ToolCall(call) => self.render_tool_call(index, call, theme, cx),
             Entry::Plan(plan) => self.render_plan(index, plan, theme, cx),
@@ -712,6 +822,7 @@ impl ChatPanel {
         index: usize,
         message: &UserMessage,
         theme: &ChatTheme,
+        code_line: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *theme;
@@ -722,22 +833,35 @@ impl ChatPanel {
             .enumerate()
             .map(|(position, piece)| match piece {
                 UserPiece::Markdown(text) => {
-                    let view = self.bubble_view(index, position, &text, cx);
-                    let panel = cx.entity().downgrade();
-                    let on_copy: crate::markdown::CopyHandler =
-                        Arc::new(move |code: String, cx: &mut App| {
-                            panel.update(cx, |panel, cx| panel.copy(code, cx)).ok();
-                        });
-                    div()
+                    // Cut like an answer: its long blocks fold too (§10.1).
+                    let on_copy = self.copy_handler(cx);
+                    let segments: Vec<AnyElement> = split_markdown(&text)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(segment, part)| {
+                            let view =
+                                self.bubble_view(index, position, segment, &text[part.range], cx);
+                            let key = CodeBlockKey {
+                                entry: index,
+                                piece: position,
+                                segment,
+                            };
+                            self.render_segment(
+                                &view,
+                                part.kind,
+                                key,
+                                &theme,
+                                code_line,
+                                on_copy.clone(),
+                                cx,
+                            )
+                        })
+                        .collect();
+                    v_flex()
                         .min_w(px(0.))
                         .max_w_full()
-                        .child(markdown_element_scaled(
-                            &view,
-                            &theme,
-                            s.scale,
-                            self.highlighter(),
-                            on_copy,
-                        ))
+                        .gap(self.segment_gap())
+                        .children(segments)
                         .into_any_element()
                 }
                 UserPiece::Flow(parts) => {
@@ -811,14 +935,20 @@ impl ChatPanel {
                     .border_1()
                     .border_color(alpha(theme.text_accent, BUBBLE_BORDER_ALPHA))
                     .text_color(theme.text)
-                    .child(
-                        v_flex()
-                            .debug_selector(|| format!("user-text-{index}"))
-                            .min_w(px(0.))
-                            .max_w_full()
-                            .gap(s.px(6.))
-                            .children(pieces),
-                    ),
+                    // Top to bottom: the images, the text, the comment cards
+                    // (`docs/specs/10-etapa7-ronda2.md` §5.1).
+                    .children(self.render_message_images(index, message, &theme, cx))
+                    .when(!pieces.is_empty(), |this| {
+                        this.child(
+                            v_flex()
+                                .debug_selector(|| format!("user-text-{index}"))
+                                .min_w(px(0.))
+                                .max_w_full()
+                                .gap(s.px(6.))
+                                .children(pieces),
+                        )
+                    })
+                    .children(self.render_message_cards(index, message, &theme, cx)),
             )
             .into_any_element()
     }
@@ -829,18 +959,133 @@ impl ChatPanel {
         &self,
         index: usize,
         position: usize,
+        segment: usize,
         text: &str,
         cx: &mut Context<Self>,
     ) -> Entity<gpui_kit::base::text::TextViewState> {
         let mut views = self.bubble_views.borrow_mut();
-        if let Some((built_from, view)) = views.get(&(index, position))
+        let key = (index, position, segment);
+        if let Some((built_from, view)) = views.get(&key)
             && built_from == text
         {
             return view.clone();
         }
         let view = crate::markdown::markdown_state(text, cx);
-        views.insert((index, position), (text.to_string(), view.clone()));
+        views.insert(key, (text.to_string(), view.clone()));
         view
+    }
+
+    /// What a code block's "Copiar" calls: the panel turns it into
+    /// [`crate::ChatEvent::CopyToClipboard`].
+    fn copy_handler(&self, cx: &mut Context<Self>) -> crate::markdown::CopyHandler {
+        let panel = cx.entity().downgrade();
+        Arc::new(move |code: String, cx: &mut App| {
+            panel.update(cx, |panel, cx| panel.copy(code, cx)).ok();
+        })
+    }
+
+    /// The space between two segments of the same text: `gpui-kit`'s gap
+    /// between two blocks of one `TextView`, so cutting an answer into
+    /// segments does not change its spacing.
+    fn segment_gap(&self) -> gpui::Rems {
+        crate::markdown::text_view_style_scaled(self.theme(), self.settings().scale).paragraph_gap()
+    }
+
+    /// One segment of an answer or of a bubble's Markdown
+    /// (`docs/specs/10-etapa7-ronda2.md` §10): prose as it always was; a
+    /// long code block, folded to its first lines with a fade and "Ver más
+    /// (N líneas)" at its foot, or whole with "Ver menos".
+    #[allow(clippy::too_many_arguments)]
+    fn render_segment(
+        &self,
+        view: &Entity<gpui_kit::base::text::TextViewState>,
+        kind: SegmentKind,
+        key: CodeBlockKey,
+        theme: &ChatTheme,
+        code_line: gpui::Pixels,
+        on_copy: crate::markdown::CopyHandler,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let s = *self.settings();
+        let folded = !self.is_code_block_expanded(key);
+        let Some(label) = kind.toggle_label(!folded) else {
+            return div()
+                .w_full()
+                .min_w(px(0.))
+                .child(markdown_element_scaled(
+                    view,
+                    theme,
+                    s.scale,
+                    self.highlighter(),
+                    on_copy,
+                ))
+                .into_any_element();
+        };
+        let style = if folded {
+            let height = crate::markdown::folded_code_block_height(code_line, s.scale);
+            crate::markdown::text_view_style_folded(theme, s.scale, height)
+        } else {
+            crate::markdown::text_view_style_scaled(theme, s.scale)
+        };
+        let suffix = key.selector_suffix();
+        let block_selector = format!("code-block-{suffix}");
+        let toggle_selector = format!("code-fold-toggle-{suffix}");
+        // The fade sits inside the border (1 px in from each side and the
+        // bottom), rounded like the box's inner corners.
+        let fade_selector = format!("code-fold-fade-{suffix}");
+        let fade = folded.then(|| {
+            div()
+                .debug_selector(move || fade_selector)
+                .absolute()
+                .left(px(1.))
+                .right(px(1.))
+                .bottom(px(1.))
+                .h(s.px(CODE_FOLD_FADE_HEIGHT))
+                .rounded_b(s.px(CODE_BLOCK_RADIUS) - px(1.))
+                .bg(gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(alpha(theme.bg_editor, 0.), 0.),
+                    gpui::linear_color_stop(theme.bg_editor, 1.),
+                ))
+        });
+        v_flex()
+            .w_full()
+            .min_w(px(0.))
+            .child(
+                div()
+                    .debug_selector(move || block_selector)
+                    .relative()
+                    .w_full()
+                    .min_w(px(0.))
+                    .child(crate::markdown::markdown_element_styled(
+                        view,
+                        theme,
+                        s.scale,
+                        style,
+                        self.highlighter(),
+                        on_copy,
+                    ))
+                    .children(fade),
+            )
+            .child(
+                h_flex().w_full().justify_center().mt(s.px(4.)).child(
+                    Button::new(SharedString::from(toggle_selector.clone()))
+                        .debug_selector(move || toggle_selector)
+                        .xsmall()
+                        .ghost()
+                        .icon(if folded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronUp
+                        })
+                        .label(label)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_code_block(key, cx);
+                        })),
+                ),
+            )
+            .into_any_element()
     }
 
     /// What the agent answered: plain text on the panel background, full
@@ -851,24 +1096,45 @@ impl ChatPanel {
         index: usize,
         text: &AgentText,
         theme: &ChatTheme,
+        code_line: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *theme;
-        let s = *self.settings();
-        let body: AnyElement = match text.view.clone() {
-            Some(view) => {
-                let panel = cx.entity().downgrade();
-                let on_copy: crate::markdown::CopyHandler =
-                    Arc::new(move |code: String, cx: &mut App| {
-                        panel.update(cx, |panel, cx| panel.copy(code, cx)).ok();
-                    });
-                markdown_element_scaled(&view, &theme, s.scale, self.highlighter(), on_copy)
-                    .into_any_element()
-            }
-            None => div()
+        // Prose and long code blocks, one `TextView` each (§10.3, R7).
+        let body: AnyElement = if text.segments.is_empty() {
+            div()
                 .whitespace_normal()
-                .child(SharedString::from(text.markdown.clone()))
-                .into_any_element(),
+                .child(SharedString::from(text.markdown.trim().to_string()))
+                .into_any_element()
+        } else {
+            let on_copy = self.copy_handler(cx);
+            let segments: Vec<AnyElement> = text
+                .segments
+                .iter()
+                .enumerate()
+                .map(|(segment, part)| {
+                    let key = CodeBlockKey {
+                        entry: index,
+                        piece: 0,
+                        segment,
+                    };
+                    self.render_segment(
+                        &part.view,
+                        part.kind,
+                        key,
+                        &theme,
+                        code_line,
+                        on_copy.clone(),
+                        cx,
+                    )
+                })
+                .collect();
+            v_flex()
+                .w_full()
+                .min_w(px(0.))
+                .gap(self.segment_gap())
+                .children(segments)
+                .into_any_element()
         };
 
         div()
@@ -1526,8 +1792,9 @@ impl ChatPanel {
             .border_t_1()
             .border_color(theme.border)
             .child(self.render_selectors(&theme, cx))
+            .children(self.render_composer_warning(&theme))
             .child(
-                h_flex()
+                v_flex()
                     .id("chat-input-box")
                     .debug_selector(|| "chat-input-box".to_string())
                     .key_context(actions::COMPOSER_NODE)
@@ -1536,13 +1803,24 @@ impl ChatPanel {
                     .capture_action(cx.listener(Self::on_composer_down))
                     .capture_action(cx.listener(Self::on_composer_tab))
                     .capture_action(cx.listener(Self::on_composer_escape))
+                    // `Ctrl+V` with an image (or image files) in the clipboard
+                    // attaches it instead of pasting text (§5.3.2).
+                    .capture_action(cx.listener(Self::on_composer_paste))
+                    // Files dragged from the system's file manager (§5.1).
+                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| {
+                        style.border_color(theme.border_focus)
+                    })
+                    .on_drop(
+                        cx.listener(|this, paths: &gpui::ExternalPaths, _window, cx| {
+                            this.attach_paths(paths.paths(), cx);
+                        }),
+                    )
                     .w_full()
                     .min_h(s.px(INPUT_MIN_HEIGHT))
                     .pl(s.px(8.))
                     .pr_1()
                     .py(s.px(6.))
-                    .gap_1()
-                    .items_end()
+                    .gap(s.px(6.))
                     .rounded(s.px(INPUT_RADIUS))
                     .bg(theme.bg_surface)
                     .border_1()
@@ -1551,41 +1829,66 @@ impl ChatPanel {
                     } else {
                         theme.border
                     })
+                    // Own rows inside the box, above the text: the unsent
+                    // comments, then the attached images (§5.2, §6.3, D13).
+                    .children(self.render_comment_tags(&theme, cx))
+                    .children(self.render_attachment_row(&theme, cx))
                     .child(
-                        div()
-                            .id("chat-input")
-                            .flex_1()
-                            .min_w(px(0.))
-                            .self_center()
-                            .child(self.input.clone()),
-                    )
-                    .child(if thinking {
-                        Button::new("chat-stop")
-                            .icon(IconName::Square)
-                            .small()
-                            .tooltip("Detener el turno")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                this.cancel_turn(cx);
-                            }))
-                    } else {
-                        Button::new("chat-send")
-                            .icon(IconName::SendHorizontal)
-                            .small()
-                            .primary()
-                            .disabled(blocked)
-                            .tooltip("Enviar (Enter)")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.send(window, cx);
-                            }))
-                    }),
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .items_end()
+                            .child(self.render_attach_button(cx))
+                            .child(
+                                div()
+                                    .id("chat-input")
+                                    .debug_selector(|| "chat-input".to_string())
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .self_center()
+                                    .child(self.input.clone()),
+                            )
+                            .child(self.render_send_button(blocked, thinking, cx)),
+                    ),
             )
             .child(
                 div()
                     .text_size(s.px(TEXT_SMALL))
                     .text_color(theme.text_muted)
-                    .child(COMPOSER_HINT),
+                    .child(self.composer_hint()),
             )
             .children(overlay)
+    }
+
+    /// The send button, or the stop button while a turn runs.
+    fn render_send_button(
+        &self,
+        blocked: bool,
+        thinking: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let blocked = blocked || self.is_preparing_images() || self.images_block_send();
+        if thinking {
+            Button::new("chat-stop")
+                .icon(IconName::Square)
+                .small()
+                .tooltip("Detener el turno")
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.cancel_turn(cx);
+                }))
+                .into_any_element()
+        } else {
+            Button::new("chat-send")
+                .icon(IconName::SendHorizontal)
+                .small()
+                .primary()
+                .disabled(blocked)
+                .tooltip("Enviar (Enter)")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.send(window, cx);
+                }))
+                .into_any_element()
+        }
     }
 
     /// `Enter` in the composer (the editor's `insert_newline`, taken before
@@ -1684,15 +1987,19 @@ impl ChatPanel {
             if !is_footer_option(option) {
                 continue;
             }
-            row = row.child(selector(
-                ("config", index),
-                current_label(option),
-                &theme,
-                &s,
-                cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.toggle_popover(Popover::Config(index), cx);
-                }),
-            ));
+            row = row.child(
+                div()
+                    .debug_selector(move || format!("chat-selector-config-{index}"))
+                    .child(selector(
+                        ("config", index),
+                        current_label(option),
+                        &theme,
+                        &s,
+                        cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.toggle_popover(Popover::Config(index), cx);
+                        }),
+                    )),
+            );
         }
 
         // Legacy `availableModes` for agents without `configOptions`.
@@ -1707,15 +2014,19 @@ impl ChatPanel {
                     || modes.current_mode_id.0.to_string(),
                     |mode| mode.name.clone(),
                 );
-            row = row.child(selector(
-                "modes",
-                current,
-                &theme,
-                &s,
-                cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.toggle_popover(Popover::Modes, cx);
-                }),
-            ));
+            row = row.child(
+                div()
+                    .debug_selector(|| "chat-selector-modes".to_string())
+                    .child(selector(
+                        "modes",
+                        current,
+                        &theme,
+                        &s,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.toggle_popover(Popover::Modes, cx);
+                        }),
+                    )),
+            );
         }
         row
     }
@@ -1925,9 +2236,24 @@ impl ChatPanel {
             Popover::Connections | Popover::ConnectionMenu(_) | Popover::Conversations
         );
         let tall = matches!(self.popover(), Popover::Connections);
+        let takes_focus = self.popover().takes_focus();
         let panel = v_flex()
             .id("chat-popover")
             .debug_selector(|| "chat-popover".to_string())
+            // A click outside the menu closes it (`docs/specs/09-etapa7-…` §4).
+            .on_mouse_down_out(cx.listener(|this, _: &gpui::MouseDownEvent, _window, cx| {
+                this.dismiss_popover(cx);
+            }))
+            .when(takes_focus, |this| this.track_focus(&self.popover_focus))
+            // `@` and `/` leave the focus in the composer, where the user keeps
+            // typing: a press on one of their rows must not move it to the
+            // panel, or the composer's focus-out would close the list before
+            // the row's click.
+            .when(!takes_focus, |this| {
+                this.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                    window.prevent_default();
+                })
+            })
             .absolute()
             .left_2()
             .right_2()
@@ -1968,7 +2294,8 @@ impl ChatPanel {
 
 // ------------------------------------------------------------------ helpers
 
-/// Maximum height of the "Conectar" popover (its rows are two lines tall).
+/// Maximum height of the "Conectar" popover (its rows are one line tall, so
+/// more connections fit before it scrolls).
 const CONNECTION_POPOVER_MAX_HEIGHT: f32 = 380.;
 
 /// The group header a history row is listed under.
@@ -2006,23 +2333,75 @@ pub fn provider_icon(
         .child(provider_monogram(agent_id))
 }
 
-/// The status pill of the header (`02-visual.md` §7).
-fn status_pill(status: AgentStatus, theme: &ChatTheme, s: &ChatSettings) -> impl IntoElement {
-    let color = match status {
-        AgentStatus::Ready => theme.status_ok,
-        AgentStatus::Thinking => theme.text_accent,
-        AgentStatus::WaitingPermission | AgentStatus::AuthRequired => theme.status_warning,
-        AgentStatus::Disconnected => theme.status_error,
+/// The status badge of a connection (Conectada / Sesión vencida / No
+/// disponible) in the popover rows; the header has its own
+/// ([`header_badge_pill`]). An unavailable connection carries its reason as a
+/// tooltip.
+pub(crate) fn connection_badge(
+    id: impl Into<gpui::ElementId>,
+    badge: &ConnectionBadge,
+    theme: &ChatTheme,
+    s: &ChatSettings,
+) -> gpui::Stateful<gpui::Div> {
+    let color = match badge {
+        ConnectionBadge::Connected => theme.status_ok,
+        ConnectionBadge::SessionExpired => theme.status_warning,
+        ConnectionBadge::Unavailable { .. } => theme.status_error,
     };
-    h_flex()
-        .gap_1()
+    let reason = match badge {
+        ConnectionBadge::Unavailable { reason } => Some(reason.clone()),
+        _ => None,
+    };
+    div()
+        .id(id)
+        .flex_shrink_0()
         .px_1p5()
         .py_0p5()
         .rounded(s.px(CARD_RADIUS))
         .bg(alpha(color, 0.15))
         .text_size(s.px(TEXT_LABEL))
         .text_color(color)
-        .child(status.label())
+        .child(badge.label())
+        .when_some(reason, |this, reason| {
+            this.tooltip(move |window, cx| {
+                Tooltip::new(SharedString::from(reason.clone())).build(window, cx)
+            })
+        })
+}
+
+/// The single badge of the header: the state of the connection, in the color
+/// of its severity (`docs/specs/10-etapa7-ronda2.md` §3.1). An unavailable
+/// connection carries its reason as a tooltip.
+fn header_badge_pill(
+    badge: &HeaderBadge,
+    theme: &ChatTheme,
+    s: &ChatSettings,
+) -> gpui::Stateful<gpui::Div> {
+    let color = match badge {
+        HeaderBadge::Connected => theme.status_ok,
+        HeaderBadge::SessionExpired | HeaderBadge::AuthRequired => theme.status_warning,
+        HeaderBadge::Disconnected | HeaderBadge::Unavailable { .. } => theme.status_error,
+    };
+    let reason = match badge {
+        HeaderBadge::Unavailable { reason } => Some(reason.clone()),
+        _ => None,
+    };
+    div()
+        .id("chat-header-badge")
+        .debug_selector(|| "chat-header-badge".to_string())
+        .flex_shrink_0()
+        .px_1p5()
+        .py_0p5()
+        .rounded(s.px(CARD_RADIUS))
+        .bg(alpha(color, 0.15))
+        .text_size(s.px(TEXT_LABEL))
+        .text_color(color)
+        .child(badge.label())
+        .when_some(reason, |this, reason| {
+            this.tooltip(move |window, cx| {
+                Tooltip::new(SharedString::from(reason.clone())).build(window, cx)
+            })
+        })
 }
 
 /// A header icon button.
@@ -2036,7 +2415,9 @@ fn icon_button(
     let theme = *theme;
     div()
         .id(id)
+        .debug_selector(|| id.to_string())
         .aria_label(label)
+        .flex_shrink_0()
         .size(s.px(22.))
         .flex()
         .items_center()
@@ -2360,6 +2741,9 @@ pub(crate) fn user_pieces(blocks: &[MessageBlock]) -> Vec<UserPiece> {
                 text.push(mark);
                 files.push(path.clone());
             }
+            // Painted by `render_message_images` (above the text) and
+            // `render_message_cards` (under it).
+            MessageBlock::Image(_) | MessageBlock::Comment(_) => {}
         }
     }
     let is_mark = |ch: char| (CHIP_MARK..CHIP_MARK + files.len() as u32).contains(&(ch as u32));

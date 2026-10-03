@@ -29,10 +29,12 @@ pub mod conversations;
 pub mod file_finder;
 pub mod focus;
 pub mod fonts;
+pub mod image_viewer;
 pub mod keymap;
 pub mod layout;
 pub mod logo;
 pub mod markdown_preview;
+mod menu_dismiss;
 pub mod new_file;
 pub mod panels;
 pub mod project;
@@ -59,6 +61,8 @@ mod click_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod connection_cancel_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod connections_list_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod deleted_file_review_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod file_finder_perf_tests;
@@ -71,11 +75,15 @@ mod fonts_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod git_gutter_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod image_e2e_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod keymap_search_tests_e6;
 #[cfg(all(test, feature = "test-support"))]
 mod login_modal_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod logo_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod menu_dismiss_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod modal_scroll_tests;
 #[cfg(all(test, feature = "test-support"))]
@@ -83,9 +91,13 @@ mod pending_review_close_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod review_binary_exclusion_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod review_comments_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod review_counter_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod review_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod save_cleanup_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod settings_update_e2e_tests;
 #[cfg(all(test, feature = "test-support"))]

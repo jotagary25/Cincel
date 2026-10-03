@@ -83,6 +83,11 @@ use crate::conversations::{ConversationStore, format_when, new_conversation_id, 
 use crate::project::Project;
 use crate::review::Review;
 
+/// The images side of the chat glue: capability, file dialog, notices and the
+/// conversation's folder (E7-G).
+mod chat_images;
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) use chat_images::dialog_requests;
 /// The Connections section of the settings tab (§4.4 of spec 07).
 mod settings_bridge;
 
@@ -386,6 +391,8 @@ impl Agents {
         if let Some(store) = &self.store {
             store.migrate_legacy();
         }
+        // The previous project's conversation folder must not linger.
+        self.sync_conversation_dir(cx);
         self.refresh_conversations(cx);
 
         if self.project.is_some() && self.background {
@@ -430,6 +437,9 @@ impl Agents {
     fn stop_agent(&mut self, cx: &mut Context<Self>) {
         self.event_task = None;
         self.capabilities = None;
+        // No process, no capability: attaching images says "Conectá un
+        // agente" until the next `Connected` (E7-G, D6).
+        self.publish_image_support(None, cx);
         if self.connection.take().is_none() {
             return;
         }
@@ -468,8 +478,8 @@ impl Agents {
 
     // --------------------------------------------------------- connections
 
-    /// Rebuilds the "Conectar" popover from the index: label, identity,
-    /// "Usado hace…" and the status badge of every connection
+    /// Rebuilds the "Conectar" popover from the index: label, agent type,
+    /// identity, "Usado hace…" and the status badge of every connection
     /// (`Connections::list_with_status`, never the network), plus the active
     /// one and the `default_label` preselection. Also refreshes the history,
     /// whose group headers are the connections' labels.
@@ -484,6 +494,7 @@ impl Agents {
                 id: connection.id.to_string(),
                 agent_id: connection.agent_id.clone(),
                 label: connection.label.clone(),
+                agent_name: crate::connection_modal::agent_type_name(&connection.agent_id),
                 identity: connection.identity.as_ref().and_then(Identity::summary),
                 last_used: used_label(connection.last_used_at),
                 badge: self.badge(connection, status),
@@ -809,6 +820,7 @@ impl Agents {
             created_at: now_seconds(),
             read_only: false,
         });
+        self.sync_conversation_dir(cx);
         self.last_saved_conversation = None;
         self.pending_load = None;
         if self.connection.is_some() && self.capabilities.is_some() {
@@ -862,6 +874,8 @@ impl Agents {
             created_at: conversation.created_at,
             read_only: owner.is_none(),
         });
+        // Its sent images are read from `conversations/<id>/images/`.
+        self.sync_conversation_dir(cx);
         self.pending_load = conversation
             .session_id
             .clone()
@@ -918,6 +932,8 @@ impl Agents {
         {
             self.conversation = None;
             self.last_saved_conversation = None;
+            // Its folder is gone: nothing to read images from.
+            self.sync_conversation_dir(cx);
         }
         self.refresh_conversations(cx);
 
@@ -995,7 +1011,10 @@ impl Agents {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ChatEvent::Command(command) => self.forward_command(command, cx),
+            ChatEvent::Command(command) => {
+                self.forward_command(command, cx);
+                self.store_sent_images(command, cx);
+            }
             ChatEvent::OpenFileAtHunk { path } => {
                 // "Ver en el editor": the first pending change of the file.
                 self.review.update(cx, |review, cx| {
@@ -1052,6 +1071,8 @@ impl Agents {
             ChatEvent::CopyToClipboard(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
             }
+            // `PickImages`, `Notify` and `OpenImage` (E7-G).
+            other if self.handle_image_event(other, window, cx) => {}
             _ => tracing::debug!("ChatEvent no reconocido, se ignora"),
         }
     }
@@ -1145,6 +1166,7 @@ impl Agents {
             // The prompt never left: there is nothing to cancel on the
             // agent's side, only the review turn and the chat to free.
             self.clear_preparing_notice(cx);
+            self.prompt_not_sent(cx);
             self.end_orphaned_turn(cx);
             return;
         }
@@ -1192,6 +1214,7 @@ impl Agents {
                 agents.clear_preparing_notice(cx);
                 if agents.connection.is_none() {
                     // The agent went away while the photo was being taken.
+                    agents.prompt_not_sent(cx);
                     agents.end_orphaned_turn(cx);
                     return;
                 }
@@ -1251,16 +1274,33 @@ impl Agents {
     /// A prompt is about to go out: starts its review turn and attaches what
     /// the user did to the previous turn's edits (`report_for_agent`, which
     /// `cincel-acp` wraps in `<user_review_feedback>`), plus whatever
-    /// feedback the chat already had.
+    /// feedback the chat already had. The unsent comments go in the same
+    /// block, after the patches, and show as cards of the message
+    /// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §6.7).
     pub(crate) fn prepare_prompt(
         &mut self,
         from_chat: Option<String>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let (_turn, report) = self.review.update(cx, |review, cx| review.begin_prompt(cx));
-        match (from_chat, report) {
+        let prompt = self.review.update(cx, |review, cx| review.begin_prompt(cx));
+        let cards = crate::review::sent_cards(&prompt.sent);
+        self.chat
+            .update(cx, |chat, cx| chat.attach_sent_comments(cards, cx));
+        match (from_chat, prompt.feedback) {
             (Some(chat), Some(report)) => Some(format!("{report}\n{chat}")),
             (chat, report) => report.or(chat),
+        }
+    }
+
+    /// The prepared prompt never left (D16 of spec 09): its comments go back
+    /// to the margin and the chat, and its cards say so.
+    fn prompt_not_sent(&mut self, cx: &mut Context<Self>) {
+        let restored = self
+            .review
+            .update(cx, |review, cx| review.prompt_not_sent(cx));
+        if restored {
+            self.chat
+                .update(cx, |chat, cx| chat.mark_comments_not_sent(cx));
         }
     }
 
@@ -1347,6 +1387,9 @@ impl Agents {
                 capabilities,
             } => {
                 self.capabilities = Some(capabilities.clone());
+                // What the agent announced decides whether the chat takes
+                // images (E7-G, D6).
+                let images = cincel_acp::agent_supports_images(&capabilities);
                 self.resume_or_start_session(cx);
                 self.chat.update(cx, |chat, cx| {
                     chat.handle_event(
@@ -1358,6 +1401,7 @@ impl Agents {
                         cx,
                     );
                 });
+                self.publish_image_support(Some(images), cx);
             }
             AgentEvent::AuthRequired {
                 ref methods,
@@ -3711,7 +3755,7 @@ mod tests {
             cincel_chat::Entry::AgentText(cincel_chat::AgentText {
                 markdown: "primer mensaje replayadosegundo mensaje replayado".to_string(),
                 streaming: false,
-                view: None,
+                segments: Vec::new(),
             }),
         ];
         store.save(&conversation).expect("se guarda");

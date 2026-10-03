@@ -15,6 +15,14 @@
 //! with `current_hash`. If it matches, the hunks are recomputed against the
 //! stored base; if not, the entry is dropped and reported. Objects no longer
 //! referenced are deleted on every save.
+//!
+//! Version 2 (spec 09 D15) adds `comments`: the unsent comments, each with
+//! its rows, text, decision marks, the hash of the buffer text when saved
+//! (`file_hash`) and the text of its rows as an object (`snippet_hash`).
+//! On load a comment keeps its rows if the file is unchanged, otherwise it
+//! is relocated to the nearest exact occurrence of its rows' text, or else
+//! to one row at the same place (clamped). A missing or binary file drops
+//! it. A version 1 file loads without comments.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -24,18 +32,22 @@ use std::path::{Path, PathBuf};
 use cincel_text::Rope;
 use serde::{Deserialize, Serialize};
 
+use crate::comments::{CommentDropReason, CommentEntry};
 use crate::file::FileReview;
 use crate::store::{ReviewStore, detached};
 use crate::text::{normalize, rope_sha256, sha256_hex};
 use crate::types::{FileStatus, ReviewError, TurnId};
 
 /// Current `state.json` format.
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct StateFile {
     version: u32,
     files: Vec<Entry>,
+    /// Unsent comments (version 2; absent in version 1).
+    #[serde(default)]
+    comments: Vec<CommentEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,6 +91,13 @@ pub struct LoadReport {
     pub restored: Vec<PathBuf>,
     /// Entries dropped (the UI tells the user).
     pub dropped: Vec<(PathBuf, DropReason)>,
+    /// Comments restored (relocated ones included).
+    pub comments_restored: usize,
+    /// Comments whose file changed since the save: moved to their text, or
+    /// to the nearest row when it is gone.
+    pub comments_relocated: usize,
+    /// Comments dropped (the UI tells the user).
+    pub comments_dropped: Vec<(PathBuf, CommentDropReason)>,
 }
 
 impl ReviewStore {
@@ -125,9 +144,12 @@ impl ReviewStore {
                 created_at: file.created_at,
             });
         }
+        let (comments, snippets) = self.comment_entries(|rope| write_object(&objects, rope))?;
+        referenced.extend(snippets);
         let state = StateFile {
             version: STATE_VERSION,
             files: entries,
+            comments,
         };
         let json = serde_json::to_vec_pretty(&state)?;
         let tmp = dir.join("state.json.tmp");
@@ -150,8 +172,8 @@ impl ReviewStore {
 
     /// Restores the state saved in `dir`. `read_current` returns the bytes of
     /// a file as it is on disk now (`None` if it does not exist). Paths
-    /// already in review are left alone. A missing `state.json` restores
-    /// nothing.
+    /// already in review are left alone, and so are comments whose id is
+    /// already in the store. A missing `state.json` restores nothing.
     pub fn load(
         &mut self,
         dir: &Path,
@@ -166,6 +188,7 @@ impl ReviewStore {
         };
         let state: StateFile = serde_json::from_slice(&bytes)?;
         let objects = dir.join("objects");
+        let comments = state.comments;
         for entry in state.files {
             if self.files.contains_key(&entry.path) {
                 continue;
@@ -177,6 +200,19 @@ impl ReviewStore {
                     report.dropped.push((entry.path, reason));
                 }
             }
+        }
+        self.restore_comment_entries(
+            comments,
+            |hash| {
+                read_object(&objects, hash)
+                    .ok()
+                    .map(|rope| rope.to_string())
+            },
+            &read_current,
+            &mut report,
+        );
+        for (path, reason) in &report.comments_dropped {
+            tracing::warn!(path = %path.display(), ?reason, "review comment dropped");
         }
         Ok(report)
     }

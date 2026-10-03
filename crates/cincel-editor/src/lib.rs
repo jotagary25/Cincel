@@ -57,8 +57,9 @@
 //!   [`bind_default_keys`] before loading the user's keymap. Action names are
 //!   the ones in the spec (`editor::insert_newline`, `review::accept_hunk`, …).
 //! - **Key contexts**: `Editor`, `Editor && searching`,
-//!   `Editor && searching && replacing` and
-//!   `Editor && review_hunk_under_cursor` (see [`EditorView::key_context`]).
+//!   `Editor && searching && replacing`,
+//!   `Editor && review_hunk_under_cursor` and `Editor && comment_box` (the
+//!   field of a comment box; see [`EditorView::key_context`]).
 //!   The default keymap (`cincel-settings`'s `DEFAULT_KEYMAP_JSONC`) binds
 //!   `Tab`, `Enter` and `Ctrl+Enter` again in those narrower contexts, placed
 //!   after the plain `Editor` section, so they keep their search-bar meaning
@@ -68,16 +69,41 @@
 //! # Display pipeline
 //!
 //! ```text
-//! Buffer (rope) -> DiffTransformMap -> WrapMap -> EditorElement
-//!                  phantom rows        soft wrap   virtualized painting
+//! Buffer (rope) -> DiffTransformMap -> WrapMap -> BlockMap -> EditorElement
+//!                  phantom rows        soft wrap   comment     virtualized
+//!                                                  boxes       painting
 //! ```
 //!
 //! [`DiffTransformMap`] splices the deleted lines of a review hunk in as
 //! read-only *phantom rows* (still shaped, selectable, copyable); [`WrapMap`]
-//! turns every display row into one or more *wrap rows*. The element shapes
-//! only the wrap rows in the viewport and caches the shaped lines by their
-//! *content* (painted text, font size, run colours), so a row that did not
-//! change is never shaped again — not even when an edit moved it up or down.
+//! turns every display row into one or more *wrap rows*; [`BlockMap`] splices
+//! whole interface rows (the comment boxes) in after a wrap row, giving the
+//! *visual rows* the element paints, scrolls and measures in. The cursor,
+//! the selection, the mouse drag and the search stay in wrap rows and never
+//! land on a block. The element shapes only the wrap rows in the viewport
+//! and caches the shaped lines by their *content* (painted text, font size,
+//! run colours), so a row that did not change is never shaped again — not
+//! even when an edit moved it up or down.
+//!
+//! # Comments for the agent (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §6.5)
+//!
+//! The host hands the unsent comments of the file with
+//! [`EditorView::set_comments`] ([`ReviewCommentView`]: id, buffer rows, text,
+//! the hunk whose "Comentar" made it) and the file name for the titles with
+//! [`EditorView::set_display_name`]. The editor shows each one as a block
+//! below its rows (below its hunk, below the red rows of a pure deletion):
+//! folded (one row, the text cut with "…", "Editar" / "Borrar" on hover or
+//! with the cursor in its rows) or expanded (a click on the text or on the
+//! mark in the margin), with a mark centred in the gap between the numbers and
+//! the text on its first row. The pill's third part, "Comentar"
+//! (`review::comment_hunk`), `editor::comment_selection` (`Ctrl+Shift+M`, or
+//! "Comentar selección" / "Comentar línea" in the context menu of the right
+//! button) open a box with a field of its own (an `EditorView` with
+//! [`EditorChrome::Minimal`], key context `comment_box`: `Ctrl+Enter`
+//! `editor::save_comment`, `Esc` `editor::cancel_comment`). What the user
+//! does is a [`CommentAction`] event (`Create`, `Edit`, `Delete`), a second
+//! event type of the view next to [`EditorEvent`]; the editor keeps nothing
+//! and the host answers with `set_comments`. A text field shows none of it.
 //!
 //! # Threading
 //!
@@ -115,11 +141,12 @@
 //! and the bar) and editing keeps working. [`PhantomHunk`] and the deprecated
 //! [`EditorView::set_hunks`] remain as the E0 path, mapped onto a `ReviewView`.
 //!
-//! - **No `BlockMap`** (`03-arquitectura.md` §5): the pill is an overlay
+//! - **The pill is not a block** (`03-arquitectura.md` §5): it is an overlay
 //!   anchored to a wrap row of its hunk (or the row just above it; see
-//!   [`element`]). It takes no vertical space, so the cursor never skips a UI
-//!   row, and it scrolls and follows the hunk exactly like the text. `FoldMap`
-//!   is v2.
+//!   [`element`]), with three equal parts ("✓ Aceptar", "✗ Rechazar",
+//!   "Comentar"; compact: three 24 × 24 buttons). It takes no vertical
+//!   space, and it scrolls and follows the hunk exactly like the text. Only
+//!   the comment boxes are blocks ([`BlockMap`]). `FoldMap` is v2.
 //! - **Toasts** ("Segmento rechazado · Deshacer") belong to the host, which
 //!   knows when a rejection was applied; `Alt+Shift+U` emits
 //!   [`ReviewAction::UndoLastReject`].
@@ -222,6 +249,8 @@
 //!   I-beam over the text ([`EditorView::cursor_style_at`]).
 
 pub mod actions;
+pub mod block_map;
+pub mod comments;
 pub mod decorations;
 pub mod display_map;
 pub mod element;
@@ -237,34 +266,53 @@ pub mod view;
 pub mod wrap_map;
 
 #[cfg(all(test, feature = "test-support"))]
+mod block_map_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod comment_box_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod comment_rows_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod editing_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod git_gutter_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod idle_timer_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod indent_editing_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod line_clipboard_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod occurrences_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod review_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod scroll_margin_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod search_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
 #[cfg(all(test, feature = "test-support"))]
 mod text_field_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod whitespace_toggle_tests;
 
 pub use actions::{
-    AcceptFile, AcceptHunk, AcceptLine, Backspace, Backtab, Cancel, Confirm, Copy, Cut, Delete,
-    DeleteLine, DeleteWordLeft, DeleteWordRight, DuplicateLineDown, DuplicateLineUp, Find,
-    FindNext, FindPrev, FindReplace, GoToLine, InsertNewline, JoinLines, Lowercase, MoveDown,
-    MoveLeft, MoveLineDown, MoveLineUp, MovePageDown, MovePageUp, MoveRight, MoveToDocumentEnd,
-    MoveToDocumentStart, MoveToLineEnd, MoveToLineStart, MoveToMatchingBracket, MoveUp,
-    MoveWordLeft, MoveWordRight, NextFile, NextHunk, OpenReviewPanel, Paste, PrevHunk, Redo,
-    RejectFile, RejectHunk, RejectLine, ReplaceAll, ReplaceNext, Save, SearchNextField,
+    AcceptFile, AcceptHunk, AcceptLine, Backspace, Backtab, Cancel, CancelComment, CommentHunk,
+    CommentSelection, Confirm, Copy, Cut, Delete, DeleteLine, DeleteWordLeft, DeleteWordRight,
+    DuplicateLineDown, DuplicateLineUp, Find, FindNext, FindPrev, FindReplace, GoToLine,
+    InsertNewline, JoinLines, Lowercase, MoveDown, MoveLeft, MoveLineDown, MoveLineUp,
+    MovePageDown, MovePageUp, MoveRight, MoveToDocumentEnd, MoveToDocumentStart, MoveToLineEnd,
+    MoveToLineStart, MoveToMatchingBracket, MoveUp, MoveWordLeft, MoveWordRight, NextFile,
+    NextHunk, OpenReviewPanel, Paste, PrevHunk, Redo, RejectFile, RejectHunk, RejectLine,
+    ReplaceAll, ReplaceNext, Save, SaveComment, ScrollLineDown, ScrollLineUp, SearchNextField,
     SearchPrevField, SelectAll, SelectDown, SelectLeft, SelectLine, SelectNext, SelectPageDown,
     SelectPageUp, SelectRight, SelectToDocumentEnd, SelectToDocumentStart, SelectToLineEnd,
     SelectToLineStart, SelectUp, SelectWordLeft, SelectWordRight, SortLines, Tab, ToggleComments,
     ToggleSearchCase, ToggleSearchRegex, ToggleSoftWrap, ToggleWhitespace, Undo, UndoLastReject,
     Uppercase, bind_default_keys, default_key_bindings,
 };
+pub use block_map::{BlockMap, BlockPlacement, VisualCell, VisualRow};
+pub use comments::{CommentAction, CommentBlockKind, DraftTarget, ReviewCommentView};
 pub use decorations::{Decorator, TextDecorations};
 pub use display_map::{
     BufferRow, DiffTransformMap, DisplayCell, DisplayMap, DisplayPoint, DisplayRow, PhantomHunk,
@@ -285,7 +333,7 @@ pub use settings::{
 pub use symbol::{definition_kinds, symbol_at};
 pub use theme::EditorTheme;
 pub use view::{
-    BarButtonRender, EditorEvent, EditorStyle, EditorView, FrameRender, FrameStats, PillRender,
-    ReviewFrame, RowRender, editor,
+    BarButtonRender, CommentBlockRender, CommentMarkRender, EditorEvent, EditorStyle, EditorView,
+    FrameRender, FrameStats, PillRender, ReviewFrame, RowRender, SaveCleanup, editor,
 };
 pub use wrap_map::{WrapMap, WrapRow, WrapSource, WrappedRow};

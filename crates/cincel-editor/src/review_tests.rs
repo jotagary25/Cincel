@@ -545,7 +545,7 @@ fn turn_active_disables_every_control_but_not_typing(cx: &mut TestAppContext) {
         handle,
         "ctrl-enter ctrl-backspace alt-enter ctrl-shift-enter",
     );
-    let pill_accept = f32::from(bounds.right()) - 8. - 12. - 190. + 40.;
+    let pill_accept = f32::from(bounds.right()) - 8. - 12. - crate::element::PILL_WIDTH + 40.;
     click(&mut visual, pill_accept, line_height * 1.5);
     visual.run_until_parked();
     assert!(events.borrow().is_empty(), "{:?}", events.borrow());
@@ -940,17 +940,24 @@ fn an_enabled_pill_shows_the_hand_on_its_buttons_and_the_arrow_elsewhere(cx: &mu
     let (view, _handle, mut visual) = open_default(cx, TEXT, two_hunks());
     set_cursor(&view, &mut visual, DisplayPoint::new(1, 0));
     let (line_height, _, bounds) = geometry(&view, &mut visual);
-    let pill_left = f32::from(bounds.right()) - 8. - 12. - 190.;
+    let width = crate::element::PILL_WIDTH;
+    let pill_left = f32::from(bounds.right()) - 8. - 12. - width;
     let y = line_height * 1.5;
     assert_eq!(
         cursor_at(&view, &mut visual, pill_left + 40., y),
         CursorStyle::PointingHand,
         "accept"
     );
+    // Spec 09 §6.3: three equal parts, "Rechazar" in the middle.
     assert_eq!(
-        cursor_at(&view, &mut visual, pill_left + 190. - 20., y),
+        cursor_at(&view, &mut visual, pill_left + width / 2., y),
         CursorStyle::PointingHand,
         "reject"
+    );
+    assert_eq!(
+        cursor_at(&view, &mut visual, pill_left + width - 20., y),
+        CursorStyle::PointingHand,
+        "comment"
     );
     assert_eq!(
         cursor_at(&view, &mut visual, pill_left + 2., y),
@@ -972,9 +979,12 @@ fn a_disabled_pill_shows_the_arrow_and_ignores_clicks(cx: &mut TestAppContext) {
     let events = record(&view, &mut visual);
     set_cursor(&view, &mut visual, DisplayPoint::new(1, 0));
     let (line_height, _, bounds) = geometry(&view, &mut visual);
-    let pill_left = f32::from(bounds.right()) - 8. - 12. - 190.;
+    let width = crate::element::PILL_WIDTH;
+    let pill_left = f32::from(bounds.right()) - 8. - 12. - width;
     let y = line_height * 1.5;
-    for x in [pill_left + 40., pill_left + 190. - 20., pill_left + 2.] {
+    // "Aceptar", "Rechazar" and the padding; "Comentar" (the right third)
+    // keeps reacting, which `comment_box_tests` covers.
+    for x in [pill_left + 40., pill_left + width / 2., pill_left + 2.] {
         assert_eq!(
             cursor_at(&view, &mut visual, x, y),
             CursorStyle::Arrow,
@@ -1059,11 +1069,16 @@ fn an_enabled_pill_reads_as_enabled_and_highlights_the_hovered_half(cx: &mut Tes
         frame(&view, &mut visual).review.pills[0].hovered,
         Some(true)
     );
-    hover(&mut visual, f32::from(pill.bounds.right()) - 20., y);
+    hover(&mut visual, f32::from(pill.reject_bounds.center().x), y);
     assert_eq!(
         frame(&view, &mut visual).review.pills[0].hovered,
         Some(false)
     );
+    // The third part, "Comentar", gets its own highlight.
+    hover(&mut visual, f32::from(pill.comment_bounds.center().x), y);
+    let painted = frame(&view, &mut visual).review.pills[0];
+    assert_eq!(painted.hovered, None);
+    assert!(painted.comment_hovered);
 }
 
 #[gpui::test]
@@ -1293,18 +1308,22 @@ fn with_no_room_anywhere_the_pill_turns_compact_and_translucent(cx: &mut TestApp
     assert!(pill.compact);
     assert_eq!(pill.display_row, 1, "the first row of the hunk");
     assert_eq!(pill.opacity, crate::element::COMPACT_PILL_OPACITY);
+    // Spec 09 §6.3: three 24 × 24 buttons with 4 px between them (80 px).
     assert_eq!(
         pill.bounds.size.width,
-        px(2. * crate::element::COMPACT_PILL_BUTTON + crate::element::COMPACT_PILL_GAP)
+        px(3. * crate::element::COMPACT_PILL_BUTTON + 2. * crate::element::COMPACT_PILL_GAP)
     );
     assert_eq!(painted.gutter_width, plain.gutter_width);
     assert_eq!(painted.text_origin_x, plain.text_origin_x);
 
-    // Its hitboxes are where it was painted: left button accepts, right one
-    // rejects.
+    // Its hitboxes are where it was painted: the left button accepts, the
+    // middle one rejects (the third comments).
     let y = f32::from(pill.bounds.center().y);
     let accept_x = f32::from(pill.bounds.left()) + crate::element::COMPACT_PILL_BUTTON / 2.;
-    let reject_x = f32::from(pill.bounds.right()) - crate::element::COMPACT_PILL_BUTTON / 2.;
+    let reject_x = f32::from(pill.bounds.left())
+        + crate::element::COMPACT_PILL_BUTTON
+        + crate::element::COMPACT_PILL_GAP
+        + crate::element::COMPACT_PILL_BUTTON / 2.;
     click(&mut visual, accept_x, y);
     click(&mut visual, reject_x, y);
     assert_eq!(
@@ -1409,7 +1428,7 @@ fn deciding_centres_the_next_hunk(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_hunk_at_the_end_scrolls_as_far_as_the_document_allows(cx: &mut TestAppContext) {
+fn a_hunk_at_the_end_is_centred_with_the_end_margin(cx: &mut TestAppContext) {
     let text = long_text();
     let last = review(vec![hunk(1, &["x"], 299..300)]);
     let (view, handle, mut visual) = open_default(cx, &text, last);
@@ -1418,10 +1437,13 @@ fn a_hunk_at_the_end_scrolls_as_far_as_the_document_allows(cx: &mut TestAppConte
     visual.run_until_parked();
     let (cursor, scroll, visible) = jump_geometry(&view, &mut visual);
     let rows = visual.update(|_window, cx| view.read(cx).wrap_row_count()) as f32;
-    // Clamped at the bottom of the document, with the row on screen.
+    // Spec 10 §6: the document ends half a screen later, so a jump to the
+    // last hunk can centre it; the clamp is the end margin, not the last row.
+    let max = rows + (visible / 2.).floor() - visible;
+    let centred = (cursor + 0.5 - visible / 2.).clamp(0., max);
     assert!(
-        (scroll - (rows - visible)).abs() < 0.01,
-        "scroll {scroll}, {rows} rows, {visible} visible"
+        (scroll - centred).abs() < 0.01,
+        "scroll {scroll}, centred {centred}, {rows} rows, {visible} visible"
     );
     assert!(cursor >= scroll && cursor + 1. <= scroll + visible);
 }

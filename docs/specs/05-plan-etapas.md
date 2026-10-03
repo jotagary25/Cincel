@@ -53,7 +53,28 @@ Spec: `08-etapa6-cierre-1-0.md` (fuente de verdad del alcance).
 - **Deudas**: tope de la foto en la configuración, binarios persistidos y con deshacer, repaso final en segundo plano, teclas de búsqueda en el keymap por defecto, test del buscador con 50 000 rutas y los tests que faltaban.
 **Comprobación manual**: la lista de `08-etapa6-cierre-1-0.md` §12 (instalar desde el tarball y desde el `.deb` y repetir lo esencial de las etapas 1 a 5).
 
+## Etapa 7: conexiones más limpias, imágenes en el chat y comentarios para el agente (cierre = versión 0.2.0)
+Estado: **cerrada** (2026-09-30), con una **ronda 2** de correcciones y mejoras tras la prueba del autor (spec `10-etapa7-ronda2.md`, 2026-10-01) dentro de la misma 0.2.0. Construcción, verificación, desviaciones y lista de comprobación manual en `docs/etapas/etapa-7.md`. **Versión 0.2.0.**
+Spec: `09-etapa7-conexiones-imagenes-comentarios.md` (fuente de verdad del alcance).
+- **Conexiones**: el menú "Conectar" y el botón del encabezado del chat muestran solo el nombre de la conexión, el tipo de agente con su icono y la insignia de estado; correo, plan y "Usado hace…" quedan solo en Configuración → Conexiones. Los menús desplegables (los dos del encabezado del chat y los demás) se cierran solos con clic fuera, cambio de foco, `Esc` o la ventana sin foco. (Corregido por la ronda 2: el encabezado muestra solo el nombre y una insignia del estado de la conexión, y las filas del menú son de dos líneas.)
+- **Imágenes en el chat**: `Ctrl+V`, arrastrar desde el explorador de archivos y botón "Adjuntar"; PNG, JPEG, GIF y WebP, reducidas a 2 000 px de lado, máximo 10 MB; miniaturas con `×`, vista a tamaño completo, bloques `image` de ACP, aviso si el agente no las acepta, guardadas con la conversación.
+- **Comentarios sobre segmentos y selecciones**: botón "Comentar" junto a Aceptar y Rechazar, "Comentar selección" (menú contextual y `Ctrl+Shift+M`), caja intercalada entre las líneas sin mover el código, etiquetas en la caja del chat, envío con el próximo mensaje dentro de `<user_review_feedback>`, tarjetas en el mensaje enviado, persistencia con la revisión y contadores.
+**Comprobación manual**: la lista de `09-etapa7-conexiones-imagenes-comentarios.md` §11 (incluye Claude, Codex y Antigravity reales atendiendo un comentario y una imagen).
+- **Ronda 2** (correcciones y mejoras tras la prueba del autor, dentro de la misma 0.2.0, antes de publicarla): spec `10-etapa7-ronda2.md` (encabezado y menú del chat, imágenes arriba del texto, "Pensando…" en la conversación, seguir el final y flecha "ir al final", bloques de código largos plegados, margen al final del editor, ocho mejoras al escribir y limpieza al guardar); su lista de comprobación manual es la de su §16.
+
+## Etapa 8: terminal integrado (pospuesta)
+Decisión del autor (2026-09-30): el terminal integrado tendrá su propia etapa, después de la 7 (ya cerrada). Sin especificar todavía; se escribirá su propia spec antes de construir.
+
 ## Después de v1 (ideas ordenadas)
+Lo que quedó anotado al cerrar la Etapa 7 (detalle en `docs/etapas/etapa-7.md`
+"Después de la 0.2.0"): listar los comentarios pendientes en el panel
+"Revisar todo"; recodificar los GIF animados reducidos conservando la
+animación (hoy se manda el primer cuadro con aviso); adjuntar una imagen
+arrastrándola desde el árbol de Cincel (hoy se hace con "Mencionar en el
+chat", porque gpui-kit no ofrece arrastre desde el árbol); y el límite
+conocido de que un modelo de Codex sin imágenes responde con error aunque el
+adaptador las anuncie.
+
 Lo que quedó anotado al cerrar la Etapa 6 (detalle y motivo en
 `docs/etapas/etapa-6.md` "Después de la 1.0"): llevar los colores de git de
 `GitGutterColors` a `EditorTheme`; el residuo de ≈10 ms de M11 en el
@@ -65,8 +86,9 @@ COSMIC (`tools/perf/run.sh cosmic`) y medir el buscador de archivos sobre el
 corpus grande (50 000 rutas reales, no solo el test unitario).
 
 Ideas de producto, sin fecha: LSP (completado, diagnósticos, ir a
-definición) · terminal integrado y autenticación de agentes dentro de la
-app · comentarios sobre segmentos para dialogar con el agente ·
+definición) · autenticación de agentes dentro de la app (el terminal
+integrado pasó a la Etapa 8; los comentarios sobre segmentos y las imágenes en
+el chat se cerraron en la Etapa 7) ·
 multi-cursor y plegado · búsqueda en proyecto · paleta de comandos
 (`Ctrl+Shift+P`) · OpenCode y agentes con API key o gateway · panel de git ·
 ACP v2 (rename/delete/binarios) · macOS.

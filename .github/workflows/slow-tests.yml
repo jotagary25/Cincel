@@ -30,3 +30,11 @@ jobs:
       - name: cargo test slow_download --ignored (§5.6.3)
         run: |
           cargo test -p cincel-connections --test slow_download -- --ignored
+      - name: Mediciones de tiempo marcadas #[ignore] (buscador 50 000 rutas; repaso en fondo ≤ 8 ms × factor)
+        run: |
+          cargo test -p cincel-editor -p cincel-chat -p cincel-workspace \
+            --features cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support \
+            ranks_fifty_thousand -- --ignored
+          cargo test -p cincel-editor -p cincel-chat -p cincel-workspace \
+            --features cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support \
+            the_sweep_of_five_thousand_files_never_blocks -- --ignored

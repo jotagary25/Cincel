@@ -33,6 +33,7 @@ use crate::agents::Agents;
 use crate::center::CenterPanel;
 use crate::file_finder::FileFinder;
 use crate::focus::FocusZone;
+use crate::image_viewer::ImageViewer;
 use crate::layout::{DockLayout as DockLayoutState, WorkspaceLayout};
 use crate::new_file::NewFilePrompt;
 use crate::panels::ChatDock;
@@ -139,6 +140,9 @@ pub struct Workspace {
     /// built once for the whole window, unlike the file finder, since it
     /// does not need a project.
     shortcuts_modal: Entity<ShortcutsModal>,
+    /// The full-size image viewer a click on a sent thumbnail opens
+    /// (`crate::image_viewer`, E7-G): built once for the window.
+    image_viewer: Entity<ImageViewer>,
     /// The "¿Guardar cambios?" dialog `workspace::quit` and the window's `×`
     /// share (D15, `crate::title_menu`, E5-I).
     quit_dialog: Option<QuitDialog>,
@@ -185,6 +189,7 @@ impl Workspace {
         // The shortcuts modal (E5-H): needs no project, so it is built once
         // here instead of in `open_project` like the file finder.
         let shortcuts_modal = ShortcutsModal::new(center.clone(), window, cx);
+        let image_viewer = crate::image_viewer::build(cx);
 
         // `Ctrl+Shift+A`/`Ctrl+L` and the chat's own bindings need a real
         // window; `watch_files` doubles as "may this window use real OS
@@ -195,6 +200,9 @@ impl Workspace {
         let summary = review.read(cx).summary();
         center.update(cx, |center, cx| center.set_review_summary(summary, cx));
         files.update(cx, |files, cx| files.set_review(&review, cx));
+        // The unsent comments show as tags of the chat's composer (spec 09
+        // §6.7).
+        review.update(cx, |review, cx| review.attach_chat(&chat, window, cx));
         let agents =
             cx.new(|cx| Agents::new(chat.clone(), review.clone(), agents_background, window, cx));
 
@@ -245,9 +253,40 @@ impl Workspace {
                         .update(cx, |center, cx| center.open_file(&path, pin, window, cx));
                 }
                 WorkspaceEvent::MentionFile { path } => {
+                    // An image becomes an attachment, anything else stays an
+                    // `@` mention (`ChatPanel::mention_or_attach`, E7-G).
                     let path = path.clone();
                     this.chat
-                        .update(cx, |chat, cx| chat.insert_mention(path, window, cx));
+                        .update(cx, |chat, cx| chat.mention_or_attach(path, window, cx));
+                }
+            },
+        ));
+        // A click on a thumbnail of a sent message opens it full size
+        // (`crate::image_viewer`, E7-G). The other chat events belong to
+        // `Agents`, which subscribes to the panel itself.
+        subscriptions.push(cx.subscribe_in(
+            &chat,
+            window,
+            |this, _, event: &cincel_chat::ChatEvent, window, cx| {
+                if let cincel_chat::ChatEvent::OpenImage {
+                    source,
+                    name,
+                    width,
+                    height,
+                    bytes_len,
+                } = event
+                {
+                    this.open_image_viewer(
+                        crate::image_viewer::ViewerImage {
+                            source: source.clone(),
+                            name: name.clone(),
+                            width: *width,
+                            height: *height,
+                            bytes_len: *bytes_len,
+                        },
+                        window,
+                        cx,
+                    );
                 }
             },
         ));
@@ -369,6 +408,7 @@ impl Workspace {
             file_finder: None,
             new_file: None,
             shortcuts_modal,
+            image_viewer,
             quit_dialog: None,
             review_close_dialog: None,
             quit_confirmed: false,
@@ -511,6 +551,11 @@ impl Workspace {
     /// The keyboard shortcuts modal (`F1`, `crate::shortcuts_modal`, E5-H).
     pub fn shortcuts_modal(&self) -> &Entity<ShortcutsModal> {
         &self.shortcuts_modal
+    }
+
+    /// The full-size image viewer (`crate::image_viewer`, E7-G).
+    pub fn image_viewer(&self) -> &Entity<ImageViewer> {
+        &self.image_viewer
     }
 
     /// The recently opened projects, most recent first (`crate::title_menu`).
@@ -1153,10 +1198,10 @@ impl Workspace {
         let read_only = tab.is_some_and(|tab| tab.read_only);
         let zoom = (crate::settings::ui_scale(cx) * 100.).round() as i32;
         let chat = self.chat.read(cx);
-        let (pending, sweeping) = {
+        let (pending, sweeping, comments) = {
             let summary = self.review.read(cx).summary();
             let summary = summary.borrow();
-            (summary.pending, summary.sweeping)
+            (summary.pending, summary.sweeping, summary.comments)
         };
         // The chip of the active connection (`docs/specs/06-etapa4-conexiones-
         // y-cincel.md` §6): provider icon + label, or "Sin conexión".
@@ -1228,10 +1273,13 @@ impl Workspace {
                             .when(pending > 0, |this| this.text_color(theme.status_warning))
                             // A long end-of-turn sweep says so in the same
                             // place (`crate::review::SWEEP_NOTICE`).
+                            .debug_selector(|| "status-pending".to_string())
                             .child(SharedString::from(if sweeping {
                                 crate::review::SWEEP_NOTICE.to_string()
                             } else {
-                                pending_label(pending)
+                                // "3 cambios pendientes · 2 comentarios"
+                                // (spec 09 §6.2.9).
+                                crate::review::status_label(pending, comments)
                             }))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.review.update(cx, |review, cx| review.toggle_panel(cx));
@@ -1473,16 +1521,6 @@ impl Workspace {
     }
 }
 
-/// "N cambios pendientes", with the singular: the same changes the tree's
-/// root line and the floating bar count.
-fn pending_label(pending: usize) -> String {
-    if pending == 1 {
-        "1 cambio pendiente".to_string()
-    } else {
-        format!("{pending} cambios pendientes")
-    }
-}
-
 impl gpui::EventEmitter<WorkspaceEvent> for Workspace {}
 
 impl Focusable for Workspace {
@@ -1650,6 +1688,13 @@ impl Render for Workspace {
             .children(
                 Some(&self.shortcuts_modal)
                     .filter(|modal| modal.read(cx).is_open())
+                    .cloned(),
+            )
+            // The full-size image viewer floats over everything but the
+            // dialogs and the toasts (`crate::image_viewer`, E7-G).
+            .children(
+                Some(&self.image_viewer)
+                    .filter(|viewer| viewer.read(cx).is_open())
                     .cloned(),
             )
             // The "¿Guardar cambios?" quit dialog (D15, `crate::title_menu`,

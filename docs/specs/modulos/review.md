@@ -61,6 +61,70 @@ pub struct LinePair { pub base_row: Option<u32>, pub buffer_row: Option<Anchor> 
 - Persistencia: `save(dir)` / `load(dir, read_current: impl Fn(&Path) -> Option<Vec<u8>>)` según `03-arquitectura.md §6`.
 - Límites: archivos > 2 MB o > 50 000 líneas → `FileReview` con `hunks` vacío y flag `too_large`; solo operaciones por archivo. Binarios (bytes nulos en los primeros 8 KB) → `binary`, solo por archivo.
 
+## Comentarios para el agente (v0.2.0, `09-etapa7-conexiones-imagenes-comentarios.md` §6.4 y §6.8)
+
+`src/comments.rs` (modelo, dentro de `ReviewStore`) y `src/feedback.rs` (texto al agente). Sin GPUI.
+
+```rust
+pub struct CommentId(pub u64);
+pub enum CommentState { Pending, Accepted, Rejected, Mixed, NoAgentChange } // agent_text()
+pub enum SentRange { Lines, RemovedBefore, DeletedFile }
+pub struct CommentView { id, path, display_path, rows: Range<u32>, text, from_hunk: Option<HunkId> }
+pub struct SentComment { id, path, display_path, first_line, last_line, kind, state,
+                         code, removed, truncated_lines, unsaved, lang, text }   // Serialize
+pub enum CommentDropReason { Missing, NotText }
+pub const COMMENT_MAX_CHARS: usize = 8000;
+pub const COMMENT_SNIPPET_MAX_LINES: usize = 120;
+pub const COMMENT_SNIPPET_MAX_BYTES: usize = 12 * 1024;
+
+impl ReviewStore {
+    fn add_comment(&mut self, path, &BufferSnapshot, rows: Range<u32>, from_hunk: Option<HunkId>, text: String) -> Option<CommentId>;
+    fn edit_comment(&mut self, CommentId, String) -> bool;        // texto en blanco = borrar
+    fn remove_comment(&mut self, CommentId) -> bool;
+    fn drop_comments_in(&mut self, path) -> usize;                // binario o archivo que ya no existe
+    fn comment_buffer_event(&mut self, path, &BufferEvent, &BufferSnapshot);
+    fn comments(&self, snapshot_of: Fn(&Path) -> Option<BufferSnapshot>) -> Vec<CommentView>; // ruta, fila
+    fn comment_count(&self) -> usize;  fn comment_count_in(&self, path) -> usize;
+    fn commented_paths(&self) -> Vec<PathBuf>;
+    fn comment_state(&self, CommentId) -> Option<CommentState>;
+    fn take_comments_for_prompt(&mut self, snapshot_of: Fn(&Path) -> Option<(BufferSnapshot, bool /*sin guardar*/)>) -> Vec<SentComment>;
+    fn restore_comments(&mut self, &[SentComment], snapshot_of: Fn(&Path) -> Option<BufferSnapshot>);
+}
+pub fn format_feedback(report: Option<&str>, comments: &[SentComment]) -> Option<String>;
+pub fn fence_for(text: &str) -> String;
+```
+
+- **Filas**: filas del buffer, fin exclusivo; vacío = antes de `rows.start` (comentario sobre una eliminación pura). Anclas: inicio `Before` al principio de la primera fila, fin `After` al final del texto de la última, en un `AnchorMap` por ruta que el anfitrión alimenta con **cada** `BufferEvent` del buffer (`comment_buffer_event`, para toda ruta vigilada, esté o no en revisión; mismo lote que `buffer_edited`, el snapshot puede ser el de después del lote). Si las filas desaparecen, el comentario queda en una fila, la del ancla de inicio. Un comentario sin filas que recibe las líneas de vuelta (rechazo de la eliminación) pasa a cubrirlas.
+- **Marcas**: las diez decisiones (`accept/reject_hunk`, `accept/reject_line`, `accept/reject_file`, `accept/reject_turn`, `accept/reject_all`) marcan `accepted`/`rejected` en los comentarios del archivo cuyo rango corta las filas decididas (una eliminación pura: la fila donde se dibujan sus filas rojas; una línea solo de la base: la fila real más cercana de su segmento; un archivo de solo-archivo o borrado: todos). Las marcas de un rechazo viajan en su entrada de deshacer; `undo_last_reject` quita solo las que ese rechazo puso. Ninguna decisión borra comentarios; las firmas de las decisiones no cambiaron.
+- **Estado al enviar**: un segmento pendiente bajo el rango → `Pending`; si no, `Accepted`/`Rejected`/`Mixed`/`NoAgentChange` según las marcas.
+- **Envío**: `take_comments_for_prompt` los saca de conteos, vistas y persistencia, ordenados por ruta relativa (bytes) y línea, y los deja aparte (siguen anclados, invisibles) hasta el próximo `take`; `restore_comments` (D16) los devuelve tal cual estaban (mismo id, marcas y anclas) o, si ya no estaban aparte, los reconstruye en sus líneas con las marcas que implica su estado.
+- **Bloque al agente**: `format_feedback(report_for_agent(turn), &sent)`: sin comentarios devuelve el informe **idéntico**; con comentarios, informe + línea en blanco + sección §6.8; `None` si no hay nada. Se envuelve con `wrap_review_feedback` como siempre. Al agente viaja solo lo de siempre (rechazos y ediciones a mano) más los comentarios, una sola vez.
+- **Formato de la sección de comentarios** (`feedback.rs`; texto plano en inglés, `\n`, sin espacios al final de línea, una línea en blanco entre comentarios; rutas relativas a la raíz del proyecto con `/`, líneas desde 1 e inclusivas, como está el archivo ahora):
+  ```text
+  The user left {N} comment(s) on the code. Line numbers are 1-based and refer to each file as it is now. Read every comment together with its code and act on it in this turn.
+
+  Comment {i} of {N}
+  File: {ruta}[ (you deleted this file)]
+  Line: {a}  |  Lines: {a}-{b}  |  Lines: removed before line {a}
+  Review state: {estado}
+  Current code[ (as shown in the editor, not saved yet)]:
+  {valla}{lang}
+  {código}
+  {valla}
+  [({k} more lines not shown)]
+  [Lines you removed (not reviewed yet):
+  {valla}{lang}
+  {líneas quitadas}
+  {valla}]
+  Comment:
+  {texto del usuario, tal cual}
+  ```
+  `{estado}` (`CommentState::agent_text`): `your change, not reviewed yet` · `your change, accepted by the user` · `your change, rejected by the user` · `your change, partly accepted and partly rejected by the user, line by line` · `no change of yours (the user selected these lines)`. "Current code" se omite en una eliminación pura pendiente y en un archivo borrado; "Lines you removed" aparece solo en esos dos casos y mientras estén pendientes; sin código actual, "({k} more lines not shown)" va después de las líneas quitadas. Ejemplo completo en `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §6.8.
+- **Kinds**: `Lines` (con `code`, `unsaved` si el buffer difiere del disco); `RemovedBefore` (sin código; `removed` = líneas quitadas mientras la eliminación esté pendiente); `DeletedFile` (archivo borrado por el agente; `removed` mientras esté pendiente, nada tras aceptar el borrado). Fragmento con tope de 120 líneas / 12 KB (`truncated_lines`); valla = racha más larga de acentos graves + 1, mínimo 3; `lang` = extensión en minúsculas `[a-z0-9+#-]{1,10}`.
+- **Binarios**: `add_comment` devuelve `None` para un snapshot binario; un archivo comentado que se vuelve binario → `drop_comments_in` (el anfitrión avisa).
+- **Persistencia**: `state.json` versión 2 (`STATE_VERSION = 2`) suma `comments` (`id`, `path`, `start_row`, `end_row`, `text`, `created_at`, `from_hunk`, `file_hash`, `snippet_hash`, `accepted`, `rejected`); el texto de las filas va como objeto en `objects/` y no se borra en la limpieza mientras esté referenciado. `load`: versión 1 → sin comentarios; `file_hash` igual → mismas filas; distinto → la aparición exacta del fragmento más cercana a `start_row`, si no una fila en `start_row` acotada (`comments_relocated`); archivo ausente → `CommentDropReason::Missing`, no UTF-8 o binario → `NotText` (`comments_dropped`); un archivo borrado que sigue en revisión conserva sus comentarios sobre su texto borrado. Los comentarios ya enviados no se guardan. `LoadReport` suma `comments_restored`, `comments_relocated`, `comments_dropped`.
+- Tests: `tests/comments.rs` (anclas, las diez marcas, deshacer, escenarios a–m del motor, take/restore, fragmentos, vallas, formato literal incluido el ejemplo de §6.8) y `tests/comments_persist.rs` (v1, ida y vuelta v2, reubicación, línea más cercana, descartes, objetos).
+
 ## Casos de borde obligatorios (tests)
 - [ ] Accept de un hunk deja los offsets de los demás hunks correctos (procesar de abajo hacia arriba o con delta).
 - [ ] Reject de un hunk no toca texto fuera de su rango; el archivo resultante coincide con `base` en ese rango y con el buffer en el resto.

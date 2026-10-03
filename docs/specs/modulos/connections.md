@@ -165,6 +165,10 @@ Detalle, verificación y desviaciones en `docs/etapas/etapa-6.md`. Spec:
   por partes (el hilo de actualización en este crate, y el cableado de
   eventos en `settings_bridge.rs` por separado).
 
+## Etapa 7: identidad y último uso solo en Configuración
+
+Spec: `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §3 (D1, D2). La identidad (`Connection.identity`, correo y plan) y el último uso (`last_used_at`) **siguen en el motor y en `connections.json`**, pero la interfaz solo los muestra en **Configuración → Conexiones**. El menú "Conectar", el botón del encabezado del chat y la lista de "Eliminar conexión…" muestran nada más el icono, el nombre de la conexión, el tipo de agente (`AgentKind::display_name`) y la insignia de estado. `ChatConnection` conserva `identity` y `last_used` (que pinta la pestaña de configuración) y suma `agent_name`. `Identity::summary()` se queda para esa pantalla. La confirmación "Listo: conectado como …" del flujo de "Conectar nuevo agente" **no cambió**: es el aviso del momento de conectar, no una lista.
+
 ## Seguridad
 - El índice nunca guarda credenciales (test `index_never_contains_credentials`).
 - Borrado de perfiles solo dentro de `connections/` (canonicalize + `starts_with`, rechaza la raíz y symlinks).

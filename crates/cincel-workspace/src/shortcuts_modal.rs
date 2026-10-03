@@ -162,6 +162,7 @@ pub fn description(command: &str) -> Option<&'static str> {
         "workspace::mention_in_chat" => "Mencionar el archivo en el chat",
         "workspace::confirm_close" => "Confirmar el diálogo de cambios sin guardar",
         "workspace::cancel_close" => "Cancelar el diálogo de cambios sin guardar",
+        "workspace::close_image_viewer" => "Cerrar la imagen abierta",
 
         // editor::*
         "editor::move_left" => "Mover el cursor un carácter a la izquierda",
@@ -215,6 +216,8 @@ pub fn description(command: &str) -> Option<&'static str> {
         "editor::go_to_line" => "Ir a una línea",
         "editor::toggle_soft_wrap" => "Alternar el ajuste de línea",
         "editor::toggle_whitespace" => "Mostrar u ocultar los espacios en blanco",
+        "editor::scroll_line_up" => "Desplazar una línea hacia arriba",
+        "editor::scroll_line_down" => "Desplazar una línea hacia abajo",
         "editor::save" => "Guardar el archivo",
         "editor::save_all" => "Guardar todos los archivos",
         "editor::cancel" => "Cerrar la búsqueda o el diálogo abierto",
@@ -234,6 +237,9 @@ pub fn description(command: &str) -> Option<&'static str> {
         "editor::uppercase" => "Pasar la selección a mayúsculas",
         "editor::lowercase" => "Pasar la selección a minúsculas",
         "editor::sort_lines" => "Ordenar las líneas seleccionadas",
+        "editor::comment_selection" => "Comentar la selección",
+        "editor::save_comment" => "Guardar el comentario",
+        "editor::cancel_comment" => "Cancelar el comentario",
 
         // review::*
         "review::accept_hunk" => "Aceptar el segmento bajo el cursor",
@@ -247,6 +253,7 @@ pub fn description(command: &str) -> Option<&'static str> {
         "review::next_file" => "Ir al próximo archivo con cambios pendientes",
         "review::open_review_panel" => "Abrir o cerrar el panel de revisión",
         "review::undo_last_reject" => "Deshacer el último rechazo",
+        "review::comment_hunk" => "Comentar el segmento",
 
         // chat::*
         "chat::send" => "Enviar el mensaje",
@@ -294,6 +301,7 @@ pub fn context_label(context: &ContextExpr) -> String {
         "Workspace" => "en la ventana".to_string(),
         "FileFinder" => "buscando archivos".to_string(),
         "ShortcutsModal" => "en el modal de atajos".to_string(),
+        "ImageViewer" => "con una imagen abierta".to_string(),
         "SettingsPage" => "en la configuración".to_string(),
         other => other.to_string(),
     }

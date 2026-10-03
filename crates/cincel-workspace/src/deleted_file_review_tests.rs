@@ -443,7 +443,7 @@ fn rejecting_restores_the_file_and_the_tab_becomes_editable(cx: &mut TestAppCont
     assert_eq!(shown[0].hunk, DELETED_FILE_HUNK);
 
     // Its "✗ Rechazar", with the mouse.
-    let reject = point(pill.right() - px(20.), y);
+    let reject = shown[0].reject_bounds.center();
     mouse_to(cx, reject);
     cx.simulate_click(reject, Modifiers::default());
     settle(cx);

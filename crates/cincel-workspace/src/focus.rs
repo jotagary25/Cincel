@@ -133,8 +133,8 @@ impl Workspace {
     /// Whether something modal is on screen, which freezes the focus
     /// commands (§7.4): the connections modal, the "¿Guardar cambios?"
     /// dialog of a tab, the review panel, the file finder, the shortcuts
-    /// modal, the "Nuevo archivo" field, the quit dialog and the title bar
-    /// menu (E5-I).
+    /// modal, the "Nuevo archivo" field, the quit dialog, the title bar
+    /// menu (E5-I) and the full-size image viewer (E7-G).
     /// The settings tab is deliberately *not* here: it is a tab, part of the
     /// center zone, and the panel shortcuts and `Ctrl+L` treat it like an
     /// editor.
@@ -149,6 +149,7 @@ impl Workspace {
                 .new_file_prompt()
                 .is_some_and(|prompt| prompt.read(cx).is_open())
             || self.shortcuts_modal().read(cx).is_open()
+            || self.is_image_viewer_open(cx)
             || self.is_quit_dialog_open()
             || self.is_review_close_dialog_open()
             || self.review().read(cx).reject_turn_prompt().is_some()

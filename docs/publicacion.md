@@ -44,7 +44,7 @@ detalle de cómo se construyó cada etapa):
 ```sh
 git checkout --orphan historia-nueva
 git add -A
-git commit -m "feat: Cincel 0.1.0"
+git commit -m "feat: Cincel 0.2.0"
 git branch -D main 2>/dev/null || true
 git branch -m main
 ```
@@ -155,19 +155,19 @@ Cada push a `main` y cada pull request dispara `.github/workflows/ci.yml`
 Con el CI en verde en `main`:
 
 ```sh
-git tag -a v0.1.0 -m "Cincel 0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "Cincel 0.2.0"
+git push origin v0.2.0
 ```
 
 Esto dispara `.github/workflows/release.yml`: compila el binario de
 versión, arma el tarball y el `.deb`, los verifica en contenedores
 limpios (`ubuntu:22.04` y `ubuntu:24.04`) y deja un **borrador** de
-release con los cuatro archivos (`cincel-0.1.0-x86_64-linux.tar.gz` +
-`.sha256`, `cincel_0.1.0-1_amd64.deb` + `.sha256`).
+release con los cuatro archivos (`cincel-0.2.0-x86_64-linux.tar.gz` +
+`.sha256`, `cincel_0.2.0-1_amd64.deb` + `.sha256`).
 
 Antes de publicarlo:
 - Descargá el `.deb` del borrador y probalo en tu máquina
-  (`sudo apt install ./cincel_0.1.0-1_amd64.deb`, `cincel --version`,
+  (`sudo apt install ./cincel_0.2.0-1_amd64.deb`, `cincel --version`,
   abrilo).
 - Revisá las notas (se arman solas desde `CHANGELOG.md`).
 - En la página del borrador, botón **"Publish release"**.

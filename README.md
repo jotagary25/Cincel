@@ -24,6 +24,15 @@ Besides editing and chatting with agents:
 - Find and replace in the file (`Ctrl+H`), including inside lines the
   agent removed.
 - Optional autosave, on focus loss or after a pause in typing.
+- Images in the chat: paste a screenshot (`Ctrl+V`), drag files onto the
+  input or use the paperclip button; PNG, JPEG, GIF and WebP, shrunk to
+  2,000 px on the longest side, shown as thumbnails you can open full size.
+  Cincel tells you when the connected agent doesn't accept images.
+- Comments on code for the agent: next to Accept and Reject, a **Comment**
+  button opens a box between the lines (it never shifts the code); you can
+  also comment any selection (right click, or `Ctrl+Shift+M`). Pending
+  comments show up as tags in the chat input and travel once, with your next
+  message, together with the lines and what you decided.
 
 ![Chat panel with an agent](docs/capturas/chat.png)
 ![Settings screen](docs/capturas/configuracion.png)
@@ -38,8 +47,8 @@ page](https://github.com/jotagary25/cincel/releases) (the author replaces
 ### Tarball
 
 ```sh
-tar -xzf cincel-0.1.0-x86_64-linux.tar.gz
-cd cincel-0.1.0-x86_64-linux
+tar -xzf cincel-0.2.0-x86_64-linux.tar.gz
+cd cincel-0.2.0-x86_64-linux
 ./install.sh
 ```
 
@@ -50,7 +59,7 @@ keeps your settings, connections and pending reviews).
 ### `.deb` (Ubuntu / Pop!\_OS 22.04+)
 
 ```sh
-sudo apt install ./cincel_0.1.0-1_amd64.deb
+sudo apt install ./cincel_0.2.0-1_amd64.deb
 ```
 
 Or double-click the file in a graphical file manager.
@@ -89,8 +98,8 @@ distributable tarball and `.deb` yourself.
 ## Documentation
 
 - [`docs/usuario/`](docs/usuario/): the user manual, in Spanish
-  (installation, first run, connecting agents, reviewing changes,
-  shortcuts, settings, troubleshooting).
+  (installation, first run, connecting agents, the chat, writing in the
+  editor, reviewing changes, shortcuts, settings, troubleshooting).
 - [`docs/rendimiento.md`](docs/rendimiento.md): measured performance,
   compared against Zed and Antigravity IDE.
 - [`docs/guia-integracion-acp.md`](docs/guia-integracion-acp.md): how
@@ -127,12 +136,22 @@ Lo que lo distingue: **cada cambio que hace un agente se muestra dentro
 del editor, segmento por segmento, y vos aceptás o rechazás cada segmento
 o cada línea.** Nunca revisás cambios en el chat.
 
+- **Imágenes en el chat**: pegá una captura (`Ctrl+V`), arrastrá archivos a
+  la caja de texto o usá el botón del clip; PNG, JPEG, GIF y WebP, achicadas
+  a 2 000 px de lado, con miniaturas que se abren en grande. Cincel avisa si
+  el agente conectado no acepta imágenes.
+- **Comentarios sobre el código para el agente**: junto a Aceptar y
+  Rechazar, el botón **Comentar** abre una cajita entre las líneas (nunca
+  corre el código); también podés comentar cualquier selección (clic derecho
+  o `Ctrl+Shift+M`). Los comentarios pendientes aparecen como etiquetas en la
+  caja del chat y viajan una sola vez, con tu próximo mensaje, junto con las
+  líneas y lo que decidiste.
 - **Instalar**: el comprimido (`tar.gz` + `./install.sh`, sin `sudo`) o el
-  paquete `.deb` (`sudo apt install ./cincel_0.1.0-1_amd64.deb`, o doble
+  paquete `.deb` (`sudo apt install ./cincel_0.2.0-1_amd64.deb`, o doble
   clic) — comandos exactos más arriba, en "Installation".
 - **Manual completo, en español**: [`docs/usuario/`](docs/usuario/) —
-  instalación, primer arranque, conectar agentes, revisar cambios,
-  atajos, ajustes y qué hacer si algo falla.
+  instalación, primer arranque, conectar agentes, el chat, escribir en el
+  editor, revisar cambios, atajos, ajustes y qué hacer si algo falla.
 - **Rendimiento medido**, comparado con Zed y Antigravity IDE:
   [`docs/rendimiento.md`](docs/rendimiento.md).
 - **Licencia**: MIT. Ver [`LICENSE`](LICENSE).

@@ -61,6 +61,9 @@ pub const CURRENT_LINE_ALPHA: f32 = 0.6;
 pub const SEARCH_MATCH_ALPHA: f32 = 0.3;
 /// Alpha of the *current* search match background (02-visual §5: 55%).
 pub const SEARCH_CURRENT_ALPHA: f32 = 0.55;
+/// Alpha of the occurrences of the word under the cursor, in the `selection`
+/// colour (`docs/specs/10-etapa7-ronda2.md` §7.1, R11: 50%).
+pub const OCCURRENCE_ALPHA: f32 = 0.5;
 
 impl Default for EditorTheme {
     fn default() -> Self {

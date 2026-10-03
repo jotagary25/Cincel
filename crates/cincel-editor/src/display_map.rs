@@ -1,7 +1,7 @@
 //! Display pipeline of the editor, E0 subset.
 //!
 //! ```text
-//! Buffer (rope) -> DiffTransformMap -> [WrapMap, BlockMap: v1] -> EditorElement
+//! Buffer (rope) -> DiffTransformMap -> WrapMap -> BlockMap -> EditorElement
 //! ```
 //!
 //! [`DiffTransformMap`] is the "text splice" layer described in
@@ -300,9 +300,9 @@ impl RowText {
 }
 
 /// `DiffTransformMap` + the buffer row count: the display-row space.
-/// Soft wrap lives in [`crate::WrapMap`], on top of this one; `BlockMap` is not
-/// implemented yet (the accept/reject pill is painted by the element instead of
-/// being a block).
+/// Soft wrap lives in [`crate::WrapMap`], on top of this one, and the comment
+/// boxes in [`crate::BlockMap`], on top of that (the hunk pill is still an
+/// overlay the element paints, not a block).
 #[derive(Clone, Debug, Default)]
 pub struct DisplayMap {
     buffer_rows: u32,

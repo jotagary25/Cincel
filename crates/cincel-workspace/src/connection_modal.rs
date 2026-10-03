@@ -2308,6 +2308,7 @@ impl ConnectionsModal {
                                 let id = row.id;
                                 h_flex()
                                     .id(("delete-row", index))
+                                    .debug_selector(move || format!("delete-row-{index}"))
                                     .gap_2()
                                     .px_2()
                                     .py_1()
@@ -2325,16 +2326,27 @@ impl ConnectionsModal {
                                     .child(
                                         div().flex_1().child(SharedString::from(row.label.clone())),
                                     )
+                                    // The type, not the account: the identity is
+                                    // Settings → Conexiones' (§3).
                                     .children(
-                                        row.identity
-                                            .as_ref()
-                                            .and_then(|identity| identity.summary())
-                                            .map(|summary| {
+                                        cincel_chat::visible_agent_type(
+                                            &row.label,
+                                            &agent_type_name(&row.agent_id),
+                                        )
+                                        .map(
+                                            |agent_type| {
                                                 div()
+                                                    .id(("delete-row-type", index))
+                                                    .debug_selector(move || {
+                                                        format!("delete-row-type-{index}")
+                                                    })
                                                     .text_xs()
                                                     .text_color(theme.text_muted)
-                                                    .child(SharedString::from(summary))
-                                            }),
+                                                    .child(SharedString::from(
+                                                        agent_type.to_string(),
+                                                    ))
+                                            },
+                                        ),
                                     )
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, _window, cx| {
@@ -2556,6 +2568,17 @@ fn identity_sentence(identity: &Identity) -> Option<String> {
         (None, Some(plan)) => Some(plan.clone()),
         (None, None) => identity.organization.clone(),
     }
+}
+
+/// The agent type of a registry id as the interface names it ("Claude",
+/// "Codex", "Antigravity"); the id itself for anything else (a retired agent
+/// whose connection is still saved). Shared by the chat's connection rows and
+/// the "Eliminar conexión" list
+/// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §3, D1).
+pub(crate) fn agent_type_name(agent_id: &str) -> String {
+    AgentKind::from_agent_id(agent_id)
+        .map(AgentKind::display_name)
+        .map_or_else(|_| agent_id.to_string(), str::to_string)
 }
 
 /// The interface's monospace family (the link, the code, the output).

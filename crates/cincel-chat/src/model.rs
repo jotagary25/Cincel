@@ -43,6 +43,42 @@ impl ConnectionBadge {
     }
 }
 
+/// The one badge of the chat header: only the state of the *connection*,
+/// never what the agent is doing (that lives in the row under the
+/// conversation). By priority: expired session, unavailable, authentication
+/// required, disconnected, connected
+/// (`docs/specs/10-etapa7-ronda2.md` §3.1, R1, R2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeaderBadge {
+    /// The agent is running (idle, thinking or waiting for a permission).
+    Connected,
+    /// The agent process is down or was stopped.
+    Disconnected,
+    /// The agent answered `auth_required`.
+    AuthRequired,
+    /// The agent (or the profile) says the session is gone.
+    SessionExpired,
+    /// Something needed to run is missing.
+    Unavailable {
+        /// What is missing, already in Spanish (the badge's tooltip).
+        reason: String,
+    },
+}
+
+impl HeaderBadge {
+    /// The lower-case Spanish label painted in the header.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            HeaderBadge::Connected => "conectada",
+            HeaderBadge::Disconnected => "desconectada",
+            HeaderBadge::AuthRequired => "autenticación requerida",
+            HeaderBadge::SessionExpired => "sesión vencida",
+            HeaderBadge::Unavailable { .. } => "no disponible",
+        }
+    }
+}
+
 /// One row of the "Conectar" popover: a saved connection as the workspace
 /// summarised it (`docs/specs/06-etapa4-conexiones-y-cincel.md` §4 F1).
 ///
@@ -56,12 +92,45 @@ pub struct ChatConnection {
     pub agent_id: String,
     /// The label the user chose ("Claude · personal").
     pub label: String,
+    /// The agent type shown next to the label ("Claude", "Codex",
+    /// "Antigravity"), from `AgentKind::display_name`
+    /// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §3, D1).
+    #[serde(default)]
+    pub agent_name: String,
     /// The muted identity line ("ana@… · Max"), when the agent reported one.
+    ///
+    /// The chat no longer paints it (the popover and the header show only
+    /// icon, label, type and badge); Settings → Conexiones still does.
     pub identity: Option<String>,
     /// Already formatted "Usado hace 2 h", so this crate needs no clock.
+    ///
+    /// Not painted by the chat either; Settings → Conexiones shows it.
     pub last_used: String,
     /// Status badge.
     pub badge: ConnectionBadge,
+}
+
+impl ChatConnection {
+    /// The agent type the chat paints next to the label, or `None` when the
+    /// label is already exactly that type (case-insensitive): "Claude Claude"
+    /// is noise (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §2,
+    /// D2).
+    #[must_use]
+    pub fn type_label(&self) -> Option<&str> {
+        visible_agent_type(&self.label, &self.agent_name)
+    }
+}
+
+/// The agent type worth painting beside a connection label: `None` when the
+/// type is empty or the label is exactly the type, ignoring case.
+#[must_use]
+pub fn visible_agent_type<'a>(label: &str, agent_name: &'a str) -> Option<&'a str> {
+    let name = agent_name.trim();
+    if name.is_empty() || label.trim().eq_ignore_ascii_case(name) {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// The banner above the transcript when the active connection cannot work
@@ -220,6 +289,35 @@ impl AgentStatus {
     }
 }
 
+/// What the agent is doing during a turn: the activity row at the foot of the
+/// transcript (`docs/specs/10-etapa7-ronda2.md` §8, R5). A state, not an
+/// [`Entry`]: it is never stored with the conversation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentActivity {
+    /// Nothing arrived yet in the turn, or the agent is reasoning.
+    #[default]
+    Thinking,
+    /// A tool call is running.
+    Working,
+    /// The answer is being streamed.
+    Writing,
+    /// A permission request waits for the user.
+    WaitingPermission,
+}
+
+impl AgentActivity {
+    /// The Spanish text of the row.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentActivity::Thinking => "Pensando…",
+            AgentActivity::Working => "Trabajando…",
+            AgentActivity::Writing => "Escribiendo…",
+            AgentActivity::WaitingPermission => "Esperando permiso…",
+        }
+    }
+}
+
 /// A block of a user message, before it becomes an ACP `ContentBlock`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageBlock {
@@ -228,6 +326,88 @@ pub enum MessageBlock {
     /// A file chip inserted with `@`; becomes a `resource_link` with the
     /// absolute path (`chat.md`, acceptance criteria).
     File(PathBuf),
+    /// An attached image (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md`
+    /// §5.3.2): the JSON keeps only the reference, the bytes live in
+    /// `conversations/<id>/images/<file>` (D7). Added in
+    /// [`CONVERSATION_VERSION`] 2.
+    Image(ImageRef),
+    /// A review comment that left with the message (§6.6): painted as a card
+    /// under the text and the images, never sent again. Added in
+    /// [`CONVERSATION_VERSION`] 2.
+    Comment(crate::comments::SentCommentCard),
+}
+
+/// An image of a user message (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md`
+/// §5.3.2, D7).
+///
+/// The bytes are never serialised: the workspace writes [`Self::data`] to
+/// `<conversation dir>/images/<file>` when it saves the conversation and the
+/// panel paints a thumbnail from the data while it is in memory, or from
+/// that file ([`crate::ChatPanel::set_conversation_dir`]) once it is not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageRef {
+    /// `<sha256>.<ext>`, relative to the conversation's `images/` folder.
+    /// Empty for an image a `session/load` replayed (it is not stored).
+    pub file: String,
+    /// File name it was attached with, or "Imagen pegada".
+    pub name: String,
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+    pub mime_type: String,
+    /// Width of what travelled, in pixels.
+    pub width: u32,
+    /// Height of what travelled, in pixels.
+    pub height: u32,
+    /// Size of what travelled, in bytes.
+    pub bytes_len: u64,
+    /// The bytes, while they are in memory (until the workspace stored them,
+    /// and for as long as the conversation stays open).
+    #[serde(skip)]
+    pub data: Option<std::sync::Arc<[u8]>>,
+}
+
+impl ImageRef {
+    /// The reference of a prepared attachment, with its bytes in memory.
+    #[must_use]
+    pub fn from_prepared(image: &crate::attachments::PreparedImage) -> Self {
+        Self {
+            file: image.file_name(),
+            name: image.name.clone(),
+            mime_type: image.mime_type.to_string(),
+            width: image.width,
+            height: image.height,
+            bytes_len: image.bytes.len() as u64,
+            data: Some(image.bytes.clone()),
+        }
+    }
+
+    /// The SHA-256 the file is named after (`file` without its extension).
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        self.file
+            .rsplit_once('.')
+            .map_or(self.file.as_str(), |(stem, _)| stem)
+    }
+
+    /// "nombre · ancho × alto · tamaño".
+    #[must_use]
+    pub fn summary(&self) -> String {
+        crate::attachments::image_summary(&self.name, self.width, self.height, self.bytes_len)
+    }
+}
+
+/// Where the image viewer reads a sent image from
+/// ([`crate::ChatEvent::OpenImage`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatImageSource {
+    /// The stored file (`<conversation dir>/images/<sha256>.<ext>`).
+    File(PathBuf),
+    /// The bytes still in memory (not stored yet, or a replayed image).
+    Bytes {
+        /// Its MIME type.
+        mime_type: String,
+        /// The bytes.
+        data: std::sync::Arc<[u8]>,
+    },
 }
 
 /// One `@archivo` the user inserted in the draft, as the composer tracks it.
@@ -271,9 +451,22 @@ pub struct AgentText {
     pub markdown: String,
     /// Whether more chunks are still expected.
     pub streaming: bool,
-    /// The `gpui-kit` streaming state; rebuilt on import.
+    /// The `gpui-kit` states of its segments, prose and long code blocks
+    /// (`docs/specs/10-etapa7-ronda2.md` §10.3); rebuilt on import.
     #[serde(skip)]
-    pub view: Option<Entity<TextViewState>>,
+    pub segments: Vec<TextSegment>,
+}
+
+/// One segment of an [`AgentText`]: a byte range of its Markdown, what it
+/// holds and the `gpui-kit` state that paints it.
+#[derive(Clone, Debug)]
+pub struct TextSegment {
+    /// Bytes of [`AgentText::markdown`].
+    pub range: std::ops::Range<usize>,
+    /// Prose or a long code block.
+    pub kind: crate::code_folds::SegmentKind,
+    /// The state its `TextView` paints.
+    pub view: Entity<TextViewState>,
 }
 
 /// The agent's internal reasoning, collapsed by default.
@@ -547,7 +740,11 @@ pub struct Conversation {
 }
 
 /// The version [`Conversation`] is written with.
-pub const CONVERSATION_VERSION: u32 = 1;
+///
+/// 2 (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` D7) adds
+/// [`MessageBlock::Image`] and [`MessageBlock::Comment`]; a version 1 file
+/// reads unchanged, without images or comments ([`Conversation::migrate`]).
+pub const CONVERSATION_VERSION: u32 = 2;
 
 /// How long a conversation title gets before it is cut.
 pub const TITLE_MAX_CHARS: usize = 60;
@@ -592,6 +789,44 @@ impl Conversation {
         self
     }
 
+    /// Brings a conversation read from disk up to [`CONVERSATION_VERSION`].
+    ///
+    /// Version 1 → 2 changes no stored data (the new blocks are extra enum
+    /// variants), so a version 1 conversation simply has no images and no
+    /// comment cards; the next save writes it as version 2. A newer version
+    /// than this build knows is left as it is.
+    #[must_use]
+    pub fn migrate(mut self) -> Self {
+        if self.version < CONVERSATION_VERSION {
+            self.version = CONVERSATION_VERSION;
+        }
+        self
+    }
+
+    /// The images of the conversation whose bytes are still in memory and
+    /// that have a file name: what the workspace writes to
+    /// `<conversation dir>/images/` when it saves (D7), as
+    /// `(file name, bytes)`.
+    #[must_use]
+    pub fn images_to_store(&self) -> Vec<(String, std::sync::Arc<[u8]>)> {
+        let mut out: Vec<(String, std::sync::Arc<[u8]>)> = Vec::new();
+        for entry in &self.entries {
+            let Entry::UserMessage(message) = entry else {
+                continue;
+            };
+            for block in &message.blocks {
+                if let MessageBlock::Image(image) = block
+                    && let Some(data) = &image.data
+                    && !image.file.is_empty()
+                    && !out.iter().any(|(file, _)| file == &image.file)
+                {
+                    out.push((image.file.clone(), data.clone()));
+                }
+            }
+        }
+        out
+    }
+
     /// The row the history popover paints for it; `when` is the already
     /// formatted relative date, which only the workspace can produce.
     #[must_use]
@@ -622,9 +857,10 @@ pub fn conversation_title(entries: &[Entry]) -> String {
             let text: String = message
                 .blocks
                 .iter()
-                .map(|block| match block {
-                    MessageBlock::Text(text) => text.clone(),
-                    MessageBlock::File(path) => format!("@{}", file_name_label(path)),
+                .filter_map(|block| match block {
+                    MessageBlock::Text(text) => Some(text.clone()),
+                    MessageBlock::File(path) => Some(format!("@{}", file_name_label(path))),
+                    MessageBlock::Image(_) | MessageBlock::Comment(_) => None,
                 })
                 .collect::<Vec<_>>()
                 .join(" ");

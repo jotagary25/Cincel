@@ -20,7 +20,9 @@
 //! [`LinePair`], [`WordDiffs`], [`FileStatus`], [`TurnId`], [`BufferEdit`],
 //! [`FileOp`], [`Revert`], [`ReviewLocation`], [`Tracked`],
 //! [`RecomputeJob`], [`RecomputeResult`], [`RecomputeOutcome`], [`DiffData`],
-//! [`AgentReport`], [`LoadReport`], [`DropReason`], [`ReviewError`].
+//! [`AgentReport`], [`LoadReport`], [`DropReason`], [`ReviewError`];
+//! comments: [`CommentId`], [`CommentState`], [`CommentView`],
+//! [`SentComment`], [`SentRange`], [`CommentDropReason`].
 //!
 //! [`ReviewStore`] operations:
 //!
@@ -32,6 +34,7 @@
 //! | decisions | `accept_hunk`, `reject_hunk`, `accept_line`, `reject_line`, `accept_file`, `reject_file`, `accept_turn`, `reject_turn`, `accept_all`, `reject_all`, `undo_last_reject`, `can_undo_reject`, `undo_depth` |
 //! | queries | `file`, `files`, `hunks`, `hunk`, `stats`, `pending_count`, `pending_files`, `locations`, `next_hunk`, `prev_hunk` |
 //! | report | `report_for_agent`, `report_patches`, `set_formatted_text`, `forget_turn`, `set_workspace_root` |
+//! | comments | `add_comment`, `edit_comment`, `remove_comment`, `drop_comments_in`, `comment_buffer_event`, `comments`, `comment_count`, `comment_count_in`, `commented_paths`, `comment_state`, `take_comments_for_prompt`, `restore_comments`; pure [`format_feedback`] |
 //! | persistence | `save(dir)`, `load(dir, read_current)` |
 //!
 //! # Host protocol
@@ -70,14 +73,21 @@
 //!    undone reject reappears).
 //! 6. **Turns.** `begin_turn`/`end_turn` around each prompt; buttons are
 //!    disabled while `turn_active(path)`. Before the next prompt,
-//!    `report_for_agent(turn)` gives the note to attach, then `forget_turn`.
+//!    `take_comments_for_prompt` takes the unsent comments,
+//!    `report_for_agent(turn)` gives the patches, then `forget_turn`; and
+//!    [`format_feedback`] joins both into the block for the agent. If the
+//!    prompt does not go out, `restore_comments` puts the comments back.
+//!    Comments follow the buffer through `comment_buffer_event`, fed with
+//!    the same events as step 2 (for every watched path, tracked or not).
 //! 7. **Persistence.** `save(dir)` after decisions and saves; `load(dir,
 //!    read_current)` at startup (never writes files).
 //!
 //! Limits: files over 2 MB or 50 000 lines are `too_large`, files with a NUL
 //! in their first 8 KB are `binary`; both only support whole-file decisions.
 
+mod comments;
 pub mod diff;
+mod feedback;
 mod file;
 pub mod patch;
 mod persist;
@@ -87,6 +97,11 @@ mod store;
 mod text;
 mod types;
 
+pub use comments::{
+    COMMENT_MAX_CHARS, COMMENT_SNIPPET_MAX_BYTES, COMMENT_SNIPPET_MAX_LINES, CommentDropReason,
+    CommentId, CommentState, CommentView, SentComment, SentRange,
+};
+pub use feedback::{fence_for, format_feedback};
 pub use file::FileReview;
 pub use persist::{DropReason, LoadReport, STATE_VERSION};
 pub use recompute::{DiffData, RecomputeJob, RecomputeResult, compute_diff};

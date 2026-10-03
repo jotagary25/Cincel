@@ -11,8 +11,16 @@ autoexamples = false
 cincel-text = { path = "../cincel-text" }
 cincel-syntax = { path = "../cincel-syntax" }
 gpui = { workspace = true }
+# The editor's context menu (`ContextMenu`/`PopupMenu`, the same component the
+# file tree uses), the buttons of the comment boxes and the Lucide icons of
+# the comment mark (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md`
+# §6.5, D12). Already in the tree through the workspace and the chat.
+gpui-kit = { workspace = true }
 parking_lot = { workspace = true }
 regex = { workspace = true }
+# Only for `LineCopyMetadata`, the JSON mark `Ctrl+C` without a selection puts
+# on the clipboard item (`ClipboardItem::new_string_with_json_metadata`).
+serde = { workspace = true }
 tracing = { workspace = true }
 # Only to walk the tree `cincel-syntax` hands out (`SyntaxState::tree`) when
 # resolving the symbol under the cursor; the same workspace pin, so the `Tree`
@@ -27,7 +35,10 @@ tracing-subscriber = { workspace = true }
 # Enables gpui's test harness (`cargo test -p cincel-editor --features test-support`).
 # It is not on by default because it also turns on gpui leak detection, which
 # aborts the example window on exit.
-test-support = ["gpui/test-support"]
+# `gpui-kit/test-support` lets a test click a gpui-kit button by its
+# coordinates (the comment boxes); the fixed feature set of every test run
+# already turns it on through `cincel-workspace/test-support`.
+test-support = ["gpui/test-support", "gpui-kit/test-support"]
 
 [[example]]
 name = "phantom"

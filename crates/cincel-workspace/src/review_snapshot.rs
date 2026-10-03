@@ -986,6 +986,9 @@ impl Review {
         if !self.in_project(path, cx) || self.host_wrote_during_sweep(path) {
             return false;
         }
+        // A commented text file the agent turned into a binary loses its
+        // comments (spec 09 §6.2.11).
+        self.drop_comments_if_binary(path, cx);
         let Some(snapshot) = self.ready_snapshot() else {
             return false;
         };

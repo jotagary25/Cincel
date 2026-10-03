@@ -478,6 +478,120 @@ fn find_matches_limited(
     matches
 }
 
+// -- occurrences of the word under the cursor (spec 10 §7.1, E1) -------------
+
+/// Longest selection, in bytes, whose occurrences are marked.
+pub const MAX_OCCURRENCE_BYTES: usize = 256;
+
+/// What the editor marks the other occurrences of: the word under the cursor
+/// or the text of a one-row selection (`docs/specs/10-etapa7-ronda2.md` §7.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OccurrenceQuery {
+    /// The exact text looked for (case-sensitive).
+    pub text: String,
+    /// The character before an occurrence must not be a word character.
+    pub whole_word_start: bool,
+    /// The character after an occurrence must not be a word character.
+    pub whole_word_end: bool,
+    /// Buffer range of the occurrence the query comes from, never marked.
+    pub own: Range<usize>,
+}
+
+/// A word character: alphanumeric or `_` (the class `1` of the word
+/// movement in `view.rs`).
+pub fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+impl OccurrenceQuery {
+    /// The query for a cursor at byte `column` of `line` (which starts at
+    /// buffer offset `line_start`) with nothing selected: the word the cursor
+    /// is inside of or right at the end of, as a whole word.
+    pub fn for_cursor(line: &str, line_start: usize, column: usize) -> Option<Self> {
+        let column = column.min(line.len());
+        if !line.is_char_boundary(column) {
+            return None;
+        }
+        let inside = line[column..].chars().next().is_some_and(is_word_char);
+        let at_end = line[..column].chars().next_back().is_some_and(is_word_char);
+        if !inside && !at_end {
+            return None;
+        }
+        let start = line[..column]
+            .char_indices()
+            .rev()
+            .take_while(|(_, ch)| is_word_char(*ch))
+            .last()
+            .map_or(column, |(ix, _)| ix);
+        let end = line[column..]
+            .char_indices()
+            .find(|(_, ch)| !is_word_char(*ch))
+            .map_or(line.len(), |(ix, _)| column + ix);
+        Some(Self {
+            text: line[start..end].to_string(),
+            whole_word_start: true,
+            whole_word_end: true,
+            own: line_start + start..line_start + end,
+        })
+    }
+
+    /// The query for a selection inside one buffer row: `text` is what is
+    /// selected and `range` its buffer range. `None` when it is empty, longer
+    /// than [`MAX_OCCURRENCE_BYTES`], only whitespace or crosses a line.
+    pub fn for_selection(text: &str, range: Range<usize>) -> Option<Self> {
+        if text.is_empty()
+            || text.len() > MAX_OCCURRENCE_BYTES
+            || text.contains('\n')
+            || text.trim().is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            text: text.to_string(),
+            whole_word_start: text.chars().next().is_some_and(is_word_char),
+            whole_word_end: text.chars().next_back().is_some_and(is_word_char),
+            own: range,
+        })
+    }
+}
+
+/// The occurrences of `query` in `text`, which starts at buffer offset `base`:
+/// exact (case-sensitive) and non-overlapping, ascending, with the word
+/// boundaries the query asks for, without [`OccurrenceQuery::own`], as buffer
+/// ranges. At most [`MAX_MATCHES`] of them.
+pub fn find_occurrences(text: &str, base: usize, query: &OccurrenceQuery) -> Vec<Range<usize>> {
+    let needle = query.text.as_str();
+    let mut found = Vec::new();
+    if needle.is_empty() {
+        return found;
+    }
+    let mut from = 0;
+    while from <= text.len() {
+        let Some(ix) = text[from..].find(needle) else {
+            break;
+        };
+        let start = from + ix;
+        let end = start + needle.len();
+        let start_ok =
+            !query.whole_word_start || !text[..start].chars().next_back().is_some_and(is_word_char);
+        let end_ok = !query.whole_word_end || !text[end..].chars().next().is_some_and(is_word_char);
+        if !(start_ok && end_ok) {
+            // Candidates may overlap a rejected one: step one character.
+            from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        let range = base + start..base + end;
+        if range != query.own {
+            found.push(range);
+            if found.len() >= MAX_MATCHES {
+                break;
+            }
+        }
+        from = end;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -51,6 +51,10 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 gpui_platform = { workspace = true }
+# Only to generate the test images of `image_e2e_tests.rs` (E7-G): nothing
+# binary lives in the repo, and the crate is already in the tree through
+# `cincel-chat`.
+image = { workspace = true }
 # Only to build a minimal, valid Node `.tar.xz` release in
 # `settings_update_e2e_tests.rs` (§5.6.1): the same format
 # `cincel-connections`'s own engine tests already build, reused here rather

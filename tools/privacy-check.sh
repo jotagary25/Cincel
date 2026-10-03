@@ -189,6 +189,10 @@ run_awk() {
 is_text_like() {
     case "$1" in
         *.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf) return 1 ;;
+        # Third-party license texts are reproduced verbatim, as their
+        # licenses require; the addresses in them belong to those crates'
+        # authors, never to this repo's maintainer.
+        *THIRD-PARTY-LICENSES.html) return 1 ;;
         *) return 0 ;;
     esac
 }

@@ -513,6 +513,7 @@ fn cancelling_a_prompt_waiting_for_the_sweep_drops_it(cx: &mut TestAppContext) {
 /// stretch of main-thread work goes over the spec's 8 ms, and the result is
 /// exactly the one of the inline sweep.
 #[gpui::test]
+#[ignore = "medición de tiempo: se corre sola con --ignored en la máquina de referencia, con la máquina tranquila (spec 09 §12)"]
 fn the_sweep_of_five_thousand_files_never_blocks_the_main_thread(cx: &mut TestAppContext) {
     init(cx);
     let background = big_project();

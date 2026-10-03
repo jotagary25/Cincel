@@ -109,10 +109,10 @@ pub use permission_policy::{AutoAnswer, PermissionPolicy, pick_allow_option, pic
 pub use process_env::ProcessEnv;
 pub use protocol::{
     AgentCommand, AgentEvent, AuthAccount, AuthMethodKind, AuthMethodView, AuthStatus,
-    AuthStatusKind, ElicitationResponder, FileChangeReport, FsError, McpServerSpec,
-    PermissionOutcome, PermissionRequestId, PermissionResponder, PromptBlock,
-    agent_supports_auth_status, agent_supports_file_change_report, agent_supports_logout,
-    auth_required_message, logged_out_status_text,
+    AuthStatusKind, ElicitationResponder, FileChangeReport, FsError, IMAGE_MIME_TYPES,
+    McpServerSpec, PermissionOutcome, PermissionRequestId, PermissionResponder, PromptBlock,
+    agent_supports_auth_status, agent_supports_file_change_report, agent_supports_images,
+    agent_supports_logout, auth_required_message, logged_out_status_text, validate_prompt_blocks,
 };
 pub use registry::{
     AgentDescriptor, AgentRegistry, BinaryTarget, CACHE_TTL, CustomAgent, Distribution, LaunchSpec,

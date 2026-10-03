@@ -24,7 +24,8 @@ recientes ▸**.
 
 - **Chat**, a la izquierda: acá hablás con el agente. Arriba tiene el botón
   **Conectar** para elegir con qué agente trabajar (ver
-  [Conexiones](conexiones.md)).
+  [Conexiones](conexiones.md)); además de texto, podés mandarle imágenes (ver
+  [El chat](chat.md)).
 - **Editor**, en el centro: tus archivos, en pestañas. Acá también se ve la
   revisión de los cambios que hace el agente (ver
   [Revisión de cambios](revision.md)).

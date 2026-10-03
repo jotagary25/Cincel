@@ -13,13 +13,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cincel_chat::{
-    CONVERSATION_VERSION, Conversation, ConversationSummary, LEGACY_CONNECTION_GROUP,
-    TranscriptDump, conversation_title,
+    CONVERSATION_VERSION, Conversation, ConversationSummary, Entry, LEGACY_CONNECTION_GROUP,
+    MessageBlock, TranscriptDump, conversation_title,
 };
 use serde::{Deserialize, Serialize};
 
 /// Directory, under the project's state directory, holding the conversations.
 const CONVERSATIONS_DIR: &str = "conversations";
+/// Where the sent images of a conversation live, inside its own folder
+/// (`conversations/<id>/images/<sha256>.<ext>`, spec 09 D7, §5.3.4).
+const IMAGES_DIR: &str = "images";
 /// The index that lists them.
 const INDEX_FILE: &str = "index.json";
 /// The single transcript of the previous format.
@@ -154,6 +157,7 @@ impl ConversationStore {
             .partition(|entry| entry.connection_id.as_deref() == Some(connection_id));
         for entry in &gone {
             let _ = std::fs::remove_file(self.path_of(&entry.id));
+            self.remove_extras(&entry.id);
         }
         index.conversations = kept;
         if !gone.is_empty()
@@ -170,6 +174,21 @@ impl ConversationStore {
         &self.dir
     }
 
+    /// The folder of one conversation's extras, `<dir>/<id>/`: the chat paints
+    /// its sent images from `<this>/images/`
+    /// (`ChatPanel::set_conversation_dir`).
+    #[must_use]
+    pub fn conversation_dir(&self, id: &str) -> PathBuf {
+        self.dir.join(id)
+    }
+
+    /// Where the sent images of a conversation are kept:
+    /// `<dir>/<id>/images/` (§5.3.4).
+    #[must_use]
+    pub fn image_dir(&self, id: &str) -> PathBuf {
+        self.conversation_dir(id).join(IMAGES_DIR)
+    }
+
     /// The conversations of this project, newest first.
     #[must_use]
     pub fn index(&self) -> Vec<IndexEntry> {
@@ -183,7 +202,9 @@ impl ConversationStore {
     pub fn load(&self, id: &str) -> Option<Conversation> {
         let raw = std::fs::read_to_string(self.path_of(id)).ok()?;
         match serde_json::from_str::<Conversation>(&raw) {
-            Ok(conversation) => Some(conversation),
+            // A version 1 file has no images and no comment cards: it loads
+            // as it is and is written back as version 2 (§5.3.4).
+            Ok(conversation) => Some(conversation.migrate()),
             Err(error) => {
                 tracing::warn!(%error, id, "no se pudo leer la conversación guardada");
                 None
@@ -191,9 +212,12 @@ impl ConversationStore {
         }
     }
 
-    /// Writes `conversation` and refreshes its row in the index.
+    /// Writes `conversation` and refreshes its row in the index. The images
+    /// of its messages that are still only in memory go first, to
+    /// `<dir>/<id>/images/` (the JSON only references them).
     pub fn save(&self, conversation: &Conversation) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
+        self.store_images(conversation)?;
         let serialized = serde_json::to_string_pretty(conversation)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         std::fs::write(self.path_of(&conversation.id), serialized)?;
@@ -221,8 +245,14 @@ impl ConversationStore {
     /// Removes a conversation, returning what was removed so the undo toast
     /// can put it back.
     pub fn delete(&self, id: &str) -> Option<Conversation> {
-        let conversation = self.load(id);
+        let mut conversation = self.load(id);
+        // The images go with the conversation, so the undo has to carry their
+        // bytes: saving it again writes them back.
+        if let Some(conversation) = &mut conversation {
+            self.hydrate_images(conversation);
+        }
         let _ = std::fs::remove_file(self.path_of(id));
+        self.remove_extras(id);
         let mut index = self.read_index();
         let before = index.conversations.len();
         index.conversations.retain(|entry| entry.id != id);
@@ -282,6 +312,64 @@ impl ConversationStore {
         self.dir.join(format!("{id}.json"))
     }
 
+    /// Writes the images of `conversation` whose bytes are in memory and that
+    /// are not in its `images/` folder yet. The name is the content's
+    /// SHA-256, so an existing file is already the right one; each file is
+    /// written to a `.tmp` and renamed, so a crash never leaves half an image
+    /// under its final name.
+    fn store_images(&self, conversation: &Conversation) -> std::io::Result<()> {
+        let wanted = conversation.images_to_store();
+        if wanted.is_empty() || !is_safe_name(&conversation.id) {
+            return Ok(());
+        }
+        let dir = self.image_dir(&conversation.id);
+        std::fs::create_dir_all(&dir)?;
+        for (file, bytes) in wanted {
+            if !is_safe_name(&file) {
+                tracing::warn!(file, "nombre de imagen inválido; no se guarda");
+                continue;
+            }
+            let target = dir.join(&file);
+            if target.is_file() {
+                continue;
+            }
+            let partial = dir.join(format!("{file}.tmp"));
+            std::fs::write(&partial, &*bytes)?;
+            std::fs::rename(&partial, &target)?;
+        }
+        Ok(())
+    }
+
+    /// Reads the stored files of the images whose bytes are not in memory, so
+    /// a conversation that is about to lose its folder keeps them.
+    fn hydrate_images(&self, conversation: &mut Conversation) {
+        if !is_safe_name(&conversation.id) {
+            return;
+        }
+        let dir = self.image_dir(&conversation.id);
+        for entry in &mut conversation.entries {
+            let Entry::UserMessage(message) = entry else {
+                continue;
+            };
+            for block in &mut message.blocks {
+                if let MessageBlock::Image(image) = block
+                    && image.data.is_none()
+                    && is_safe_name(&image.file)
+                    && let Ok(bytes) = std::fs::read(dir.join(&image.file))
+                {
+                    image.data = Some(std::sync::Arc::from(bytes));
+                }
+            }
+        }
+    }
+
+    /// Removes the folder of one conversation (its `images/`), if any.
+    fn remove_extras(&self, id: &str) {
+        if is_safe_name(id) {
+            let _ = std::fs::remove_dir_all(self.conversation_dir(id));
+        }
+    }
+
     fn read_index(&self) -> Index {
         let path = self.dir.join(INDEX_FILE);
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -299,6 +387,13 @@ impl ConversationStore {
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         std::fs::write(self.dir.join(INDEX_FILE), serialized)
     }
+}
+
+/// Whether `name` is a single plain path component (no separators, not `.`
+/// or `..`, not empty): the only kind of id or file name that may be joined
+/// to a directory before writing or deleting under it.
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
 /// `~/.local/state/cincel/workspaces`, where every project keeps its state.

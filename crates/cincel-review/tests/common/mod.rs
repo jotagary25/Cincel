@@ -75,6 +75,7 @@ impl Harness {
             let source = *source;
             self.store
                 .buffer_edited(&p(path), &event, &snapshot, source);
+            self.store.comment_buffer_event(&p(path), &event, &snapshot);
         }
     }
 

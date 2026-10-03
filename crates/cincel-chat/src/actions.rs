@@ -65,6 +65,10 @@ named_actions!(chat, [
     PopoverPrev => "popover_prev",
     /// Confirms the selected row of the open popover.
     PopoverConfirm => "popover_confirm",
+    /// Does what the paperclip button does: asks the workspace for the file
+    /// dialog ([`crate::ChatEvent::PickImages`]). Unbound by default
+    /// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §7.1).
+    AttachImage => "attach_image",
 ]);
 
 /// The default Linux key bindings of the chat (`docs/specs/02-visual.md` §8).

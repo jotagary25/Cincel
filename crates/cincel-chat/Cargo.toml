@@ -17,12 +17,19 @@ cincel-text = { path = "../cincel-text" }
 # feature can reach it (a feature cannot refer to a dev-dependency).
 gpui = { workspace = true }
 gpui-kit = { workspace = true }
+# Attached images (E7-E): detect, reduce and encode (already in the tree
+# through GPUI, which enables more formats), the SHA-256 the stored file is
+# named after, and the base64 of a replayed image.
+image = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 gpui_platform = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 # Enables gpui's test harness (`cargo test -p cincel-chat --features test-support`).

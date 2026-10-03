@@ -34,6 +34,60 @@ A partir de ahí, esa conexión queda en la lista y podés elegirla desde
 **Conectar** cuando quieras. Solo una conexión está activa a la vez en el
 chat: si elegís otra, la anterior se detiene (no se borra nada).
 
+## La lista de conexiones y el botón del chat
+
+El menú que se abre con **Conectar** (arriba en el chat) muestra una fila
+por conexión, en **dos líneas**:
+
+- a la izquierda, el **icono** del proveedor;
+- en el medio, arriba el **nombre** que le diste a la conexión y abajo, en
+  gris y más chico, **qué agente es** (Claude, Codex o Antigravity). El tipo
+  se muestra siempre, también cuando el nombre es justo ese tipo: una
+  conexión que se llama "Claude" y es de Claude dice "Claude" arriba y
+  "Claude" abajo;
+- a la derecha, la **etiqueta de estado**: **Conectada**, **Sesión vencida**
+  o **No disponible** (si pasás el mouse por encima, un globo explica el
+  motivo). A las que tienen la sesión vencida les aparece al lado **Volver a
+  conectar**, y a las no disponibles, **Reparar**.
+
+Las filas no muestran el correo de la cuenta, ni el plan, ni cuándo la
+usaste por última vez.
+
+El botón de arriba del chat (el que reemplaza a **Conectar** cuando ya hay
+una conexión activa) es más simple: muestra el icono, el **nombre completo**
+de la conexión y, a su lado, **una sola etiqueta** con el estado de la
+conexión: **conectada**, **desconectada**, **sesión vencida**, **no
+disponible** o **autenticación requerida**. Esa etiqueta habla de la
+conexión, no de lo que hace el agente, así que no cambia mientras trabaja:
+lo que está haciendo se ve abajo, en la conversación (ver
+[El chat](chat.md#arriba-del-chat)). El botón no repite el tipo de agente;
+ese dato está en el menú. La lista de **Eliminar conexión…** muestra icono,
+nombre y tipo en una sola línea.
+
+El **correo de la cuenta**, el **plan** y el **"Usado hace…"** ya no se ven
+en el menú ni en el botón: están en `Ctrl+,` → **Conexiones**, en la fila de
+cada conexión, junto a su nombre y sus acciones. (El aviso "Listo: conectado
+como …" que ves justo al terminar de conectar sí muestra la cuenta: es el
+mensaje de ese momento, no una lista.)
+
+### Los menús se cierran solos
+
+El menú de conexiones, el historial de conversaciones (el reloj), el selector
+de modelo y modo del agente, y los menús de `@` y `/` del chat se cierran
+solos cuando:
+
+- hacés **clic en cualquier otro lado** (el editor, el árbol, el texto de la
+  conversación…),
+- pasás a otra zona con el teclado (por ejemplo con `Ctrl+L`),
+- apretás **`Esc`**, o
+- la ventana de Cincel deja de estar en primer plano (cambiás a otro
+  programa).
+
+Un clic sobre el mismo botón que abrió el menú lo cierra (y no lo vuelve a
+abrir). Elegir una fila de la lista sigue funcionando como siempre. Lo mismo
+vale para el menú de la barra de título, el del árbol de archivos y el del
+clic derecho en el editor.
+
 ## Administrar tus conexiones
 
 Desde la pestaña de ajustes (`Ctrl+,` → **Conexiones**) o desde el menú
@@ -55,9 +109,10 @@ contextual de cada fila en el popover **Conectar**:
 ## Sesión vencida
 
 Si el token de una conexión venció o la contraseña de esa cuenta cambió,
-la conexión aparece en la lista con la insignia **"Sesión vencida"** y el
-chat muestra un aviso con el botón **Volver a conectar**, que repite el
-inicio de sesión sin perder el nombre ni el historial.
+la conexión aparece en la lista con la etiqueta **"Sesión vencida"**, la
+etiqueta de arriba del chat dice **sesión vencida** y el chat muestra un
+aviso con el botón **Volver a conectar**, que repite el inicio de sesión
+sin perder el nombre ni el historial.
 
 ## Actualizar el adaptador y Node
 

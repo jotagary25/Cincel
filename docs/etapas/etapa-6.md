@@ -596,3 +596,35 @@ Lo que esta etapa dejó anotado para más adelante, sin fecha asignada:
 8. **Paquetes en `dist/`** (raíz del repo, ignorado por git) en vez de
    `target/dist`, con el tarball ya extraído al lado para que el instalador
    esté a la vista.
+
+## Publicación (2026-09-29 y 30): lo que enseñó el primer release real
+
+El repositorio público es `github.com/jotagary25/Cincel`; la primera versión
+publicada es la **0.1.0** (el autor prefirió no arrancar en 1.0.0; el
+número vive solo en `Cargo.toml`, el resto lo lee de ahí). Lo que falló en
+GitHub y no había fallado acá, con su causa:
+
+1. **Tests que asumían herramientas del entorno** (`cincel-acp::registry`):
+   tres tests daban por hecho `uvx` y `node` en `PATH`; la máquina de GitHub
+   no trae `uvx`. Ahora comprueban el comando si la herramienta está y el
+   error `UvMissing`/`NodeMissing` si no.
+2. **Presupuesto de tiempo sin factor** (`cincel-syntax`): el test de 5 000
+   líneas no leía `CINCEL_PERF_BUDGET_FACTOR` (el CI lo fija en 4) y falló
+   por 0,8 ms en la máquina compartida.
+3. **Test que no esperaba a un hilo real** (`settings_update_e2e_tests`): la
+   comprobación de actualizaciones corre en un hilo del sistema; el test
+   miraba el resultado tras un solo `run_until_parked`. Ahora espera hasta
+   10 s.
+4. **El workflow de release estaba copiado a mano** de `packaging/build.sh`
+   y nunca se había ejecutado: tres rutas mal (archivo de licencias de
+   terceros, carpeta del tarball, ruta relativa de `verify.sh` que Docker
+   rechaza). Se corrigieron y el job entero se auditó ejecutando cada bloque
+   `run:` en el mismo orden, primero en la máquina de referencia y después en
+   un clon limpio dentro de la imagen Ubuntu 22.04 del empaquetado.
+   Regla nueva (`asteroid-work-rules`): nada que "solo corre en GitHub" se
+   entrega sin ejecutarlo localmente paso por paso.
+
+Procedimiento que quedó validado: push a `main` → CI en verde → etiqueta
+`vX.Y.Z` → Release (build, verify, borrador) → el autor instala el `.deb` del
+borrador y publica. Para mover una etiqueta tras un arreglo:
+`git push origin --delete vX.Y.Z && git tag -d vX.Y.Z && git tag -a vX.Y.Z -m … && git push origin vX.Y.Z`.

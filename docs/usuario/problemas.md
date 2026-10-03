@@ -9,6 +9,33 @@ insignia **"Sesión vencida"** y el chat muestra un banner ("La sesión de
 de sesión: conservás el nombre de la conexión y todas sus conversaciones
 anteriores. Ver [Conexiones](conexiones.md).
 
+## «Nombre» no acepta imágenes
+
+Al adjuntar una imagen al chat (con `Ctrl+V`, arrastrándola o con el botón del
+clip) ves el aviso **"«Nombre» no acepta imágenes"**, con el nombre de tu
+conexión. Significa que ese agente le dijo a Cincel que no sabe leer
+imágenes, así que Cincel no la adjunta. Qué hacer:
+
+- Probá con otra conexión (**Conectar** arriba del chat): hoy Claude, Codex y
+  Antigravity las aceptan.
+- Si ya habías adjuntado imágenes y cambiaste de conexión, ves arriba de la
+  caja "«Nombre» no acepta imágenes: quitá las imágenes para enviar". Quitalas
+  con la `×` de cada miniatura (o cambiá de nuevo a una conexión que las
+  acepte) y podés enviar.
+- Si el agente sí las acepta pero el modelo elegido no (pasa con algunos
+  modelos de Codex), el agente contesta con un error en el chat: elegí otro
+  modelo en el selector de abajo de la caja.
+
+Ver [El chat](chat.md#imágenes).
+
+## Conectá un agente para adjuntar imágenes
+
+Si intentás adjuntar una imagen sin ninguna conexión activa (todavía no
+conectaste un agente, o la conexión se está iniciando), ves el aviso
+**"Conectá un agente para adjuntar imágenes"** y no se adjunta nada. Tocá
+**Conectar** arriba del chat y elegí o creá una conexión (ver
+[Conexiones](conexiones.md)); cuando esté activa, volvé a intentarlo.
+
 ## No tengo navegador, o no se abre solo
 
 Al conectar un agente o renovar una sesión, Cincel te muestra el enlace de

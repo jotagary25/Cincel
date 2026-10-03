@@ -14,10 +14,13 @@ use std::sync::Arc;
 
 use cincel_syntax::{CancelFlag, HighlightId, LanguageRegistry, SyntaxState};
 use cincel_text::Buffer;
-use gpui::{App, AppContext as _, Entity, HighlightStyle, SharedString, StyleRefinement, px};
+use gpui::{
+    App, AppContext as _, Entity, HighlightStyle, Pixels, SharedString, StyleRefinement, Window, px,
+};
 use gpui_kit::base::TextView;
 use gpui_kit::base::text::{CodeBlock, TextViewState, TextViewStyle};
 
+use crate::code_folds::CODE_FOLD_VISIBLE_LINES;
 use crate::settings::{CODE_BLOCK_HEADER, CODE_BLOCK_RADIUS, TEXT_CODE, TEXT_LABEL, heading_size};
 use crate::theme::{ChatTheme, alpha};
 
@@ -149,6 +152,42 @@ pub fn text_view_style_scaled(theme: &ChatTheme, scale: f32) -> TextViewStyle {
         .with_dark(true)
 }
 
+/// [`text_view_style_scaled`] for a folded long code block
+/// (`docs/specs/10-etapa7-ronda2.md` §10.2): its `code_block` box is capped
+/// at `max_height` and clips what does not fit, so the box keeps its own
+/// border and corners.
+#[must_use]
+pub fn text_view_style_folded(theme: &ChatTheme, scale: f32, max_height: Pixels) -> TextViewStyle {
+    use gpui::Styled as _;
+    text_view_style_scaled(theme, scale).with_code_block(
+        code_block_style_scaled(theme, scale)
+            .max_h(max_height)
+            .overflow_hidden(),
+    )
+}
+
+/// The height of a code line at the zoom `scale`, computed the way
+/// `gpui-kit` computes a line for `TextView::max_lines`: the window's text
+/// style (what the block inherits) at the code size, through
+/// `TextStyle::line_height_in_pixels`.
+#[must_use]
+pub fn code_line_height(window: &Window, scale: f32) -> Pixels {
+    let mut style = window.text_style();
+    style.font_size = px(TEXT_CODE * scale).into();
+    style.line_height_in_pixels(window.rem_size())
+}
+
+/// The height of a folded long code block (§10.2): the header and the top
+/// padding, [`CODE_FOLD_VISIBLE_LINES`] code lines, the bottom padding and
+/// the 1 px border above and below.
+#[must_use]
+pub fn folded_code_block_height(line_height: Pixels, scale: f32) -> Pixels {
+    px((CODE_BLOCK_HEADER + 6.) * scale)
+        + line_height * CODE_FOLD_VISIBLE_LINES as f32
+        + px(8. * scale)
+        + px(2.)
+}
+
 /// The base `gpui-kit` scales headings from; irrelevant once
 /// `with_heading_font_size` pins every level, kept equal to the body size.
 const TEXT_BODY_FOR_HEADINGS: f32 = crate::settings::TEXT_BODY;
@@ -180,11 +219,31 @@ pub fn markdown_element_scaled(
     highlighter: CodeHighlighter,
     on_copy: CopyHandler,
 ) -> TextView {
+    markdown_element_styled(
+        state,
+        theme,
+        scale,
+        text_view_style_scaled(theme, scale),
+        highlighter,
+        on_copy,
+    )
+}
+
+/// [`markdown_element_scaled`] with an explicit style: a folded long code
+/// block passes [`text_view_style_folded`].
+pub fn markdown_element_styled(
+    state: &Entity<TextViewState>,
+    theme: &ChatTheme,
+    scale: f32,
+    style: TextViewStyle,
+    highlighter: CodeHighlighter,
+    on_copy: CopyHandler,
+) -> TextView {
     let button_text = theme.text_muted;
     let button_hover = theme.text;
     TextView::new(state)
         .selectable(true)
-        .style(text_view_style_scaled(theme, scale))
+        .style(style)
         .code_block_highlighter(move |block| highlighter.highlight(block))
         .code_block_actions(move |block, _window, _cx| {
             let code = block.code().to_string();

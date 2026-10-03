@@ -11,7 +11,8 @@
 //! - `Editor && searching`: while the search bar is open,
 //! - `Editor && searching && replacing`: while the bar is in replace mode and
 //!   the "Reemplazar…" field has the keyboard,
-//! - `Editor && review_hunk_under_cursor`: while the cursor is inside a hunk.
+//! - `Editor && review_hunk_under_cursor`: while the cursor is inside a hunk,
+//! - `Editor && comment_box`: the field of a comment box (a nested editor).
 //!
 //! `Ctrl+Enter` and `Ctrl+Backspace` are bound to the review actions **only**
 //! in the third context; in plain `Editor` the same keys insert a newline and
@@ -28,6 +29,9 @@ pub const CONTEXT_SEARCHING: &str = "Editor && searching";
 pub const CONTEXT_REPLACING: &str = "Editor && searching && replacing";
 /// Key-binding context predicate while the cursor is inside a review hunk.
 pub const CONTEXT_REVIEW: &str = "Editor && review_hunk_under_cursor";
+/// Key-binding context predicate of the field of a comment box (the nested
+/// editor), `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §7.2.
+pub const CONTEXT_COMMENT_BOX: &str = "Editor && comment_box";
 
 /// Declares unit-struct actions with explicit registered names.
 macro_rules! named_actions {
@@ -146,6 +150,11 @@ named_actions!(editor, [
     ToggleSoftWrap => "toggle_soft_wrap",
     /// Toggles the whitespace indicators.
     ToggleWhitespace => "toggle_whitespace",
+    /// Scrolls the view one row up without moving the cursor or the selection.
+    ScrollLineUp => "scroll_line_up",
+    /// Scrolls the view one row down without moving the cursor or the
+    /// selection.
+    ScrollLineDown => "scroll_line_down",
     /// Asks the host to save the buffer (`EditorEvent::SaveRequested`).
     Save => "save",
     /// Closes the search bar or the prompt, or collapses the selection.
@@ -183,6 +192,14 @@ named_actions!(editor, [
     Lowercase => "lowercase",
     /// Sorts the lines covered by the selection.
     SortLines => "sort_lines",
+    /// Opens a comment box for the agent below the rows of the selection
+    /// (or of the cursor; inside a pending hunk without a selection, the
+    /// hunk's own comment). Does nothing in a text field.
+    CommentSelection => "comment_selection",
+    /// Saves the open comment box (`Ctrl+Enter` in it).
+    SaveComment => "save_comment",
+    /// Closes the open comment box without saving (`Esc` in it).
+    CancelComment => "cancel_comment",
 ]);
 
 named_actions!(review, [
@@ -208,6 +225,9 @@ named_actions!(review, [
     OpenReviewPanel => "open_review_panel",
     /// Asks the host to undo the last rejection.
     UndoLastReject => "undo_last_reject",
+    /// Opens the comment box of the hunk under the cursor (the pill's
+    /// "Comentar"; no default key).
+    CommentHunk => "comment_hunk",
 ]);
 
 /// The default Linux key bindings of the editor (`docs/specs/02-visual.md` §8
@@ -223,6 +243,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
     let searching = Some(CONTEXT_SEARCHING);
     let review = Some(CONTEXT_REVIEW);
     let replacing = Some(CONTEXT_REPLACING);
+    let comment_box = Some(CONTEXT_COMMENT_BOX);
     vec![
         // Movement.
         KeyBinding::new("left", MoveLeft, editor),
@@ -277,6 +298,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-j", JoinLines, editor),
         KeyBinding::new("ctrl-shift-l", SelectLine, editor),
         KeyBinding::new("ctrl-d", SelectNext, editor),
+        // Comments for the agent (spec 09 §7.1; free in every default keymap).
+        KeyBinding::new("ctrl-shift-m", CommentSelection, editor),
         // `Ctrl+Shift+\`; layouts that report the shifted key as `|` get the
         // second binding.
         KeyBinding::new("ctrl-shift-\\", MoveToMatchingBracket, editor),
@@ -288,6 +311,11 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-f3", FindPrev, editor),
         KeyBinding::new("ctrl-g", GoToLine, editor),
         KeyBinding::new("alt-z", ToggleSoftWrap, editor),
+        // Spec 10 §7.7: scroll a row without moving the cursor, and the
+        // whitespace indicators of this tab (free in every default keymap).
+        KeyBinding::new("ctrl-up", ScrollLineUp, editor),
+        KeyBinding::new("ctrl-down", ScrollLineDown, editor),
+        KeyBinding::new("ctrl-alt-w", ToggleWhitespace, editor),
         KeyBinding::new("ctrl-s", Save, editor),
         KeyBinding::new("escape", Cancel, editor),
         // Search bar.
@@ -320,6 +348,11 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         // `Enter` / `Ctrl+Enter` win while it has the keyboard.
         KeyBinding::new("enter", ReplaceNext, replacing),
         KeyBinding::new("ctrl-enter", ReplaceAll, replacing),
+        // The field of a comment box is the deepest node while it has the
+        // keyboard, and these come last: `Ctrl+Enter` saves the comment
+        // (never accepts the hunk the box hangs from) and `Esc` closes it.
+        KeyBinding::new("ctrl-enter", SaveComment, comment_box),
+        KeyBinding::new("escape", CancelComment, comment_box),
     ]
 }
 

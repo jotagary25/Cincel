@@ -314,6 +314,11 @@ fn updating_node_from_the_settings_tab_completes(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
+    // The install runs on a real thread too: wait for the view to report it
+    // done before looking at the runtime, or a slow machine fails here.
+    let info = wait_for_info(&view, cx, |info| {
+        info.operation.is_none() && info.node.installed.as_deref() == Some(NODE_VERSION)
+    });
     assert_eq!(
         engine
             .runtime()
@@ -322,9 +327,6 @@ fn updating_node_from_the_settings_tab_completes(cx: &mut TestAppContext) {
         Some(NODE_VERSION.to_string()),
         "el runtime instalado tiene que apuntar a la versión nueva"
     );
-    let info = wait_for_info(&view, cx, |info| {
-        info.operation.is_none() && info.node.installed.as_deref() == Some(NODE_VERSION)
-    });
     assert_eq!(info.node.installed.as_deref(), Some(NODE_VERSION));
     assert_eq!(info.node.update, None, "ya no queda nada para ofrecer");
     assert!(info.operation.is_none());

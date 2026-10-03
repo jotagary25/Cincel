@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use cincel_editor::{EditorEvent, EditorView, ReviewAction, shared};
+use cincel_editor::{EditorEvent, EditorView, ReviewAction, SaveCleanup, shared};
 use cincel_project::{BufferChange, BufferHandle, OpenError, ReloadOutcome};
 use cincel_syntax::Language;
 use cincel_text::{Buffer, BufferEvent, EditSource, LineEnding, Point, SubscriptionId};
@@ -1014,11 +1014,14 @@ impl CenterPanel {
             crate::toast::warn("El archivo está abierto en solo lectura", cx);
             return false;
         }
+        let editor = editor
+            .cloned()
+            .or_else(|| self.tab_for(path).map(|tab| tab.editor().clone()));
+        if let Some(editor) = &editor {
+            self.clean_up_before_save(path, editor, cx);
+        }
         match project.update(cx, |project, cx| project.save(path, cx)) {
             Ok(()) => {
-                let editor = editor
-                    .cloned()
-                    .or_else(|| self.tab_for(path).map(|tab| tab.editor().clone()));
                 if let Some(editor) = editor {
                     editor.update(cx, |editor, cx| editor.mark_saved(cx));
                 }
@@ -1032,6 +1035,36 @@ impl CenterPanel {
                 false
             }
         }
+    }
+
+    /// The cleanup of `files.trim_trailing_whitespace_on_save` and
+    /// `files.ensure_final_newline_on_save` (`docs/specs/10-etapa7-ronda2.md`
+    /// §7.8): one `Ctrl+Z`-able transaction in the editor, right before the
+    /// buffer goes to disk. Every way of saving goes through `save_path`, so
+    /// they all get it. Nothing is cleaned while the agent has a turn running
+    /// on the file (its writes and the user's would mix, the same rule as
+    /// the autosave), and Markdown keeps its trailing blanks (two spaces at
+    /// the end of a line are a line break there).
+    fn clean_up_before_save(&self, path: &Path, editor: &Entity<EditorView>, cx: &mut App) {
+        let (turn_active, tracked) = {
+            let review = self.review.borrow();
+            (review.turn_active, review.tracked.contains(path))
+        };
+        if turn_active && tracked {
+            return;
+        }
+        let files = crate::settings::settings(cx).files;
+        let markdown = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+            });
+        let options = SaveCleanup {
+            trim_trailing_whitespace: files.trim_trailing_whitespace_on_save && !markdown,
+            ensure_final_newline: files.ensure_final_newline_on_save,
+        };
+        editor.update(cx, |editor, cx| editor.clean_up_for_save(options, cx));
     }
 
     /// Saves the active tab (`editor::save` arrives as an event, this is for
@@ -2238,6 +2271,12 @@ impl Panel for CenterPanel {
 impl Render for CenterPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ThemeColors::global(cx).clone();
+        // The tab of a binary shows a notice, not the file: no comment box,
+        // no context menu (spec 09 §6.2.11).
+        let binary = matches!(
+            self.active_item(),
+            Some(CenterItem::File(tab)) if tab.read_only && !tab.deleted_review
+        );
         let body = match self.active_item() {
             Some(CenterItem::Settings(view)) => view.clone().into_any_element(),
             Some(CenterItem::File(tab)) => tab.content.render(),
@@ -2295,6 +2334,24 @@ impl Render for CenterPanel {
                     .min_w_0()
                     .w_full()
                     .overflow_hidden()
+                    // Capture phase: the editor inside never sees them.
+                    .when(binary, |this| {
+                        this.capture_action(
+                            |_: &cincel_editor::CommentSelection, _, cx: &mut App| {
+                                cx.stop_propagation();
+                            },
+                        )
+                        .capture_action(|_: &cincel_editor::CommentHunk, _, cx: &mut App| {
+                            cx.stop_propagation();
+                        })
+                        .capture_any_mouse_down(
+                            |event: &MouseDownEvent, _, cx: &mut App| {
+                                if event.button == MouseButton::Right {
+                                    cx.stop_propagation();
+                                }
+                            },
+                        )
+                    })
                     .child(body),
             )
             .children(self.render_unsaved_dialog(cx))

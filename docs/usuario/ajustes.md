@@ -56,7 +56,8 @@ del programa.
 - `editor.tab_size`: columnas de cada tabulación, de 1 a 16.
 - `editor.insert_spaces`: que `Tab` escriba espacios en lugar de un
   carácter de tabulación.
-- `editor.show_whitespace`: dibujar los espacios y las tabulaciones.
+- `editor.show_whitespace`: dibujar los espacios y las tabulaciones
+  (`Ctrl+Alt+W` lo alterna en la pestaña actual).
 - `editor.ruler`: la columna de la guía vertical; `0` la oculta.
 - `editor.cursor_blink`: que el cursor parpadee mientras escribís.
 - `editor.auto_close_pairs`: agregar el cierre automáticamente al abrir un
@@ -70,6 +71,18 @@ del programa.
   (nunca, al cambiar de foco, o tras una pausa sin escribir).
 - `files.autosave_delay_ms`: con "tras una pausa", cuántos milisegundos sin
   escribir esperar antes de guardar (de 100 a 60 000).
+- `files.trim_trailing_whitespace_on_save`: al guardar, quitar los espacios
+  y las tabulaciones que sobran al final de cada línea. No toca los archivos
+  Markdown (`.md` y `.markdown`, donde dos espacios al final son un salto de
+  línea) ni las líneas de un cambio del agente que todavía no decidiste, y
+  no hace nada mientras el agente está escribiendo ese archivo. Viene
+  encendido; un `Ctrl+Z` después de guardar devuelve los espacios.
+- `files.ensure_final_newline_on_save`: al guardar, terminar el archivo con
+  un salto de línea si no lo tiene (los archivos vacíos quedan vacíos). Viene
+  encendido.
+
+Las dos limpiezas al guardar se explican con ejemplos en
+[Escribir en el editor](editor.md#limpiar-el-archivo-al-guardar).
 
 ## Revisión
 

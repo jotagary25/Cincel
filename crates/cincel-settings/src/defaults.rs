@@ -68,6 +68,11 @@ pub const DEFAULT_KEYMAP_JSONC: &str = r##"[
       "ctrl-x": "editor::cut",
       "ctrl-v": "editor::paste",
       "alt-z": "editor::toggle_soft_wrap",
+      // Desplazar una línea sin mover el cursor, y mostrar u ocultar los
+      // espacios en blanco en esta pestaña.
+      "ctrl-up": "editor::scroll_line_up",
+      "ctrl-down": "editor::scroll_line_down",
+      "ctrl-alt-w": "editor::toggle_whitespace",
       "enter": "editor::insert_newline",
       "tab": "editor::tab",
       "shift-tab": "editor::backtab",
@@ -78,6 +83,11 @@ pub const DEFAULT_KEYMAP_JSONC: &str = r##"[
       // Aceptar / rechazar el archivo entero.
       "ctrl-shift-enter": "review::accept_file",
       "ctrl-shift-backspace": "review::reject_file",
+      // Comentario para el agente sobre las líneas seleccionadas (sin
+      // selección, la línea del cursor; dentro de un segmento pendiente, ese
+      // segmento). El botón "Comentar" de los segmentos es
+      // "review::comment_hunk", sin atajo.
+      "ctrl-shift-m": "editor::comment_selection",
       // Vista previa de Markdown (también en el contexto "Center", más abajo,
       // para cuando la pestaña ya está en modo vista previa y el editor no
       // tiene el foco).
@@ -132,6 +142,18 @@ pub const DEFAULT_KEYMAP_JSONC: &str = r##"[
     }
   },
 
+  // La cajita del comentario para el agente, mientras escribís en ella:
+  // Ctrl+Enter guarda y Esc cancela ("enter" es un salto de línea). Va
+  // después de todas las secciones de "Editor" para ganarles dentro de la
+  // caja (así Ctrl+Enter no acepta el segmento que está debajo).
+  {
+    "context": "Editor && comment_box",
+    "bindings": {
+      "ctrl-enter": "editor::save_comment",
+      "escape": "editor::cancel_comment"
+    }
+  },
+
   // El chat.
   {
     "context": "Chat",
@@ -139,6 +161,15 @@ pub const DEFAULT_KEYMAP_JSONC: &str = r##"[
       "enter": "chat::send",
       "shift-enter": "chat::newline",
       "escape": "chat::cancel_turn"
+    }
+  },
+
+  // La imagen del chat abierta en grande sobre toda la ventana: Esc la cierra
+  // (también cierra un clic fuera de la imagen o la ×).
+  {
+    "context": "ImageViewer",
+    "bindings": {
+      "escape": "workspace::close_image_viewer"
     }
   }
 ]
@@ -211,7 +242,11 @@ const DEFAULT_SETTINGS_JSONC: &str = r##"{
     // sin escribir).
     "autosave": "off",
     // Con "after_delay": milisegundos sin escribir antes de guardar (100 a 60000).
-    "autosave_delay_ms": 1000
+    "autosave_delay_ms": 1000,
+    // Al guardar, quitar los espacios del final de cada línea (no en Markdown ni en los cambios del agente sin decidir).
+    "trim_trailing_whitespace_on_save": true,
+    // Al guardar, terminar el archivo con un salto de línea si no lo tiene.
+    "ensure_final_newline_on_save": true
   },
 
   "review": {
@@ -302,6 +337,7 @@ mod tests {
         let hunk = ["Editor", "review_hunk_under_cursor"];
         let searching = ["Editor", "searching"];
         let replacing = ["Editor", "searching", "replacing"];
+        let comment_box = ["Editor", "comment_box"];
         let chat = ["Chat"];
         let center = ["Center"];
         let global: [&str; 0] = [];
@@ -327,6 +363,8 @@ mod tests {
             ("enter", &chat, "chat::send"),
             ("shift-enter", &chat, "chat::newline"),
             ("escape", &chat, "chat::cancel_turn"),
+            // `09-etapa7-conexiones-imagenes-comentarios.md` §7.1, §7.2.
+            ("escape", &["ImageViewer"], "workspace::close_image_viewer"),
             ("ctrl-enter", &hunk, "review::accept_hunk"),
             ("ctrl-backspace", &hunk, "review::reject_hunk"),
             ("ctrl-enter", &editor, "editor::insert_newline"),
@@ -360,6 +398,14 @@ mod tests {
             ("shift-tab", &searching, "editor::search_prev_field"),
             ("enter", &replacing, "editor::replace_next"),
             ("ctrl-enter", &replacing, "editor::replace_all"),
+            // `09-etapa7-conexiones-imagenes-comentarios.md` §7.1: comments.
+            ("ctrl-shift-m", &editor, "editor::comment_selection"),
+            // `10-etapa7-ronda2.md` §7.7: scroll a row, whitespace.
+            ("ctrl-up", &editor, "editor::scroll_line_up"),
+            ("ctrl-down", &editor, "editor::scroll_line_down"),
+            ("ctrl-alt-w", &editor, "editor::toggle_whitespace"),
+            ("ctrl-enter", &comment_box, "editor::save_comment"),
+            ("escape", &comment_box, "editor::cancel_comment"),
         ];
         for (stroke, contexts, command) in cases {
             let keystroke = Keystroke::parse(stroke).unwrap();

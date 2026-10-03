@@ -100,6 +100,8 @@ const SETTINGS_KEYS: &[&str] = &[
     "files.exclude",
     "files.autosave",
     "files.autosave_delay_ms",
+    "files.trim_trailing_whitespace_on_save",
+    "files.ensure_final_newline_on_save",
     "review.jump_to_next_on_decide",
     "review.max_file_size_kb",
     "review.max_lines",
@@ -222,6 +224,20 @@ const MANUAL_FILES: &[(&str, &str)] = &[
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/usuario/revision.md"
+        )),
+    ),
+    (
+        "chat.md",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/usuario/chat.md"
+        )),
+    ),
+    (
+        "editor.md",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/usuario/editor.md"
         )),
     ),
     ("atajos.md", ATAJOS),

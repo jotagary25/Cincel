@@ -62,6 +62,12 @@ pub struct FilesPanel {
     expanded: HashSet<PathBuf>,
     /// Relative path of the entry the context menu was opened on.
     context_target: Option<PathBuf>,
+    /// What closes the open context menu when the focus leaves it or the
+    /// window goes to the background; replaced each time a menu is built.
+    menu_guard: Vec<Subscription>,
+    /// The focus of the open context menu, to close it before a shortcut
+    /// that moves the focus (its element takes the focus back every frame).
+    open_menu_focus: Option<FocusHandle>,
     /// What the review says about each file.
     review: SharedSummary,
     /// Whether [`FilesPanel::set_review`] added its observation.
@@ -117,6 +123,8 @@ impl FilesPanel {
                 tree,
                 expanded: HashSet::new(),
                 context_target: None,
+                menu_guard: Vec::new(),
+                open_menu_focus: None,
                 review: SharedSummary::default(),
                 review_wired: false,
                 ghosts: BTreeSet::new(),
@@ -173,11 +181,31 @@ impl FilesPanel {
     }
 
     /// The root line's counters ("1 archivo · 3 cambios · +0 −36",
-    /// `crate::review::totals_label`), or `None` with nothing pending.
+    /// `crate::review::totals_label`), followed by " · 2 comentarios" when
+    /// there are unsent comments (spec 09 §6.2.9; the comments alone without
+    /// pending changes), or `None` with nothing of either.
     pub fn root_review_label(&self) -> Option<String> {
         let review = self.review.borrow();
-        (review.pending > 0)
-            .then(|| crate::review::totals_label(review.files.len(), review.pending, review.total))
+        let totals = (review.pending > 0)
+            .then(|| crate::review::totals_label(review.files.len(), review.pending, review.total));
+        let comments =
+            (review.comments > 0).then(|| crate::review::comments_label(review.comments));
+        match (totals, comments) {
+            (Some(totals), Some(comments)) => Some(format!("{totals} · {comments}")),
+            (totals, comments) => totals.or(comments),
+        }
+    }
+
+    /// The comment counter of the row of `relative` (the number after the
+    /// icon), for the tests.
+    pub fn comment_label(&self, relative: &Path, cx: &App) -> Option<String> {
+        let project = self.project.as_ref()?;
+        let absolute = project.read(cx).absolute(relative);
+        self.review
+            .borrow()
+            .comments_per_file
+            .get(&absolute)
+            .map(|count| count.to_string())
     }
 
     fn has_review_observation(&self) -> bool {
@@ -404,6 +432,13 @@ impl FilesPanel {
                 tracing::warn!(%error, "no se pudo abrir el explorador de archivos");
                 crate::toast::error("No se pudo abrir el explorador de archivos", cx);
             }
+        }
+    }
+
+    /// Closes the open context menu, if any (see `render`).
+    fn dismiss_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self.open_menu_focus.take() {
+            crate::menu_dismiss::send_cancel(&handle, window, cx);
         }
     }
 
@@ -658,10 +693,17 @@ impl Render for FilesPanel {
                 })
                 .context_menu({
                     let panel = panel.clone();
-                    move |_, entry, menu, _, cx| {
+                    move |_, entry, menu, window, cx| {
                         let relative = path_of(&entry.item().id);
+                        // gpui-kit closes the menu on a click outside and on
+                        // `Esc`; the focus moving elsewhere and the window
+                        // losing the focus close it from here.
+                        let guard = crate::menu_dismiss::dismiss_on_focus_loss(&menu, window, cx);
+                        let menu_focus = menu.focus_handle(cx);
                         let _ = panel.update(cx, |panel, _| {
                             panel.context_target = Some(relative);
+                            panel.menu_guard = guard;
+                            panel.open_menu_focus = Some(menu_focus);
                         });
                         menu.menu(
                             "Revelar en carpeta",
@@ -692,6 +734,7 @@ impl Render for FilesPanel {
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| root.display().to_string());
             let pending = self.review.borrow().pending;
+            let comments = self.review.borrow().comments;
             let totals = self.root_review_label();
             let scale = crate::settings::ui_scale(cx);
             div()
@@ -705,11 +748,17 @@ impl Render for FilesPanel {
                 .text_color(theme.text_muted)
                 .text_size(px(12. * scale))
                 .child(SharedString::from(name))
-                .when(pending > 0, |this| {
+                .when(pending > 0 || comments > 0, |this| {
                     this.children(totals.map(|totals| {
                         div()
+                            .id("files-root-review")
+                            .debug_selector(|| "files-root-review".to_string())
                             .text_size(px(11. * scale))
-                            .text_color(theme.status_warning)
+                            .text_color(if pending > 0 {
+                                theme.status_warning
+                            } else {
+                                theme.text_muted
+                            })
                             .child(SharedString::from(totals))
                     }))
                 })
@@ -717,6 +766,7 @@ impl Render for FilesPanel {
 
         v_flex()
             .id("files-panel")
+            .debug_selector(|| "files-panel".to_string())
             .key_context("FilesPanel")
             .track_focus(&self.focus_handle)
             // Clicking anywhere in the panel (a folder row included) gives the
@@ -725,6 +775,25 @@ impl Render for FilesPanel {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
                     this.tree.update(cx, |tree, cx| tree.focus(window, cx));
+                }),
+            )
+            // `Ctrl+L` and the panel toggles close an open context menu: its
+            // element takes the focus back every frame, so they could not
+            // move the focus away from it otherwise. Capture phase, so the
+            // menu is closing by the time the action reaches its own handler.
+            .capture_action(
+                cx.listener(|this, _: &crate::actions::FocusNextZone, window, cx| {
+                    this.dismiss_context_menu(window, cx);
+                }),
+            )
+            .capture_action(
+                cx.listener(|this, _: &crate::actions::ToggleChat, window, cx| {
+                    this.dismiss_context_menu(window, cx);
+                }),
+            )
+            .capture_action(
+                cx.listener(|this, _: &crate::actions::ToggleTree, window, cx| {
+                    this.dismiss_context_menu(window, cx);
                 }),
             )
             .on_action(cx.listener(Self::on_open_selected))
@@ -767,11 +836,16 @@ fn render_row(
             absolute,
         )
     };
-    let (agent, pending_under) = {
+    let (agent, pending_under, comments) = {
         let review = review.borrow();
         (
             review.file(&absolute).cloned(),
             is_folder && review.has_pending_under(&absolute),
+            review
+                .comments_per_file
+                .get(&absolute)
+                .copied()
+                .filter(|_| !is_folder && !placeholder),
         )
     };
     let style = agent
@@ -856,6 +930,25 @@ fn render_row(
                         .text_size(px(11. * scale))
                         .text_color(theme.text_muted)
                         .child(suffix)
+                }))
+                // Unsent comments on the file: the icon and how many, after
+                // `+N −M` (spec 09 §6.2.9).
+                .children(comments.map(|count| {
+                    div()
+                        .flex_none()
+                        .mr_1()
+                        .flex()
+                        .items_center()
+                        .gap(px(2. * scale))
+                        .text_size(px(11. * scale))
+                        .text_color(theme.text_accent)
+                        .child(
+                            div()
+                                .w(px(11. * scale))
+                                .flex_none()
+                                .child(IconName::MessageSquareText),
+                        )
+                        .child(SharedString::from(count.to_string()))
                 }))
                 .when(has_changes_under, |this| {
                     // A folder whose children changed gets a 6 px dot

@@ -1210,3 +1210,225 @@ async fn auth_required_falls_back_to_the_logged_out_status() {
     .await;
     assert_eq!(message.as_deref(), Some("session expired upstream"));
 }
+
+// ---------------------------------------------------------------------------
+// Images in the protocol (spec 09 §5.3.3, E7-D)
+// ---------------------------------------------------------------------------
+
+/// Minimal PNG-looking bytes: signature plus an IHDR with the given size.
+/// Enough for the fake agent's header-only dimension reader.
+fn fake_png(width: u32, height: u32, padding: usize) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend((0..padding).map(|i| (i % 251) as u8));
+    bytes
+}
+
+/// Minimal JPEG-looking bytes: SOI plus a SOF0 segment with the given size,
+/// followed by every byte value so base64 padding and `0xff` are exercised.
+fn fake_jpeg(width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08];
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+    bytes.extend(0..=255u8);
+    bytes
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Lines of the fake agent's `FAKE_PROMPT_LOG`, parsed.
+fn read_prompt_log(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("log line is JSON"))
+        .collect()
+}
+
+/// Send a prompt and return the agent's text until the turn ends.
+async fn prompt_text(
+    connection: &mut AgentConnection,
+    session_id: &SessionId,
+    blocks: Vec<PromptBlock>,
+) -> String {
+    connection
+        .send(AgentCommand::Prompt {
+            session_id: session_id.clone(),
+            blocks,
+            feedback: None,
+        })
+        .await
+        .expect("prompt");
+    let mut text = String::new();
+    loop {
+        match connection.recv().await.expect("evento") {
+            AgentEvent::Update { update, .. } => {
+                if let SessionUpdate::AgentMessageChunk(chunk) = *update
+                    && let ContentBlock::Text(chunk) = chunk.content
+                {
+                    text.push_str(&chunk.text);
+                }
+            }
+            AgentEvent::TurnEnded { .. } => return text,
+            AgentEvent::Stderr(_) => {}
+            other => panic!("evento inesperado durante el turno: {other:?}"),
+        }
+    }
+}
+
+/// Text plus two images reach the agent as `text`, `text`, `image`, `image`
+/// blocks, in order, with the right mime type, base64 data that decodes to the
+/// attached bytes and no `uri`; the agent can decode them ("echo-images").
+#[tokio::test(flavor = "multi_thread")]
+async fn image_blocks_reach_the_agent_with_exact_bytes() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let cwd = workspace.path().to_path_buf();
+    let log = workspace.path().join("prompts.jsonl");
+    let png = fake_png(640, 480, 1000);
+    let jpeg = fake_jpeg(33, 17);
+
+    let mut connection = AgentConnection::start(cwd.clone());
+    let reply = tokio::time::timeout(TIMEOUT, async {
+        let launch = fake_launch().with_env("FAKE_PROMPT_LOG", log.display().to_string());
+        let capabilities = connect_with(&connection, launch, &cwd).await;
+        assert!(cincel_acp::agent_supports_images(&capabilities));
+        let session = new_session(&connection, &cwd).await;
+        prompt_text(
+            &mut connection,
+            &session,
+            vec![
+                PromptBlock::Text("echo-images".to_string()),
+                PromptBlock::Text("mirá estas capturas".to_string()),
+                PromptBlock::image("image/png", png.clone()).expect("png"),
+                PromptBlock::image("image/jpeg", jpeg.clone()).expect("jpeg"),
+            ],
+        )
+        .await
+    })
+    .await
+    .expect("timeout");
+    connection.shutdown();
+
+    assert_eq!(reply, "2 imágenes: image/png 640x480, image/jpeg 33x17");
+
+    let lines = read_prompt_log(&log);
+    assert_eq!(lines.len(), 1, "un registro por prompt: {lines:?}");
+    let blocks = lines[0]["prompt"].as_array().expect("prompt array");
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .map(|block| block["type"].as_str().expect("type"))
+        .collect();
+    assert_eq!(kinds, ["text", "text", "image", "image"]);
+    assert_eq!(blocks[0]["text"], "echo-images");
+    assert_eq!(blocks[1]["text"], "mirá estas capturas");
+    for (block, mime, original) in [
+        (&blocks[2], "image/png", &png),
+        (&blocks[3], "image/jpeg", &jpeg),
+    ] {
+        assert_eq!(block["mimeType"], mime);
+        // Base64 on the wire: 4 characters per 3 bytes, padded.
+        assert_eq!(block["dataLen"], original.len().div_ceil(3) * 4);
+        assert_eq!(block["bytes"], original.len());
+        assert_eq!(block["sha256"], sha256_hex(original));
+        assert!(block["uri"].is_null(), "sin uri: {block}");
+        assert_eq!(block["decodeError"], false);
+    }
+}
+
+/// `agent_supports_images` is read from `promptCapabilities.image` of the
+/// `initialize` response carried by `Connected`.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_supports_images_follows_the_announced_capability() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let cwd = workspace.path().to_path_buf();
+
+    let (default_support, disabled_support) = tokio::time::timeout(TIMEOUT, async {
+        let mut plain = AgentConnection::start(cwd.clone());
+        let capabilities = connect_with(&plain, fake_launch(), &cwd).await;
+        let default_support = cincel_acp::agent_supports_images(&capabilities);
+        plain.shutdown();
+
+        let mut disabled = AgentConnection::start(cwd.clone());
+        let capabilities = connect_with(
+            &disabled,
+            fake_launch().with_env("FAKE_NO_IMAGES", "1"),
+            &cwd,
+        )
+        .await;
+        let disabled_support = cincel_acp::agent_supports_images(&capabilities);
+        disabled.shutdown();
+        (default_support, disabled_support)
+    })
+    .await
+    .expect("timeout");
+
+    assert!(default_support, "el agente falso anuncia imágenes");
+    assert!(!disabled_support, "FAKE_NO_IMAGES anuncia image: false");
+}
+
+/// An image block with an unsupported mime type (built directly, bypassing
+/// `PromptBlock::image`) is refused before anything reaches the agent: the
+/// UI gets an `Error`, and the next valid prompt still works.
+#[tokio::test(flavor = "multi_thread")]
+async fn image_block_with_invalid_mime_is_rejected_before_sending() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let cwd = workspace.path().to_path_buf();
+    let log = workspace.path().join("prompts.jsonl");
+
+    let mut connection = AgentConnection::start(cwd.clone());
+    let (error, reply) = tokio::time::timeout(TIMEOUT, async {
+        let launch = fake_launch().with_env("FAKE_PROMPT_LOG", log.display().to_string());
+        connect_with(&connection, launch, &cwd).await;
+        let session = new_session(&connection, &cwd).await;
+        connection
+            .send(AgentCommand::Prompt {
+                session_id: session.clone(),
+                blocks: vec![
+                    PromptBlock::Text("echo-images".to_string()),
+                    PromptBlock::Image {
+                        mime_type: "application/pdf".to_string(),
+                        data: std::sync::Arc::from(vec![1u8, 2, 3]),
+                    },
+                ],
+                feedback: None,
+            })
+            .await
+            .expect("prompt");
+        let error = loop {
+            match connection.recv().await.expect("evento") {
+                AgentEvent::Error { message, .. } => break message,
+                AgentEvent::Stderr(_) => {}
+                other => panic!("se esperaba Error: {other:?}"),
+            }
+        };
+        let reply = prompt_text(
+            &mut connection,
+            &session,
+            vec![PromptBlock::Text("echo-images".to_string())],
+        )
+        .await;
+        (error, reply)
+    })
+    .await
+    .expect("timeout");
+    connection.shutdown();
+
+    assert!(error.contains("application/pdf"), "mensaje: {error}");
+    assert_eq!(reply, "0 imágenes: ");
+    assert_eq!(
+        read_prompt_log(&log).len(),
+        1,
+        "solo el prompt válido llegó al agente"
+    );
+}

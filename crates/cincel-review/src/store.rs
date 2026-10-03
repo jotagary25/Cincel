@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicU64;
 
 use cincel_text::{Anchor, Bias, Buffer, BufferEvent, BufferSnapshot, EditSource, Rope};
 
+use crate::comments::{CommentId, CommentStore};
 use crate::file::{FileReview, Touched};
 use crate::recompute::{RecomputeJob, RecomputeResult, compute_diff};
 use crate::text::{common_prefix, common_suffix, join_lines, normalize};
@@ -32,12 +33,16 @@ pub struct ReviewStore {
     expecting_review: BTreeSet<PathBuf>,
     pub(crate) next_id: u64,
     root: Option<PathBuf>,
+    /// Comments for the agent (`comments.rs`).
+    pub(crate) comments: CommentStore,
 }
 
 /// One undoable reject (possibly several files).
 #[derive(Debug)]
 struct RejectUndo {
     files: Vec<UndoFile>,
+    /// Comments this reject marked as rejected (the undo takes it back).
+    marks: Vec<CommentId>,
 }
 
 #[derive(Debug)]
@@ -562,6 +567,9 @@ impl ReviewStore {
     /// Accepts a hunk: its buffer text becomes the base. No I/O.
     pub fn accept_hunk(&mut self, id: HunkId) -> Result<PathBuf, ReviewError> {
         let (path, index) = self.find_hunk(id)?;
+        if let Some(span) = self.hunk_decision_span(&path, id) {
+            self.mark_comments(&path, Some(&[span]), true);
+        }
         let file = self.files.get_mut(&path).expect("found");
         let text = file.buffer_text(&file.hunks[index]);
         file.replace_base_region(index, &text);
@@ -579,6 +587,10 @@ impl ReviewStore {
     /// host applies it with [`EditSource::Review`] and saves.
     pub fn reject_hunk(&mut self, id: HunkId) -> Result<Revert, ReviewError> {
         let (path, index) = self.find_hunk(id)?;
+        let marks = match self.hunk_decision_span(&path, id) {
+            Some(span) => self.mark_comments(&path, Some(&[span]), false),
+            None => Vec::new(),
+        };
         let file = self.files.get_mut(&path).expect("found");
         let hunk = &file.hunks[index];
         let (edit, region) = narrowed(
@@ -588,10 +600,13 @@ impl ReviewStore {
         );
         file.hunks[index].pending = false;
         file.bump();
-        self.push_undo(vec![UndoFile::Edits {
-            path: path.clone(),
-            regions: vec![region],
-        }]);
+        self.push_undo(
+            vec![UndoFile::Edits {
+                path: path.clone(),
+                regions: vec![region],
+            }],
+            marks,
+        );
         self.expecting_review.insert(path.clone());
         Ok(Revert::Edits {
             path,
@@ -626,6 +641,9 @@ impl ReviewStore {
     /// pending, split around the accepted line.
     pub fn accept_line(&mut self, path: &Path, pair: &LinePair) -> Result<(), ReviewError> {
         let (index, line) = self.locate_pair(path, pair)?;
+        if let Some(span) = self.line_decision_span(path, pair) {
+            self.mark_comments(path, Some(&[span]), true);
+        }
         let file = self.files.get_mut(path).expect("located");
         let parts: Vec<String> = file
             .pair_texts(index)
@@ -649,6 +667,10 @@ impl ReviewStore {
     /// buffer-only line is removed). Returns the edit for the host.
     pub fn reject_line(&mut self, path: &Path, pair: &LinePair) -> Result<Revert, ReviewError> {
         let (index, line) = self.locate_pair(path, pair)?;
+        let marks = match self.line_decision_span(path, pair) {
+            Some(span) => self.mark_comments(path, Some(&[span]), false),
+            None => Vec::new(),
+        };
         let file = self.files.get_mut(path).expect("located");
         let parts: Vec<String> = file
             .pair_texts(index)
@@ -664,10 +686,13 @@ impl ReviewStore {
             &new_buffer,
         );
         file.bump();
-        self.push_undo(vec![UndoFile::Edits {
-            path: path.to_owned(),
-            regions: vec![region],
-        }]);
+        self.push_undo(
+            vec![UndoFile::Edits {
+                path: path.to_owned(),
+                regions: vec![region],
+            }],
+            marks,
+        );
         self.expecting_review.insert(path.to_owned());
         Ok(Revert::Edits {
             path: path.to_owned(),
@@ -678,11 +703,16 @@ impl ReviewStore {
     /// Accepts the whole file: the base becomes the buffer (for a deleted
     /// file, the deletion stands). No I/O.
     pub fn accept_file(&mut self, path: &Path) -> Result<(), ReviewError> {
+        if self.files.contains_key(path) {
+            let spans = self.file_decision_spans(path);
+            self.mark_comments(path, spans.as_deref(), true);
+        }
         let file = self
             .files
             .get_mut(path)
             .ok_or_else(|| ReviewError::UnknownFile(path.to_owned()))?;
         if matches!(file.status, FileStatus::Deleted { .. }) {
+            self.mark_deleted_file(path);
             self.files.remove(path);
             self.finalize(path, None);
             return Ok(());
@@ -702,15 +732,21 @@ impl ReviewStore {
     /// edit) is deleted; a deleted or binary file is written back; anything
     /// else gets buffer edits that restore the base (the file stays).
     pub fn reject_file(&mut self, path: &Path) -> Result<Revert, ReviewError> {
-        let (revert, undo) = self.reject_file_inner(path)?;
-        self.push_undo(undo.into_iter().collect());
+        let (revert, undo, marks) = self.reject_file_inner(path)?;
+        self.push_undo(undo.into_iter().collect(), marks);
         Ok(revert)
     }
 
     fn reject_file_inner(
         &mut self,
         path: &Path,
-    ) -> Result<(Revert, Option<UndoFile>), ReviewError> {
+    ) -> Result<(Revert, Option<UndoFile>, Vec<CommentId>), ReviewError> {
+        let marks = if self.files.contains_key(path) {
+            let spans = self.file_decision_spans(path);
+            self.mark_comments(path, spans.as_deref(), false)
+        } else {
+            Vec::new()
+        };
         let file = self
             .files
             .get_mut(path)
@@ -742,6 +778,7 @@ impl ReviewStore {
                     review: Box::new(review),
                     op: undo_op,
                 }),
+                marks,
             ));
         }
 
@@ -790,6 +827,7 @@ impl ReviewStore {
                 edits,
             },
             undo,
+            marks,
         ))
     }
 
@@ -834,21 +872,23 @@ impl ReviewStore {
     fn reject_paths(&mut self, paths: &[PathBuf]) -> Vec<Revert> {
         let mut reverts = Vec::new();
         let mut undo = Vec::new();
+        let mut marks = Vec::new();
         for path in paths {
-            if let Ok((revert, file_undo)) = self.reject_file_inner(path) {
+            if let Ok((revert, file_undo, file_marks)) = self.reject_file_inner(path) {
                 reverts.push(revert);
                 undo.extend(file_undo);
+                marks.extend(file_marks);
             }
         }
-        self.push_undo(undo);
+        self.push_undo(undo, marks);
         reverts
     }
 
-    fn push_undo(&mut self, files: Vec<UndoFile>) {
+    fn push_undo(&mut self, files: Vec<UndoFile>, marks: Vec<CommentId>) {
         if files.is_empty() {
             return;
         }
-        self.undo_stack.push(RejectUndo { files });
+        self.undo_stack.push(RejectUndo { files, marks });
         if self.undo_stack.len() > UNDO_LIMIT {
             self.undo_stack.remove(0);
         }
@@ -873,6 +913,7 @@ impl ReviewStore {
         let Some(undo) = self.undo_stack.pop() else {
             return Vec::new();
         };
+        self.unmark_rejected(&undo.marks);
         let mut reverts = Vec::new();
         for file in undo.files {
             match file {
@@ -1056,7 +1097,7 @@ impl ReviewStore {
         self.records.remove(&turn);
     }
 
-    fn display_path(&self, path: &Path) -> String {
+    pub(crate) fn display_path(&self, path: &Path) -> String {
         let relative = self
             .root
             .as_ref()

@@ -162,7 +162,7 @@ fn streamed_chunks_land_in_one_entry(cx: &mut TestAppContext) {
             Entry::AgentText(text) => {
                 assert_eq!(text.markdown, "Hola, mundo");
                 assert!(text.streaming);
-                assert!(text.view.is_some(), "falta el estado de markdown");
+                assert!(!text.segments.is_empty(), "falta el estado de markdown");
             }
             other => panic!("se esperaba AgentText, llegó {other:?}"),
         }
@@ -1098,7 +1098,7 @@ fn the_transcript_survives_a_round_trip(cx: &mut TestAppContext) {
                 assert!(text.markdown.starts_with("# Título"));
                 assert!(!text.streaming, "un transcript restaurado no está en vivo");
                 assert!(
-                    text.view.is_some(),
+                    !text.segments.is_empty(),
                     "el markdown se reconstruye al importar"
                 );
             }
@@ -1412,7 +1412,7 @@ fn stored_conversation(id: &str, agent_id: &str) -> Conversation {
         Entry::AgentText(AgentText {
             markdown: "primer mensaje replayadosegundo mensaje replayado".to_string(),
             streaming: false,
-            view: None,
+            segments: Vec::new(),
         }),
     ];
     conversation
@@ -1495,7 +1495,9 @@ fn loading_a_conversation_restores_its_entries(cx: &mut TestAppContext) {
             "reabrir la sesión ACP es tarea del workspace"
         );
         match &panel.entries()[1] {
-            Entry::AgentText(text) => assert!(text.view.is_some(), "el markdown se reconstruye"),
+            Entry::AgentText(text) => {
+                assert!(!text.segments.is_empty(), "el markdown se reconstruye")
+            }
             other => panic!("se esperaba AgentText, llegó {other:?}"),
         }
     });
@@ -1527,6 +1529,145 @@ fn a_replayed_session_does_not_duplicate_what_is_on_screen(cx: &mut TestAppConte
         );
         assert!(!panel.is_replaying());
     });
+}
+
+#[gpui::test]
+fn a_replayed_file_mention_is_not_shown_as_a_new_message(cx: &mut TestAppContext) {
+    // `@archivo` goes to the agent as a resource link; the stored user message
+    // keeps it as text. `session/load` replays the link: it must not come back
+    // as a lone "@a@b@c" bubble (what the author saw on reopening).
+    let (panel, mut visual, _) = open(cx);
+    with_window(&panel, &mut visual, |panel, window, cx| {
+        panel.load_conversation(stored_conversation("c1", "claude-acp"), window, cx);
+        let before = panel.entries().len();
+        panel.begin_replay(cx);
+        for name in ["script1.js", "system_prompt.md", "tool_schema.json"] {
+            panel.handle_event(
+                AgentEvent::Update {
+                    session_id: SessionId::new("s1"),
+                    update: Box::new(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                        ContentBlock::ResourceLink(cincel_acp::acp::schema::v1::ResourceLink::new(
+                            name,
+                            format!("file:///proyecto/{name}"),
+                        )),
+                    ))),
+                },
+                cx,
+            );
+        }
+        assert_eq!(panel.entries().len(), before, "{:?}", panel.entries());
+    });
+}
+
+#[gpui::test]
+fn a_replayed_mention_written_as_a_text_link_is_not_shown_as_a_new_message(
+    cx: &mut TestAppContext,
+) {
+    // The Claude adapter stores every mention as the text `[@name](file://…)`
+    // and replays it that way (the author's "@a@b@c" bubble came back after
+    // the resource-link fix because of this shape).
+    let (panel, mut visual, _) = open(cx);
+    with_window(&panel, &mut visual, |panel, window, cx| {
+        let mut conversation = stored_conversation("c1", "claude-acp");
+        conversation.entries.insert(
+            0,
+            Entry::UserMessage(UserMessage {
+                blocks: vec![
+                    MessageBlock::Text("mirá ".to_string()),
+                    MessageBlock::File(PathBuf::from("/proyecto/agente_prompt.md")),
+                    MessageBlock::File(PathBuf::from("/proyecto/tools_schema.json")),
+                ],
+            }),
+        );
+        panel.load_conversation(conversation, window, cx);
+        let before = panel.entries().len();
+        panel.begin_replay(cx);
+        let replay = |panel: &mut ChatPanel, text: &str, cx: &mut Context<ChatPanel>| {
+            panel.handle_event(
+                AgentEvent::Update {
+                    session_id: SessionId::new("s1"),
+                    update: Box::new(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                        ContentBlock::Text(TextContent::new(text)),
+                    ))),
+                },
+                cx,
+            );
+        };
+        replay(
+            panel,
+            "[@agente_prompt.md](file:///proyecto/agente_prompt.md)[@tools_schema.json](file:///proyecto/tools_schema.json)",
+            cx,
+        );
+        replay(
+            panel,
+            "[@tools_schema.json](file:///proyecto/tools_schema.json)",
+            cx,
+        );
+        assert_eq!(panel.entries().len(), before, "{:?}", panel.entries());
+
+        // A link to a file this conversation never mentioned is not ours to drop.
+        replay(panel, "[@otro.rs](file:///proyecto/otro.rs)", cx);
+        assert_eq!(panel.entries().len(), before + 1);
+    });
+}
+
+#[gpui::test]
+fn a_stored_stray_mention_bubble_is_dropped_when_the_conversation_is_loaded(
+    cx: &mut TestAppContext,
+) {
+    // Conversations saved by builds before the fix carry the stray bubble as
+    // their last entry; loading them must not show it again.
+    let (panel, mut visual, _) = open(cx);
+    with_window(&panel, &mut visual, |panel, window, cx| {
+        let mut conversation = stored_conversation("c1", "claude-acp");
+        conversation.entries.insert(
+            0,
+            Entry::UserMessage(UserMessage {
+                blocks: vec![
+                    MessageBlock::Text("mirá ".to_string()),
+                    MessageBlock::File(PathBuf::from("/proyecto/guardarail")),
+                ],
+            }),
+        );
+        conversation.entries.push(Entry::UserMessage(UserMessage {
+            blocks: vec![MessageBlock::Text(
+                "[@agente_prompt.md](file:///proyecto/agente_prompt.md)[@guardarail](file:///proyecto/guardarail)"
+                    .to_string(),
+            )],
+        }));
+        let stored = conversation.entries.len();
+        panel.load_conversation(conversation, window, cx);
+        assert_eq!(panel.entries().len(), stored - 1);
+        assert!(panel.entries().iter().all(|entry| !matches!(
+            entry,
+            Entry::UserMessage(message)
+                if matches!(message.blocks.as_slice(), [MessageBlock::Text(text)] if text.starts_with("[@"))
+        )));
+        // The real message, with text and file chips, is still there.
+        assert!(matches!(
+            &panel.entries()[0],
+            Entry::UserMessage(message) if message.blocks.len() == 2
+        ));
+    });
+}
+
+#[test]
+fn mention_links_only_accepts_only_the_adapter_shape() {
+    use crate::panel::mention_links_only;
+    assert_eq!(
+        mention_links_only("[@a.md](file:///p/a.md)[@b.json](file:///p/b.json)"),
+        Some(vec!["a.md".to_string(), "b.json".to_string()])
+    );
+    assert_eq!(
+        mention_links_only(" [@a.md](file:///p/a.md) \n [@b](file:///p/b) "),
+        Some(vec!["a.md".to_string(), "b".to_string()])
+    );
+    assert_eq!(mention_links_only("mirá [@a.md](file:///p/a.md)"), None);
+    assert_eq!(mention_links_only("[@a.md](file:///p/a.md) y esto"), None);
+    assert_eq!(mention_links_only("[@a.md](https://x/a.md)"), None);
+    assert_eq!(mention_links_only("[a.md](file:///p/a.md)"), None);
+    assert_eq!(mention_links_only(""), None);
+    assert_eq!(mention_links_only("@a.md"), None);
 }
 
 #[gpui::test]
@@ -1981,6 +2122,7 @@ fn connection(id: &str, agent_id: &str, label: &str) -> ChatConnection {
         id: id.into(),
         agent_id: agent_id.into(),
         label: label.into(),
+        agent_name: provider_name(agent_id).to_string(),
         identity: Some("ana@example.com · max".into()),
         last_used: "Usado hace 2 h".into(),
         badge: ConnectionBadge::Connected,

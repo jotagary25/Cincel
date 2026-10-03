@@ -207,3 +207,140 @@ Detalle, verificación y desviaciones en `docs/etapas/etapa-6.md`. Spec:
   `test-support` de `cincel-workspace` para habilitar clic real por
   coordenada sobre los botones de la barra de título y de la barra de
   estado (`click_tests.rs`), sin agregar una variante nueva de `target`.
+
+## Etapa 7: conexiones más limpias, imágenes y comentarios para el agente
+
+Detalle, verificación, desviaciones y lista de comprobación manual en
+`docs/etapas/etapa-7.md`. Spec: `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md`.
+
+- **Conexiones** (E7-A): `Agents::refresh_connections` llena
+  `ChatConnection.agent_name` ("Claude", "Codex", "Antigravity" o el `agent_id`
+  si no es uno de los tres); el menú y el botón del encabezado del chat, y la
+  lista de "Eliminar conexión…" (`connection_modal.rs`), muestran icono,
+  nombre, tipo e insignia sin correo, plan ni "Usado hace…". La pestaña de
+  Configuración → Conexiones sigue pintando `identity` y `last_used` del mismo
+  `ChatConnection`. La confirmación "Listo: conectado como …" del flujo de
+  conexión no cambió.
+- **Menús que se cierran solos** (`menu_dismiss.rs`, E7-A): los menús de
+  gpui-kit (`PopupMenu`) ya se cierran con clic fuera y `Esc`, pero no cuando el
+  foco se va a otro elemento ni cuando la ventana pierde el foco.
+  `dismiss_on_focus_loss(&menu, window, cx)` devuelve las suscripciones
+  (`cx.on_focus_out` del foco del menú y `cx.observe_window_activation`) que
+  le mandan el mismo `Cancel` que su `Esc`, una sola vez por menú, así el menú
+  cierra como siempre (su `DismissEvent`, su propia devolución del foco);
+  `send_cancel(handle, window, cx)` hace lo mismo a pedido y lo usan los
+  atajos que un menú contextual abierto no dejaría pasar (`Ctrl+L`: mientras un
+  menú contextual está abierto su elemento recupera el foco en cada cuadro).
+  Las usan el menú de la barra de título (`title_menu.rs`) y el menú
+  contextual del árbol (`tree_panel.rs`). Los menús propios del chat (los dos
+  del encabezado y los del pie, `@` y `/`) se cierran por su propio mecanismo,
+  ver `modulos/chat.md`. Los desplegables `Select` de Configuración no se
+  probaron (gpui-kit ya cierra solo según su código). Tests:
+  `menu_dismiss_tests.rs` (con el workspace completo: clic en el editor,
+  `Ctrl+L`, `Esc` y ventana inactiva).
+- **Comentarios** (E7-F, `review_comments.rs`, hijo de `review.rs`):
+  - *Editor → almacén*: `Review::sync_comment_editors` suscribe cada editor de
+    pestaña a sus `CommentAction` (`Create`, `Edit`, `Delete`); cada una se
+    traduce a `ReviewStore::add_comment` / `edit_comment` / `remove_comment`
+    seguida de `refresh` (`ReviewView`/`EditorView::set_comments`, etiquetas del
+    chat, contadores) y `schedule_persist`. `ChatEvent::RemoveComment { id }`
+    borra y `ChatEvent::OpenLocation { path, line }` abre el archivo en esa
+    línea (`Review::attach_chat`). En la pestaña de solo lectura de un archivo
+    borrado, todos los comentarios cuelgan de su único segmento
+    (`DELETED_FILE_HUNK`). Un archivo con comentarios queda vigilado
+    (`ensure_buffer`) aunque no esté en revisión, y `Review::flush` pasa cada
+    `BufferEvent` también a `store.comment_buffer_event` para que las anclas
+    sigan al usuario.
+  - *Envío*: `Review::begin_prompt` devuelve `PromptFeedback { turn, feedback,
+    sent }`: primero `flush`, después `take_comments_for_prompt`, después los
+    parches de siempre (`report_for_agent` + `forget_turn`) y
+    `cincel_review::format_feedback(report, &sent)` los une en el mismo
+    `<user_review_feedback>` (primer bloque de texto del prompt; el formato
+    exacto está en `modulos/review.md`). `Agents::prepare_prompt` usa `feedback`
+    como hasta ahora y llama `chat.attach_sent_comments(sent_cards(&sent))`.
+    Si el prompt diferido no sale (se cancela mientras espera la foto, o la
+    conexión se va en esa espera), `Review::prompt_not_sent` devuelve los
+    comentarios al almacén y al chat, y el chat marca sus tarjetas
+    `mark_comments_not_sent` ("No se envió: el comentario volvió al margen").
+    Si el mensaje salió, no vuelven aunque el turno falle (igual que los
+    parches).
+  - *Conexión y conversación*: los comentarios son de la ventana, no de la
+    conexión; cambiar de conexión o empezar otra conversación no los toca.
+  - *Contadores*: `SharedSummary` suma `comments` y `comments_per_file`. La
+    barra de estado dice "3 cambios pendientes · 2 comentarios" (o "2
+    comentarios", o "1 comentario" solo; `status_label`) con el mismo botón de
+    siempre; el árbol pone el icono y la cantidad en la fila de cada archivo
+    con comentarios, después de `+N −M`, y "· 2 comentarios" después de los
+    totales en la raíz.
+  - *Diálogo de cierre* (`review_close.rs`): aparece en los mismos casos que
+    antes (cambios de agente sin decidir); si además hay comentarios suma una
+    línea de 12 px "También hay 2 comentarios sin enviar: se guardan y vuelven
+    al abrir la carpeta." (`close_comments_line`). Sus botones no cambian y
+    ninguno borra comentarios. **Con solo comentarios, sin cambios pendientes,
+    no aparece**: se guardan igual con la revisión.
+  - *Persistencia*: la misma de la revisión (`state.json` versión 2,
+    `modulos/review.md`); al abrir, `after_comments_loaded` reabre los buffers
+    comentados y avisa (`toast::warn`) de cada comentario descartado ("El
+    comentario sobre «x» se descartó: el archivo ya no existe" / "…ya no es de
+    texto").
+  - *Binarios*: no hay editor de texto para ellos; `center.rs` bloquea el
+    atajo y el clic derecho en las pestañas binarias, y un archivo comentado
+    que el agente convierte en binario pierde sus comentarios con aviso
+    (`drop_comments_if_binary`).
+  - Tests: `review_comments_tests.rs` (escenarios a a m de §6.9 de la spec,
+    más contadores, diálogo de cierre y el mensaje que no sale).
+- **Imágenes** (E7-G):
+  - *Capacidad por conexión* (`agents/chat_images.rs`): al llegar `Connected`,
+    `Agents::publish_image_support(Some(cincel_acp::agent_supports_images(..)))`
+    → `ChatPanel::set_image_support`; sin conexión, `None`. El chat comprueba
+    antes de leer nada ("Conectá un agente para adjuntar imágenes" / "«Nombre»
+    no acepta imágenes").
+  - *Botón del clip*: `ChatEvent::PickImages` abre `rfd::AsyncFileDialog`
+    ("Adjuntar imagen", filtro "Imágenes", varios archivos, parte de la raíz del
+    proyecto) en el ejecutor de fondo, como "Abrir carpeta"; su respuesta llama
+    `Agents::attach_picked` → `ChatPanel::attach_paths`. En los tests el
+    diálogo real nunca se abre: se cuenta el pedido y se entrega la lista a
+    `attach_picked`. `ChatEvent::Notify { level, text }` se muestra como
+    `toast` en su tono.
+  - *Almacenamiento* (`conversations.rs`): al guardar una conversación, cada
+    `MessageBlock::Image` con datos y sin archivo se escribe atómicamente
+    (`.tmp` + `rename`) en `conversations/<id>/images/<sha256>.<ext>` del
+    estado XDG del proyecto (`ConversationStore::conversation_dir`); el JSON
+    solo guarda la referencia (`ImageRef`), nunca base64. `Agents::
+    sync_conversation_dir` le dice al chat esa carpeta cada vez que cambia la
+    conversación en pantalla (`ChatPanel::set_conversation_dir`), para releer
+    las miniaturas al reabrir; si un archivo falta, "Imagen no disponible".
+    Al enviar con imágenes la conversación se guarda en el momento
+    (`store_sent_images`). Borrar una conversación, o las de una conexión (una
+    o todas), borra su carpeta; deshacer el borrado restaura también sus
+    imágenes. `CONVERSATION_VERSION` 2 lee la 1.
+  - *Visor* (`image_viewer.rs`): capa del workspace sobre toda la ventana
+    (no del panel del chat), contexto de teclas `ImageViewer`, acción
+    `workspace::close_image_viewer` con `escape` (sección nueva de
+    `DEFAULT_KEYMAP_JSONC`). `ChatEvent::OpenImage` llega por una suscripción
+    del `Workspace` al chat. Imagen centrada, a su tamaño real si entra o
+    ajustada con margen de 32 px, leyenda "nombre · ancho × alto · tamaño";
+    `Esc`, clic fuera de la imagen o la `×` lo cierran y el foco vuelve a
+    donde estaba; mientras está abierto `Workspace::is_modal_open` es
+    verdadero.
+  - *Árbol*: `MentionFile` ("Mencionar en el chat") se maneja en
+    `workspace.rs` y pasa por `ChatPanel::mention_or_attach`: una imagen se
+    adjunta, cualquier otro archivo se menciona con `@`. El árbol no tiene
+    arrastre real (gpui-kit no ofrece fuente de arrastre), así que esa es la
+    vía.
+  - Tests: `image_e2e_tests.rs` (agente falso, `FAKE_PROMPT_LOG`: el registro
+    tiene los bloques `image` con el SHA-256 correcto; la conversación guardada
+    referencia archivos que existen; borrarla los borra y deshacer los
+    restaura; reabrir pinta desde archivo).
+
+## Ronda 2 de la Etapa 7: limpieza al guardar (`docs/specs/10-etapa7-ronda2.md` §7.8)
+
+Correcciones y mejoras tras la prueba del autor, dentro de la misma 0.2.0.
+
+- **`Center::save_path`** (`center.rs`) llama a `Center::clean_up_before_save` antes de `project.save`. Como guardar, guardar todo, el autoguardado y "Guardar y salir" pasan todos por `save_path`, todos aplican la misma limpieza. `clean_up_before_save` arma un `SaveCleanup` desde `settings(cx).files` y llama `EditorView::clean_up_for_save` (una sola transacción `EditSource::User`, un `Ctrl+Z` la deshace):
+  - `files.trim_trailing_whitespace_on_save` (quita los espacios del final de cada línea), **sin** efecto en archivos Markdown (`.md`, `.markdown`: dos espacios al final son un salto de línea);
+  - `files.ensure_final_newline_on_save` (agrega el salto de línea final si falta; sí vale en Markdown);
+  - no limpia nada si el agente tiene un turno en curso sobre el archivo (`review.turn_active` y el archivo en `review.tracked`), ni en pestañas de solo lectura (`save_path` ya se niega a guardarlas);
+  - tampoco toca las filas de segmentos pendientes del agente (lo resuelve el editor).
+- **Configuración → Archivos** (`settings_view.rs`, `SettingsSection::Files`): dos filas nuevas con `Control::Switch`, después de "Pausa del autoguardado": `files.trim_trailing_whitespace_on_save` ("Quitar espacios al final de las líneas al guardar") y `files.ensure_final_newline_on_save` ("Terminar el archivo con un salto de línea al guardar"), con las descripciones de la spec.
+- Tests: `save_cleanup_tests.rs`.

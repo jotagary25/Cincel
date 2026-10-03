@@ -232,6 +232,9 @@ impl Workspace {
         let theme = ThemeColors::global(cx).clone();
         let scale = crate::settings::ui_scale(cx);
         let message = pending_message(changes, files);
+        // D17 of spec 09: the unsent comments are counted too; nothing else
+        // changes (they are saved and come back with the folder).
+        let comments = self.review_close_comments_line(cx);
 
         Some(
             div()
@@ -275,6 +278,13 @@ impl Workspace {
                                 .text_color(theme.text_muted)
                                 .child(SharedString::from(message)),
                         )
+                        .children(comments.map(|line| {
+                            div()
+                                .debug_selector(|| "review-close-comments".to_string())
+                                .text_size(px(12. * scale))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(line))
+                        }))
                         .child(
                             h_flex()
                                 .gap_2()
@@ -427,6 +437,13 @@ impl Workspace {
                         ),
                 ),
         )
+    }
+
+    /// The dialog's line about the unsent comments ("También hay 2
+    /// comentarios sin enviar…"), while it is up and there are any.
+    pub fn review_close_comments_line(&self, cx: &gpui::App) -> Option<String> {
+        self.review_close_dialog()?;
+        crate::review::close_comments_line(self.review().read(cx).comment_count())
     }
 
     /// "Aceptar todo" in the dialog, for the tests (which cannot click).

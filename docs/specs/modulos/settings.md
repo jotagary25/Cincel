@@ -11,7 +11,8 @@ Tipos y carga de configuración. Sin GPUI.
   "buffer_font_family": "JetBrains Mono", "buffer_font_size": 14, "buffer_line_height": 1.5,
   "text_rendering": "subpixel" | "grayscale",
   "editor": { "soft_wrap": false, "tab_size": 4, "insert_spaces": true, "show_whitespace": false, "ruler": 100, "cursor_blink": true },
-  "files": { "exclude": ["**/.git", "**/target", "**/node_modules"], "autosave": "off" | "on_focus_change" | "after_delay", "autosave_delay_ms": 1000 },
+  "files": { "exclude": ["**/.git", "**/target", "**/node_modules"], "autosave": "off" | "on_focus_change" | "after_delay", "autosave_delay_ms": 1000,
+             "trim_trailing_whitespace_on_save": true, "ensure_final_newline_on_save": true },
   "review": { "jump_to_next_on_decide": false, "max_file_size_kb": 2048, "max_lines": 50000,
               "snapshot_max_total_mb": 300,
               "sensitive_paths": ["**/.env*", "**/.git/**", "**/Cargo.lock", "**/package-lock.json"] },
@@ -70,6 +71,21 @@ Detalle, verificación y desviaciones en `docs/etapas/etapa-5.md`. Spec:
   una fila por (tecla, contexto) con la de nivel más alto ganando, más
   `replaces` (qué comando de nivel inferior tenía esa misma tecla), para el
   modal de atajos.
+
+## Ronda 2 de la Etapa 7: limpieza al guardar
+
+Spec: `docs/specs/10-etapa7-ronda2.md` §7.8 (R16). `FilesSettings` suma dos claves (`#[serde(default)]`, bool, `true` por defecto), con estos comentarios en `DEFAULT_SETTINGS_JSONC` (`crates/cincel-settings/src/defaults.rs`):
+
+```jsonc
+    // Al guardar, quitar los espacios del final de cada línea (no en Markdown ni en los cambios del agente sin decidir).
+    "trim_trailing_whitespace_on_save": true,
+    // Al guardar, terminar el archivo con un salto de línea si no lo tiene.
+    "ensure_final_newline_on_save": true
+```
+
+- `files.trim_trailing_whitespace_on_save`: quita los espacios y tabulaciones del final de cada línea al guardar (no en Markdown, ni en los cambios del agente sin decidir).
+- `files.ensure_final_newline_on_save`: agrega un salto de línea final si el archivo no vacío no lo tiene.
+- Las aplica `Center::save_path` en el workspace (`modulos/workspace.md`); tienen fila en Configuración → Archivos.
 
 ## Criterios de aceptación
 - [ ] Un `settings.json` vacío, inexistente o con un error de sintaxis produce los valores por defecto y un aviso.

@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use cincel_project::Recents;
-use gpui::{App, ClickEvent, Context, FocusHandle, Focusable, Window};
+use gpui::{App, ClickEvent, Context, DismissEvent, FocusHandle, Focusable, Global, Window};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
@@ -144,8 +144,25 @@ struct TitleMenuContext {
     recents: Vec<PathBuf>,
 }
 
+/// The title bar's popup while it is open, so the shortcuts the "something
+/// modal is open" rule freezes (`Ctrl+L` and the panel toggles) can still
+/// close it ([`Workspace::dismiss_title_menu`]).
+struct OpenTitleMenu {
+    menu: gpui::WeakEntity<PopupMenu>,
+    /// Where the keyboard goes back to, like gpui-kit's own `Esc` does.
+    restore_focus: FocusHandle,
+}
+
+impl Global for OpenTitleMenu {}
+
 /// Builds the popup menu of §8.2 over `menu`, wiring every item's action and
 /// the "Carpetas recientes" submenu.
+///
+/// gpui-kit's `PopupMenu` closes by itself on a click outside and on `Esc`;
+/// the other two ways of leaving a drop-down menu
+/// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §4.1) are added
+/// here by [`crate::menu_dismiss::dismiss_on_focus_loss`]: the keyboard focus
+/// going to another element and the window losing the focus.
 fn build_title_menu(
     menu: PopupMenu,
     context: TitleMenuContext,
@@ -159,6 +176,14 @@ fn build_title_menu(
         can_save,
         recents,
     } = context;
+    // Tied to the popup's own entity: they go away with it.
+    for subscription in crate::menu_dismiss::dismiss_on_focus_loss(&menu, window, cx) {
+        subscription.detach();
+    }
+    cx.set_global(OpenTitleMenu {
+        menu: cx.weak_entity(),
+        restore_focus: action_context.clone(),
+    });
     let menu = menu.action_context(action_context);
     let menu = menu.menu("Abrir carpeta…", Box::new(actions::OpenFolder));
 
@@ -248,6 +273,21 @@ impl Workspace {
         if has_project {
             row = row.child(self.render_panel_toggle(FocusZone::Files, cx));
         }
+
+        // With the menu open, `Ctrl+L` and the panel toggles are frozen (the
+        // menu counts as modal, `Workspace::is_modal_open`): they close it,
+        // like any other way of moving the focus away. Capture phase, so the
+        // menu is not still open when the action reaches its own handler.
+        let row = row
+            .capture_action(cx.listener(|this, _: &actions::FocusNextZone, window, cx| {
+                this.dismiss_title_menu(window, cx);
+            }))
+            .capture_action(cx.listener(|this, _: &actions::ToggleChat, window, cx| {
+                this.dismiss_title_menu(window, cx);
+            }))
+            .capture_action(cx.listener(|this, _: &actions::ToggleTree, window, cx| {
+                this.dismiss_title_menu(window, cx);
+            }));
 
         // The `×` asks first (`Self::close_from_title_bar`); without a
         // handler gpui-kit removes the window on the spot.
@@ -373,6 +413,22 @@ impl Workspace {
     /// `Workspace::is_modal_open` (§7.4).
     pub fn is_title_menu_open(&self) -> bool {
         self.title_menu_open_flag().get()
+    }
+
+    /// Closes the title bar's menu, when it is open, and gives the keyboard
+    /// back to where it was (what its own `Esc` does).
+    pub(crate) fn dismiss_title_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_title_menu_open() {
+            return;
+        }
+        let Some((menu, restore_focus)) = cx
+            .try_global::<OpenTitleMenu>()
+            .and_then(|open| Some((open.menu.upgrade()?, open.restore_focus.clone())))
+        else {
+            return;
+        };
+        menu.update(cx, |_, cx| cx.emit(DismissEvent));
+        window.focus(&restore_focus, cx);
     }
 
     /// Opens `path` as the project, replacing the current one (§8.2); a

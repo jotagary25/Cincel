@@ -848,7 +848,7 @@ fn real_antigravity_prints_its_login_link() {
 fn login_log_line_never_carries_the_link_the_code_or_the_identity() {
     let secret_url = "https://example.test/oauth?code=SUPER-SECRET-TOKEN";
     let secret_code = "PASTE-ME-1234";
-    let secret_email = "persona@example.test";
+    let secret_email = "persona@example.com";
 
     let events = [
         LoginEvent::UrlDetected(secret_url.to_string()),

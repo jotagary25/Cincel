@@ -8,15 +8,49 @@
 
 use std::ops::Range;
 
-use gpui::{Context, Window};
+use gpui::{App, ClipboardEntry, ClipboardItem, Context, Global, Window};
+use serde::{Deserialize, Serialize};
 
 use super::EditorView;
 use crate::actions::*;
 use crate::display_map::DisplayCell;
 use crate::ops::{self, Edit};
+use crate::settings::EditorChrome;
 
 /// How far the bracket matcher walks, in characters, before giving up.
 pub const MAX_BRACKET_SCAN: usize = 200_000;
+
+/// The text `Ctrl+C` / `Ctrl+X` last put on the clipboard as a whole line
+/// (no selection, R12), or `None` when the last copy was a selection. On
+/// Linux the JSON mark of the clipboard item does not always survive the
+/// system clipboard, so `Ctrl+V` also treats a clipboard that holds exactly
+/// this text as a line.
+#[derive(Default)]
+pub(crate) struct LineClipboard(pub(crate) Option<String>);
+
+impl Global for LineClipboard {}
+
+/// The JSON mark on the clipboard item of a copied line.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LineCopyMetadata {
+    pub(crate) whole_line: bool,
+}
+
+/// Whether `item` holds a whole line copied by [`EditorView::copy_or_cut`]:
+/// its metadata says so, or its text is the remembered [`LineClipboard`].
+fn is_line_copy(item: &ClipboardItem, text: &str, cx: &App) -> bool {
+    let marked = item.entries().iter().any(|entry| match entry {
+        ClipboardEntry::String(string) => string
+            .metadata_json::<LineCopyMetadata>()
+            .is_some_and(|metadata| metadata.whole_line),
+        _ => false,
+    });
+    marked
+        || cx
+            .try_global::<LineClipboard>()
+            .and_then(|line| line.0.as_deref())
+            == Some(text)
+}
 
 impl EditorView {
     // -- helpers -------------------------------------------------------------
@@ -40,7 +74,7 @@ impl EditorView {
     }
 
     /// `(anchor, cursor)` as buffer offsets.
-    fn selection_offsets(&self) -> (usize, usize) {
+    pub(super) fn selection_offsets(&self) -> (usize, usize) {
         (
             self.edit_offset(self.selection_anchor),
             self.edit_offset(self.cursor),
@@ -290,6 +324,174 @@ impl EditorView {
         let column = (point.column as usize).min(line.len());
         let indent = &line[..ops::indent_len(&line)];
         ops::reindent_paste(text, &line[..column], indent)
+    }
+
+    // -- whole-line clipboard (E2) -----------------------------------------------
+
+    /// Whether this view has the code-editor chrome: the typing helpers of
+    /// E2, E4, E5 and E6 are off in the chat composer and the comment box
+    /// (R13).
+    fn is_full_chrome(&self) -> bool {
+        self.settings.chrome == EditorChrome::Full
+    }
+
+    /// `Ctrl+C` / `Ctrl+X`. With a selection: the selected text goes to the
+    /// clipboard (and `cut` deletes it) and the whole-line memory is
+    /// forgotten. Without one, in `Full` chrome: the cursor's row (a ghost
+    /// row's base text too) goes to the clipboard with its `\n`, marked as a
+    /// whole line, and `cut` deletes the buffer row as `editor::delete_line`
+    /// does (one undo step); a ghost row is read-only, so it is only copied.
+    pub(crate) fn copy_or_cut(&mut self, cut: bool, cx: &mut Context<Self>) {
+        let text = self.selected_text();
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.set_global(LineClipboard(None));
+            if cut {
+                let range = self.edit_range();
+                if range.start != range.end {
+                    self.replace_buffer_range(range, "", cx);
+                }
+            }
+            return;
+        }
+        if !self.is_full_chrome() {
+            return;
+        }
+        let mut line = self.display_row_source(self.cursor.row);
+        line.push('\n');
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
+            line.clone(),
+            LineCopyMetadata { whole_line: true },
+        ));
+        cx.set_global(LineClipboard(Some(line)));
+        if cut
+            && matches!(
+                self.display_map.to_buffer(self.cursor.row),
+                DisplayCell::Buffer(_)
+            )
+        {
+            self.delete_lines(cx);
+        }
+    }
+
+    /// `Ctrl+V` of a copied whole line with no selection: inserts it as is
+    /// at the start of the cursor's row, so the text the cursor was on moves
+    /// one row down and the cursor stays on it, in the same column. Returns
+    /// `false` (and does nothing) when the paste is not that case.
+    pub(crate) fn paste_whole_line(
+        &mut self,
+        item: &ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.is_full_chrome() || self.has_selection() {
+            return false;
+        }
+        let Some(text) = item.text() else {
+            return false;
+        };
+        if !text.ends_with('\n') || !is_line_copy(item, &text, cx) {
+            return false;
+        }
+        // On a ghost row `edit_offset` is already the start of the next real
+        // row, which is where the line goes.
+        let cursor = self.edit_offset(self.cursor);
+        let row_start = match self.display_map.to_buffer(self.cursor.row) {
+            DisplayCell::Buffer(row) => self.snapshot.line_start_offset(row),
+            DisplayCell::Phantom { .. } => cursor,
+        };
+        let after = cursor + text.len();
+        self.apply_edits(vec![(row_start..row_start, text)], after, after, cx);
+        true
+    }
+
+    // -- indentation while typing (E4, E5, E6) ----------------------------------------
+
+    /// Typing `}`, `]` or `)` on a row that only has indentation before the
+    /// cursor (and nothing but blanks after it) takes one level off that
+    /// indentation, by the rule of `Shift+Tab`, and types the character: one
+    /// undo step. Returns `true` when it did.
+    ///
+    /// Not with a selection, an IME composition or in `Minimal` chrome. The
+    /// "step over the auto-closed closer" of `type_with_pairs` always wins:
+    /// it needs the closer right after the cursor, which this never accepts.
+    pub(crate) fn outdent_for_closer(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if !self.is_full_chrome() || self.has_selection() || self.marked_range.is_some() {
+            return false;
+        }
+        let mut chars = text.chars();
+        let (Some(ch), None) = (chars.next(), chars.next()) else {
+            return false;
+        };
+        if !matches!(ch, '}' | ']' | ')') {
+            return false;
+        }
+        let DisplayCell::Buffer(row) = self.display_map.to_buffer(self.cursor.row) else {
+            return false;
+        };
+        let offset = self.edit_offset(self.cursor);
+        let line_start = self.snapshot.line_start_offset(row);
+        let line = self.snapshot.line_text(row);
+        let column = offset.saturating_sub(line_start).min(line.len());
+        let (before, after) = line.split_at(column);
+        let blank = |c: char| c == ' ' || c == '\t';
+        if before.is_empty() || !before.chars().all(blank) || !after.chars().all(blank) {
+            return false;
+        }
+        let unit = self.indent_unit();
+        let mut replacement = ops::outdent_once(before, &unit).to_string();
+        replacement.push(ch);
+        let cursor = line_start + replacement.len();
+        self.apply_edits(vec![(line_start..offset, replacement)], cursor, cursor, cx);
+        true
+    }
+
+    /// `Enter` on a row that is only blanks (or empty): the row becomes empty
+    /// and the new row below gets the indentation that was before the cursor,
+    /// with the cursor at its end: one undo step. Returns `true` when it did.
+    pub(crate) fn newline_on_indent_row(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.is_full_chrome() || self.has_selection() {
+            return false;
+        }
+        let DisplayCell::Buffer(row) = self.display_map.to_buffer(self.cursor.row) else {
+            return false;
+        };
+        let line = self.snapshot.line_text(row);
+        if !line.chars().all(|c| c == ' ' || c == '\t') {
+            return false;
+        }
+        let line_start = self.snapshot.line_start_offset(row);
+        let column = self
+            .edit_offset(self.cursor)
+            .saturating_sub(line_start)
+            .min(line.len());
+        let text = format!("\n{}", &line[..column]);
+        self.replace_buffer_range(line_start..line_start + line.len(), &text, cx);
+        true
+    }
+
+    /// `Backspace` with only spaces before the cursor deletes back to the
+    /// previous indent stop (`((column - 1) % size) + 1` spaces, `size` being
+    /// the width of [`EditorView::indent_unit`]; a tab unit counts 1). A tab
+    /// before the cursor, a selection or a composition leave it to the
+    /// one-character delete. Returns `true` when it did.
+    pub(crate) fn backspace_in_indent(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.is_full_chrome() || self.has_selection() || self.marked_range.is_some() {
+            return false;
+        }
+        let DisplayCell::Buffer(row) = self.display_map.to_buffer(self.cursor.row) else {
+            return false;
+        };
+        let offset = self.edit_offset(self.cursor);
+        let line_start = self.snapshot.line_start_offset(row);
+        let column = offset.saturating_sub(line_start);
+        let line = self.snapshot.line_text(row);
+        if column == 0 || column > line.len() || !line[..column].bytes().all(|b| b == b' ') {
+            return false;
+        }
+        let size = self.indent_unit().len();
+        let count = ops::spaces_to_previous_stop(column, size);
+        self.replace_buffer_range(offset - count..offset, "", cx);
+        true
     }
 
     // -- line commands ---------------------------------------------------------

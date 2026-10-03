@@ -36,6 +36,7 @@ flechas `↑ ↓ ← →` son sus propias teclas.
 | `Ctrl+0` | Restablecer el zoom de la interfaz |
 | `Enter` (en el árbol de archivos) | Abrir el archivo seleccionado en el árbol |
 | `Esc` (en el modal de atajos) | Cerrar el modal de atajos |
+| `Esc` (con una imagen del chat abierta en grande) | Cerrar la imagen abierta |
 
 ## Editor
 
@@ -54,6 +55,9 @@ flechas `↑ ↓ ← →` son sus propias teclas.
 | `Ctrl+G` | Ir a una línea |
 | `Esc` (en el editor, sin la búsqueda abierta) | Cerrar la búsqueda o el diálogo abierto |
 | `Alt+Z` | Alternar el ajuste de línea |
+| `Ctrl+↑` | Desplazar una línea hacia arriba (sin mover el cursor) |
+| `Ctrl+↓` | Desplazar una línea hacia abajo (sin mover el cursor) |
+| `Ctrl+Alt+W` | Mostrar u ocultar los espacios en blanco (en la pestaña actual) |
 
 ### La barra de búsqueda (`Ctrl+F` / `Ctrl+H`)
 
@@ -117,8 +121,19 @@ Y, con el foco en el campo **"Reemplazar…"**:
 | `Alt+Shift+↓` | Duplicar las líneas seleccionadas debajo |
 | `Ctrl+Shift+K` | Borrar las líneas seleccionadas |
 | `Ctrl+/` | Comentar o descomentar las líneas seleccionadas |
+| `Ctrl+Shift+M` | Comentar la selección: abre una cajita debajo de esas líneas para escribirle una nota al agente (sin selección, comenta la línea del cursor; con el cursor en un segmento pendiente, comenta ese segmento). También con clic derecho → "Comentar selección" |
+| `Ctrl+Enter` (escribiendo un comentario) | Guardar el comentario |
+| `Esc` (escribiendo un comentario) | Cancelar el comentario |
 | `Ctrl+J` | Unir la línea con la siguiente |
 | `Ctrl+Shift+\`, `Ctrl+|` | Ir al paréntesis o llave que corresponde |
+
+Algunas de estas teclas hacen algo más según dónde estés. Sin nada
+seleccionado, `Ctrl+C` y `Ctrl+X` copian o cortan la línea entera, y
+`Ctrl+V` la pega como línea nueva arriba de la del cursor. Al escribir `}`,
+`]` o `)` en una línea que solo tiene sangría, se quita un nivel de sangría;
+`Enter` en una línea así no deja espacios sueltos, y `Backspace` dentro de
+la sangría borra un nivel entero. Los detalles están en
+[Escribir en el editor](editor.md).
 
 ## Revisión
 
@@ -139,6 +154,7 @@ Y, con el foco en el campo **"Reemplazar…"**:
 | `Alt+L` | Ir al próximo archivo con cambios pendientes |
 | `Ctrl+Shift+R` | Abrir o cerrar el panel de revisión |
 | `Alt+Shift+U` | Deshacer el último rechazo |
+| `Ctrl+Shift+M` | Comentar la selección o el segmento bajo el cursor (ver la sección Editor; no decide nada) |
 
 ## Chat
 
@@ -146,13 +162,21 @@ Y, con el foco en el campo **"Reemplazar…"**:
 |---|---|
 | `Enter` | Enviar el mensaje |
 | `Shift+Enter` | Insertar un salto de línea en el mensaje |
-| `Esc` | Cancelar el turno en curso |
+| `Esc` | Cancelar el turno en curso (con un menú del chat abierto, solo lo cierra) |
 | `Ctrl+Shift+N` | Iniciar una sesión nueva |
+| `Ctrl+V` (en la caja de texto) | Pegar; si lo copiado es una imagen o archivos de imagen, los adjunta al mensaje en vez de pegar texto |
 | `↑` (con un menú emergente abierto: `@`, `/`, selectores) | Mover la selección hacia arriba en el menú emergente |
 | `↓` (ídem) | Mover la selección hacia abajo en el menú emergente |
 | `Tab` (ídem) | Confirmar la fila seleccionada del menú emergente |
 | `Enter` (con un permiso pendiente) | Aceptar el permiso pendiente con la primera opción |
 | `Esc` (ídem) | Rechazar el permiso pendiente |
+
+Sin atajo de teclado, con el mouse: el botón del clip de la caja del chat
+("Adjuntar imagen"), la `×` de cada miniatura y de cada etiqueta de
+comentario, el botón redondo de la flecha hacia abajo ("Ir al final"), los
+botones **Ver más** / **Ver menos** de los bloques de código largos y el
+botón **Comentar** del segmento (ver [El chat](chat.md) y
+[Revisión de cambios](revision.md#comentarios-para-el-agente)).
 
 ## Buscador de archivos (`Ctrl+P`)
 

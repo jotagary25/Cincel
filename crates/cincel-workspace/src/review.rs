@@ -65,8 +65,8 @@ use cincel_editor::{
 };
 use cincel_project::{BufferChange, BufferHandle, ReloadOutcome};
 use cincel_review::{
-    DropReason, FileOp, FileReview, FileStatus, HunkId, HunkKind, LinePair, RecomputeResult,
-    Revert, ReviewLocation, ReviewStore, Tracked, TurnId,
+    CommentDropReason, DropReason, FileOp, FileReview, FileStatus, HunkId, HunkKind, LinePair,
+    RecomputeResult, Revert, ReviewLocation, ReviewStore, Tracked, TurnId,
 };
 use cincel_text::{BufferEvent, BufferSnapshot, EditSource, Point, Rope, SubscriptionId};
 use gpui::{
@@ -85,6 +85,16 @@ mod photo;
 
 pub use photo::{
     SWEEP_NOTICE, SWEEP_NOTICE_AFTER, SWEEP_SLICE, SweepStats, WATCH_SLICE, WatchStats,
+};
+
+/// Comments for the agent: editors, chat, prompt and counters
+/// (`review_comments.rs`, spec 09 §6.7).
+#[path = "review_comments.rs"]
+mod comments;
+
+pub use comments::{
+    PromptFeedback, close_comments_line, comment_dropped_message, comments_label, sent_cards,
+    state_label, status_label,
 };
 
 /// Debounce of the background recompute (`03-arquitectura.md` §4.3).
@@ -170,6 +180,10 @@ pub struct ReviewSummary {
     pub panel_open: bool,
     /// The file the "cambios sin guardar" dialog asks about.
     pub dirty_prompt: Option<SharedString>,
+    /// Unsent comments for the agent (spec 09 §6.7).
+    pub comments: usize,
+    /// Unsent comments per file, by absolute path.
+    pub comments_per_file: BTreeMap<PathBuf, usize>,
 }
 
 impl ReviewSummary {
@@ -397,6 +411,9 @@ pub struct Review {
     project_subscription: Option<Subscription>,
     /// [`FilesChanged`] and [`HostWrote`] of the open project.
     photo_subscriptions: Vec<Subscription>,
+    /// The comments' editors, chat and in-flight prompt
+    /// (`review_comments.rs`).
+    comments: comments::CommentGlue,
     _subscriptions: Vec<Subscription>,
     _wake_task: Task<()>,
 }
@@ -465,6 +482,7 @@ impl Review {
             watch: photo::WatchQueue::default(),
             project_subscription: None,
             photo_subscriptions: Vec::new(),
+            comments: comments::CommentGlue::default(),
             _subscriptions: vec![subscription],
             _wake_task: wake_task,
         }
@@ -534,6 +552,7 @@ impl Review {
         self.watch.clear();
         self.project_subscription = None;
         self.photo_subscriptions.clear();
+        self.comments.reset();
         self.project = project.clone();
 
         if let Some(project) = project {
@@ -609,6 +628,7 @@ impl Review {
             tracing::info!(path = %path.display(), ?reason, "revisión descartada al abrir");
             crate::toast::warn(dropped_message(path, *reason), cx);
         }
+        self.after_comments_loaded(&report, cx);
         // Pending files reopen their buffers in the background (no tab), so
         // the views are ready the moment a tab shows them.
         for path in &report.restored {
@@ -642,8 +662,13 @@ impl Review {
     /// [`Self::turn_waiter`] before it goes out. When the previous turn is
     /// still being swept (in the background), the new turn only starts once
     /// that is over, and the prompt waits for both.
-    pub fn begin_prompt(&mut self, cx: &mut Context<Self>) -> (u64, Option<String>) {
+    ///
+    /// The unsent comments leave with it (spec 09 §6.7): they are taken from
+    /// the store right after the flush and written after the patches, in the
+    /// same block (`cincel_review::format_feedback`).
+    pub fn begin_prompt(&mut self, cx: &mut Context<Self>) -> PromptFeedback {
         self.flush(None, cx);
+        let sent = self.take_comments();
         let turn = TurnId(self.next_turn);
         self.next_turn += 1;
         let ended = self.active_turn.is_none() || self.finish_turn(Some(turn), cx);
@@ -658,7 +683,16 @@ impl Review {
             self.open_turn(turn, Vec::new(), cx);
         }
         self.refresh(None, cx);
-        (turn.0, (!notes.is_empty()).then(|| notes.join("\n")))
+        if !sent.is_empty() {
+            // `state.json` without them.
+            self.schedule_persist(cx);
+        }
+        let report = (!notes.is_empty()).then(|| notes.join("\n"));
+        PromptFeedback {
+            turn: turn.0,
+            feedback: cincel_review::format_feedback(report.as_deref(), &sent),
+            sent,
+        }
     }
 
     /// Starts `turn` and its photo; `waiters` are told when the photo is
@@ -1227,6 +1261,12 @@ impl Review {
                 changed.insert(path.clone());
             }
             self.note(&path, tracked);
+            // Comments follow every edit of a watched buffer, in review or
+            // not (`review_comments.rs`).
+            if self.store.comment_count_in(&path) > 0 {
+                changed.insert(path.clone());
+            }
+            self.store.comment_buffer_event(&path, &event, &snapshot);
         }
         changed
     }
@@ -1272,6 +1312,11 @@ impl Review {
         let mut any = false;
         for change in changes {
             if self.store.file(&change.path).is_none() {
+                // A commented file another program deleted outside a turn
+                // (§6.2.12; during a turn the photo puts it in review).
+                if change.outcome == ReloadOutcome::Deleted && self.active_turn.is_none() {
+                    self.drop_comments(&change.path, CommentDropReason::Missing, cx);
+                }
                 continue;
             }
             any = true;
@@ -1311,6 +1356,8 @@ impl Review {
             .filter(|path| {
                 self.store.file(path).is_none()
                     && !self.prompts.iter().any(|prompt| &prompt.path == *path)
+                    && self.store.comment_count_in(path) == 0
+                    && !self.comments.in_flight(path)
             })
             .cloned()
             .collect();
@@ -1903,6 +1950,7 @@ impl Review {
                         watched.handle.lock().unsubscribe(watched.subscription);
                     }
                     self.queue.lock().retain(|(queued, _)| queued != &path);
+                    self.drop_comments(&path, CommentDropReason::Missing, cx);
                     self.close_tab_later(&path, cx);
                     if let Some(project) = &self.project {
                         project.read(cx).refresh_git();
@@ -2357,6 +2405,7 @@ impl Review {
     /// ([`CenterPanel::sync_deleted_reviews`], which needs the window).
     fn refresh(&mut self, path: Option<&Path>, cx: &mut Context<Self>) {
         self.refresh_summary(cx);
+        self.sync_comment_editors(cx);
         if let Some(center) = self.center.upgrade() {
             let editors: Vec<(PathBuf, Entity<EditorView>, bool)> = center
                 .read(cx)
@@ -2365,10 +2414,11 @@ impl Review {
                 .filter(|tab| path.is_none_or(|path| tab.path == path))
                 .map(|tab| (tab.path.clone(), tab.editor().clone(), tab.deleted_review))
                 .collect();
-            for (path, editor, deleted_review) in editors {
-                let view = self.view_for_tab(&path, deleted_review);
+            for (path, editor, deleted_review) in &editors {
+                let view = self.view_for_tab(path, *deleted_review);
                 editor.update(cx, |editor, cx| editor.set_review(view, cx));
             }
+            self.push_comments(&editors, cx);
             center.update(cx, |_, cx| cx.notify());
             if center.read(cx).deleted_reviews_out_of_sync(cx) {
                 self.sync_center_later(cx);
@@ -2455,6 +2505,16 @@ impl Review {
             .prompts
             .front()
             .map(|prompt| SharedString::from(file_name(&prompt.path)));
+        summary.comments = self.store.comment_count();
+        summary.comments_per_file = self
+            .store
+            .commented_paths()
+            .into_iter()
+            .map(|path| {
+                let count = self.store.comment_count_in(&path);
+                (path, count)
+            })
+            .collect();
     }
 }
 

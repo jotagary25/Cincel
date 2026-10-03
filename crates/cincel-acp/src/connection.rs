@@ -1017,6 +1017,12 @@ async fn command_loop(
                 let shared = shared.clone();
                 let cx_prompt = cx.clone();
                 cx.spawn(async move {
+                    // Reject malformed image blocks before anything goes on
+                    // the wire; the turn never starts, like a failed request.
+                    if let Err(error) = protocol::validate_prompt_blocks(&blocks) {
+                        shared.error(error.to_string());
+                        return Ok(());
+                    }
                     let content = protocol::build_prompt_content(blocks, feedback);
                     let mut request = PromptRequest::new(session_id.clone(), content);
                     if file_change_report_supported {

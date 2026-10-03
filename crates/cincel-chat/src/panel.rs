@@ -28,6 +28,7 @@ use gpui::{
 use gpui_kit::base::text::TextViewState;
 
 use crate::actions;
+use crate::code_folds::{CodeBlockKey, split_markdown};
 use crate::events::ChatEvent;
 use crate::markdown::{CodeHighlighter, append_chunk, markdown_state, set_text};
 use crate::model::*;
@@ -71,6 +72,26 @@ pub enum Popover {
     Config(usize),
     /// The legacy `availableModes` selector of the footer.
     Modes,
+}
+
+impl Popover {
+    /// Whether the overlay takes the keyboard focus while it is open.
+    ///
+    /// The header menus and the footer selectors do (they are menus the user
+    /// navigates on their own); `@` and `/` do not, because the user keeps
+    /// typing in the composer while they list something
+    /// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §4.2).
+    #[must_use]
+    pub fn takes_focus(&self) -> bool {
+        matches!(
+            self,
+            Popover::Connections
+                | Popover::ConnectionMenu(_)
+                | Popover::Conversations
+                | Popover::Config(_)
+                | Popover::Modes
+        )
+    }
 }
 
 /// How many stderr lines are kept for the "agente caído" card (`02-visual.md` §9).
@@ -120,8 +141,9 @@ pub(crate) fn composer_settings(settings: &ChatSettings, cx: &App) -> EditorSett
     }
 }
 
-/// Markdown states of the user bubbles: `(entry, piece)` → (text, state).
-pub(crate) type BubbleViews = HashMap<(usize, usize), (String, Entity<TextViewState>)>;
+/// Markdown states of the user bubbles: `(entry, piece, segment)` → (text,
+/// state); a piece is cut into segments like an answer (§10.3).
+pub(crate) type BubbleViews = HashMap<(usize, usize, usize), (String, Entity<TextViewState>)>;
 
 /// The chat panel (`docs/specs/modulos/chat.md`).
 pub struct ChatPanel {
@@ -133,7 +155,7 @@ pub struct ChatPanel {
     pub(crate) input: Entity<EditorView>,
     /// The mention tokens the composer's decorator was last built with.
     decorated_mentions: Vec<String>,
-    /// Markdown states of the user bubbles, per `(entry, piece)`, with the
+    /// Markdown states of the user bubbles, per `(entry, piece, segment)`, with the
     /// text they were built from (rebuilt when it differs).
     pub(crate) bubble_views: RefCell<BubbleViews>,
     /// The transcript's `gpui::list`: one item per [`Entry`], following the
@@ -166,6 +188,23 @@ pub struct ChatPanel {
     /// `@` mentions of the current draft: token → absolute path.
     pub(crate) mentions: Vec<Mention>,
     pub(crate) popover: Popover,
+    /// Focus of the open header menu or footer selector: the menu's own focus
+    /// lets "the focus went somewhere else" close it, whatever took it (the
+    /// editor, the tree, `Ctrl+L`, another window).
+    pub(crate) popover_focus: FocusHandle,
+    /// Whoever had the focus before the menu took it; `Esc` and choosing a row
+    /// give it back.
+    restore_focus: Option<FocusHandle>,
+    /// A menu that takes the focus was opened and has not been given it yet
+    /// (the focus can only move while painting, where the window is at hand).
+    focus_popover_pending: bool,
+    /// The menu a click outside just closed, and the press that did it. A
+    /// click on the button that had opened the menu comes right after and
+    /// must leave it closed instead of opening it again.
+    just_dismissed: Option<(Popover, u64)>,
+    /// Counts the mouse presses over the panel, to tell `just_dismissed`'s
+    /// press from an old one.
+    pub(crate) press_serial: u64,
     pub(crate) file_candidates: Vec<PathBuf>,
     pub(crate) project_root: Option<PathBuf>,
     pub(crate) auth_methods: Vec<AuthMethod>,
@@ -180,6 +219,29 @@ pub struct ChatPanel {
     placeholder_dirty: bool,
     turn_started: Option<Instant>,
     pub(crate) thought_started: Option<Instant>,
+    /// The last kind of signal the agent sent in the running turn: what the
+    /// activity row says ([`ChatPanel::activity`]). Never stored.
+    activity_signal: AgentActivity,
+    /// The images of the draft, in the order they were attached
+    /// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §5.3.1).
+    pub(crate) attachments: Vec<crate::panel_media::PendingAttachment>,
+    /// Id of the next [`crate::panel_media::PendingAttachment`].
+    pub(crate) next_attachment_id: u64,
+    /// Whether the active connection accepts images: `None` without one (or
+    /// before its `Connected`), D6.
+    pub(crate) image_support: Option<bool>,
+    /// Folder of the conversation on screen; sent images whose bytes are not
+    /// in memory are read from its `images/` (D7).
+    pub(crate) conversation_dir: Option<PathBuf>,
+    /// The unsent review comments, one tag each inside the composer box.
+    pub(crate) pending_comments: Vec<crate::comments::PendingComment>,
+    /// Decoded-once thumbnails and the "is the file there" answers.
+    pub(crate) media_cache: RefCell<crate::panel_media::MediaCache>,
+    /// Comment cards whose code is unfolded, by `(entry, block)`.
+    pub(crate) expanded_cards: std::collections::HashSet<(usize, usize)>,
+    /// Long code blocks the user unfolded ("Ver más"), for as long as the
+    /// conversation stays open (`docs/specs/10-etapa7-ronda2.md` §10.1).
+    pub(crate) expanded_code_blocks: std::collections::HashSet<CodeBlockKey>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -227,6 +289,28 @@ impl ChatPanel {
             editor
         });
         let subscription = cx.subscribe_in(&input, window, Self::on_input_event);
+        let popover_focus = cx.focus_handle();
+        let composer_focus = input.read(cx).focus_handle(cx);
+        // The menus close by themselves (`docs/specs/09-etapa7-…` §4): the
+        // focus leaving the menu's own handle (a click on the editor or the
+        // tree, `Ctrl+L`, another window), the composer losing it while `@` or
+        // `/` list something, and the window going to the background.
+        let menu_focus_out = cx.on_focus_out(&popover_focus, window, |this, _, _, cx| {
+            this.dismiss_popover(cx);
+        });
+        let composer_focus_out = cx.on_focus_out(&composer_focus, window, |this, _, _, cx| {
+            if matches!(
+                this.popover,
+                Popover::Files { .. } | Popover::Commands { .. }
+            ) {
+                this.dismiss_popover(cx);
+            }
+        });
+        let window_activation = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.dismiss_popover(cx);
+            }
+        });
         Self {
             theme,
             settings,
@@ -254,6 +338,11 @@ impl ChatPanel {
             commands: Vec::new(),
             mentions: Vec::new(),
             popover: Popover::Closed,
+            popover_focus,
+            restore_focus: None,
+            focus_popover_pending: false,
+            just_dismissed: None,
+            press_serial: 0,
             file_candidates: Vec::new(),
             project_root: None,
             auth_methods: Vec::new(),
@@ -265,7 +354,21 @@ impl ChatPanel {
             placeholder_dirty: false,
             turn_started: None,
             thought_started: None,
-            _subscriptions: vec![subscription],
+            activity_signal: AgentActivity::Thinking,
+            attachments: Vec::new(),
+            next_attachment_id: 0,
+            image_support: None,
+            conversation_dir: None,
+            pending_comments: Vec::new(),
+            media_cache: RefCell::new(crate::panel_media::MediaCache::default()),
+            expanded_cards: std::collections::HashSet::new(),
+            expanded_code_blocks: std::collections::HashSet::new(),
+            _subscriptions: vec![
+                subscription,
+                menu_focus_out,
+                composer_focus_out,
+                window_activation,
+            ],
         }
     }
 
@@ -297,6 +400,25 @@ impl ChatPanel {
         self.connections
             .iter()
             .find(|connection| connection.id == id)
+    }
+
+    /// The badge of the header: the state of the active connection only, by
+    /// priority (expired session > unavailable > authentication required >
+    /// disconnected > connected). `None` without an active connection. The
+    /// agent's activity (thinking, working, waiting for a permission) never
+    /// changes it (`docs/specs/10-etapa7-ronda2.md` §3.1).
+    #[must_use]
+    pub fn header_badge(&self) -> Option<HeaderBadge> {
+        let connection = self.active_connection()?;
+        Some(match (&connection.badge, self.status) {
+            (ConnectionBadge::SessionExpired, _) => HeaderBadge::SessionExpired,
+            (ConnectionBadge::Unavailable { reason }, _) => HeaderBadge::Unavailable {
+                reason: reason.clone(),
+            },
+            (_, AgentStatus::AuthRequired) => HeaderBadge::AuthRequired,
+            (_, AgentStatus::Disconnected) => HeaderBadge::Disconnected,
+            _ => HeaderBadge::Connected,
+        })
     }
 
     /// The row the popover highlights when nothing is active.
@@ -395,6 +517,112 @@ impl ChatPanel {
     #[must_use]
     pub fn is_awaiting_permission(&self) -> bool {
         self.pending_permission.is_some()
+    }
+
+    /// What the activity row at the foot of the transcript says
+    /// (`docs/specs/10-etapa7-ronda2.md` §8): `None` outside a turn, while a
+    /// `session/load` replays, and when the live thought row ("Pensando…
+    /// (N s)", with its own spinner) is the last item, so it is not doubled.
+    pub(crate) fn activity(&self) -> Option<AgentActivity> {
+        if self.replaying {
+            return None;
+        }
+        if self.pending_permission.is_some() && self.status == AgentStatus::WaitingPermission {
+            return Some(AgentActivity::WaitingPermission);
+        }
+        if self.status != AgentStatus::Thinking {
+            return None;
+        }
+        let live_thought = self.thought_started.is_some()
+            && matches!(self.entries.last(), Some(Entry::AgentThought(_)));
+        (!live_thought).then_some(self.activity_signal)
+    }
+
+    /// Whether the transcript keeps its view at the end as things arrive
+    /// (`docs/specs/10-etapa7-ronda2.md` §9, R6).
+    pub(crate) fn is_following_tail(&self) -> bool {
+        self.list.is_following_tail()
+    }
+
+    /// Whether the "Ir al final" arrow is on screen: the user scrolled away
+    /// from the end and there is somewhere to go.
+    ///
+    /// `ListState::is_scrolled_to_end` answers `None` while any item has no
+    /// height yet (the top of a long conversation nobody scrolled to, or the
+    /// entries that arrived below the view after the user scrolled up), so it
+    /// is completed with the same comparison over the heights the list does
+    /// know: the items from the scroll top down to the end of the trailing
+    /// overdraw are always measured, which is all the answer needs.
+    pub(crate) fn shows_jump_to_end(&self) -> bool {
+        if self.is_following_tail() {
+            return false;
+        }
+        match self.list.is_scrolled_to_end() {
+            Some(at_end) => !at_end,
+            None => {
+                let max = self.list.max_offset_for_scrollbar().y;
+                let offset = -self.list.scroll_px_offset_for_scrollbar().y;
+                max > px(0.) && offset < max - px(1.)
+            }
+        }
+    }
+
+    /// The arrow: back to the end, following again.
+    pub fn jump_to_end(&mut self, cx: &mut Context<Self>) {
+        self.list.set_follow_mode(FollowMode::Tail);
+        cx.notify();
+    }
+
+    /// Whether the long code block `key` is unfolded ("Ver menos" at its foot).
+    #[must_use]
+    pub fn is_code_block_expanded(&self, key: CodeBlockKey) -> bool {
+        self.expanded_code_blocks.contains(&key)
+    }
+
+    /// "Ver más" / "Ver menos" of a long code block (§10.1). The list
+    /// remeasures the entry on the next frame: following, the tail stays in
+    /// view; scrolled up, the top of the view stays where it was.
+    pub fn toggle_code_block(&mut self, key: CodeBlockKey, cx: &mut Context<Self>) {
+        if !self.expanded_code_blocks.remove(&key) {
+            self.expanded_code_blocks.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// What segment `key` holds, cut the way the transcript paints it: an
+    /// answer's own segments, or a user bubble's Markdown piece cut again.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn code_block_kind(&self, key: CodeBlockKey) -> Option<crate::code_folds::SegmentKind> {
+        match self.entries.get(key.entry)? {
+            Entry::AgentText(text) if key.piece == 0 => {
+                text.segments.get(key.segment).map(|segment| segment.kind)
+            }
+            Entry::UserMessage(message) => {
+                match crate::render::user_pieces(&message.blocks).get(key.piece)? {
+                    crate::render::UserPiece::Markdown(text) => split_markdown(text)
+                        .get(key.segment)
+                        .map(|segment| segment.kind),
+                    crate::render::UserPiece::Flow(_) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The label of the button at the foot of block `key`, as painted.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn code_block_toggle_label(&self, key: CodeBlockKey) -> Option<String> {
+        self.code_block_kind(key)?
+            .toggle_label(self.is_code_block_expanded(key))
+    }
+
+    /// The transcript's scroll position, in items (`ListState::logical_scroll_top`).
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn transcript_scroll_offset(&self) -> gpui::ListOffset {
+        self.list.logical_scroll_top()
     }
 
     /// The permission request on screen, if any.
@@ -550,8 +778,7 @@ impl ChatPanel {
     /// Opens the "Conectar" popover (the header button, the empty state and
     /// the status bar chip).
     pub fn open_connections(&mut self, cx: &mut Context<Self>) {
-        self.popover = Popover::Connections;
-        cx.notify();
+        self.open_popover(Popover::Connections, cx);
     }
 
     /// "Conectar nuevo agente…".
@@ -570,8 +797,7 @@ impl ChatPanel {
 
     /// Opens the context menu of a row (right click).
     pub fn open_connection_menu(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.popover = Popover::ConnectionMenu(id.to_string());
-        cx.notify();
+        self.open_popover(Popover::ConnectionMenu(id.to_string()), cx);
     }
 
     /// "Renombrar" of a row's context menu.
@@ -691,9 +917,18 @@ impl ChatPanel {
         self.tool_index.clear();
         self.pending_permission = None;
         self.mentions.clear();
+        // The draft's images go with the draft; the unsent comments do not:
+        // they belong to the project, not to the conversation (§6.7).
+        self.attachments.clear();
+        self.expanded_cards.clear();
+        self.expanded_code_blocks.clear();
+        self.media_cache.borrow_mut().clear();
         self.history_notice = None;
         self.replaying = false;
+        self.activity_signal = AgentActivity::Thinking;
         self.popover = Popover::Closed;
+        // A new (or newly opened) conversation starts at its end, following.
+        self.list.set_follow_mode(FollowMode::Tail);
         self.set_input_text("", window, cx);
         cx.notify();
     }
@@ -720,12 +955,18 @@ impl ChatPanel {
     ) {
         self.clear(window, cx);
         self.bubble_views.borrow_mut().clear();
+        // Reopened, its long blocks start folded again (§10.1).
+        self.expanded_code_blocks.clear();
         self.session_id = None;
         self.active_conversation = Some(conversation.id);
         self.entries = conversation.entries;
+        // Builds before 0.2.0 stored the replayed mention links (above) as a
+        // lone user message: nothing a user can type produces that shape.
+        self.entries.retain(|entry| !is_stray_mention_bubble(entry));
         self.rebuild_views(cx);
         self.sync_list();
-        self.list.scroll_to_end();
+        // Opening a conversation shows its end and follows it (§9, R6).
+        self.list.set_follow_mode(FollowMode::Tail);
         cx.notify();
     }
 
@@ -751,17 +992,65 @@ impl ChatPanel {
     /// Whether `update` is already on screen, and so must not be replayed.
     fn is_already_shown(&self, update: &SessionUpdate) -> bool {
         match update {
+            SessionUpdate::UserMessageChunk(chunk)
+                if matches!(chunk.content, ContentBlock::Image(_)) =>
+            {
+                let Some(identity) = crate::panel_media::replayed_image(&chunk.content)
+                    .and_then(|image| crate::panel_media::image_identity(&image))
+                else {
+                    return false;
+                };
+                self.entries.iter().any(|entry| match entry {
+                    Entry::UserMessage(message) => message.blocks.iter().any(|block| {
+                        matches!(block, MessageBlock::Image(stored)
+                            if crate::panel_media::image_identity(stored).as_deref() == Some(identity.as_str()))
+                    }),
+                    _ => false,
+                })
+            }
+            // `@archivo` mentions travel to the agent as resource links while the
+            // stored user message keeps them as text; a replayed link is never
+            // something new to show (it used to come back as a lone "@a@b@c"
+            // bubble on every `session/load`).
+            SessionUpdate::UserMessageChunk(chunk)
+                if matches!(
+                    chunk.content,
+                    ContentBlock::ResourceLink(_) | ContentBlock::Resource(_)
+                ) =>
+            {
+                true
+            }
             SessionUpdate::UserMessageChunk(chunk) => {
                 let text = block_text(&chunk.content);
-                !text.is_empty()
-                    && self.entries.iter().any(|entry| {
-                        match entry {
-                        Entry::UserMessage(message) => message.blocks.iter().any(|block| {
-                            matches!(block, MessageBlock::Text(stored) if stored.contains(&text))
-                        }),
-                        _ => false,
+                if text.is_empty() {
+                    return false;
+                }
+                // The Claude adapter turns every mention into the text
+                // `[@name](file://…)` before storing the prompt, and replays it
+                // as such; the stored message keeps the mention as a `File`
+                // block, so the text alone is never something new to show.
+                if let Some(names) = mention_links_only(&text) {
+                    let mentioned = |name: &str| {
+                        self.entries.iter().any(|entry| match entry {
+                            Entry::UserMessage(message) => message.blocks.iter().any(|block| {
+                                matches!(block, MessageBlock::File(path)
+                                    if &*file_name_label(path) == name)
+                            }),
+                            _ => false,
+                        })
+                    };
+                    if names.iter().all(|name| mentioned(name)) {
+                        return true;
                     }
-                    })
+                }
+                self.entries.iter().any(|entry| {
+                    match entry {
+                    Entry::UserMessage(message) => message.blocks.iter().any(|block| {
+                        matches!(block, MessageBlock::Text(stored) if stored.contains(&text))
+                    }),
+                    _ => false,
+                }
+                })
             }
             SessionUpdate::AgentMessageChunk(chunk) => {
                 let text = block_text(&chunk.content);
@@ -797,10 +1086,7 @@ impl ChatPanel {
             match entry {
                 Entry::AgentText(text) => {
                     text.streaming = false;
-                    match text.view.clone() {
-                        Some(view) => set_text(&view, &text.markdown, cx),
-                        None => text.view = Some(markdown_state(&text.markdown, cx)),
-                    }
+                    rebuild_segments(text, cx);
                 }
                 Entry::AgentThought(thought) => match thought.view.clone() {
                     Some(view) => set_text(&view, &thought.text, cx),
@@ -851,9 +1137,17 @@ impl ChatPanel {
     /// crate can grow without breaking the UI.
     pub fn handle_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
         match event {
-            AgentEvent::Connected { auth_methods, .. } => {
+            AgentEvent::Connected {
+                auth_methods,
+                capabilities,
+                ..
+            } => {
                 self.auth_methods = auth_methods;
                 self.status = AgentStatus::Ready;
+                // D6: what the agent announced decides whether images can be
+                // attached; the workspace may still override it with
+                // `set_image_support`.
+                self.image_support = Some(cincel_acp::agent_supports_images(&capabilities));
             }
             AgentEvent::AuthRequired { methods, .. } => {
                 self.auth_methods = methods.clone();
@@ -923,6 +1217,9 @@ impl ChatPanel {
             }
             AgentEvent::Exited { code, stderr_tail } => {
                 self.status = AgentStatus::Disconnected;
+                // No process, no capability: attaching says "Conectá un
+                // agente" until the next `Connected`.
+                self.image_support = None;
                 self.finish_streaming();
                 let code = code.map_or_else(|| "sin código".to_string(), |code| code.to_string());
                 let detail = self.error_detail(&stderr_tail);
@@ -988,6 +1285,23 @@ impl ChatPanel {
 
     fn apply_update(&mut self, update: SessionUpdate, cx: &mut Context<Self>) {
         match update {
+            SessionUpdate::UserMessageChunk(chunk)
+                if matches!(chunk.content, ContentBlock::Image(_)) =>
+            {
+                // A replayed image is shown from its data, not stored apart
+                // (§5.1, §5.3.2).
+                let Some(image) = crate::panel_media::replayed_image(&chunk.content) else {
+                    return;
+                };
+                match self.entries.last_mut() {
+                    Some(Entry::UserMessage(message)) => {
+                        message.blocks.push(MessageBlock::Image(image));
+                    }
+                    _ => self.push(Entry::UserMessage(UserMessage {
+                        blocks: vec![MessageBlock::Image(image)],
+                    })),
+                }
+            }
             SessionUpdate::UserMessageChunk(chunk) => {
                 let text = block_text(&chunk.content);
                 if text.is_empty() {
@@ -1009,22 +1323,21 @@ impl ChatPanel {
                     return;
                 }
                 self.status = AgentStatus::Thinking;
+                self.activity_signal = AgentActivity::Writing;
                 self.thought_started = None;
                 if let Some(Entry::AgentText(entry)) = self.entries.last_mut()
                     && entry.streaming
                 {
-                    entry.markdown.push_str(&text);
-                    if let Some(view) = entry.view.clone() {
-                        append_chunk(&view, &text, cx);
-                    }
+                    append_to_segments(entry, &text, cx);
                     return;
                 }
-                let view = markdown_state(&text, cx);
-                self.push(Entry::AgentText(AgentText {
-                    markdown: text,
+                let mut entry = AgentText {
+                    markdown: String::new(),
                     streaming: true,
-                    view: Some(view),
-                }));
+                    segments: Vec::new(),
+                };
+                append_to_segments(&mut entry, &text, cx);
+                self.push(Entry::AgentText(entry));
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 let text = block_text(&chunk.content);
@@ -1039,6 +1352,7 @@ impl ChatPanel {
                     return;
                 }
                 self.status = AgentStatus::Thinking;
+                self.activity_signal = AgentActivity::Thinking;
                 let started = *self.thought_started.get_or_insert_with(Instant::now);
                 if let Some(Entry::AgentThought(entry)) = self.entries.last_mut() {
                     entry.text.push_str(&text);
@@ -1077,8 +1391,12 @@ impl ChatPanel {
                 self.tool_index
                     .insert(call.tool_call_id.clone(), self.entries.len());
                 self.push(Entry::ToolCall(entry));
+                self.activity_signal = self.tool_activity();
             }
-            SessionUpdate::ToolCallUpdate(update) => self.apply_tool_update(&update),
+            SessionUpdate::ToolCallUpdate(update) => {
+                self.apply_tool_update(&update);
+                self.activity_signal = self.tool_activity();
+            }
             SessionUpdate::Plan(plan) => {
                 let items: Vec<PlanItem> = plan
                     .entries
@@ -1114,6 +1432,27 @@ impl ChatPanel {
                 self.config_options = update.config_options;
             }
             _ => {}
+        }
+    }
+
+    /// The activity after a tool signal: "Trabajando…" while a tool call of
+    /// the current turn (the entries after the last user message) is pending
+    /// or running, "Pensando…" once they all finished (the agent decides what
+    /// comes next).
+    fn tool_activity(&self) -> AgentActivity {
+        let running = self
+            .entries
+            .iter()
+            .rev()
+            .take_while(|entry| !matches!(entry, Entry::UserMessage(_)))
+            .any(|entry| {
+                matches!(entry, Entry::ToolCall(call)
+                    if matches!(call.status, ToolCallStatus::Pending | ToolCallStatus::InProgress))
+            });
+        if running {
+            AgentActivity::Working
+        } else {
+            AgentActivity::Thinking
         }
     }
 
@@ -1238,9 +1577,22 @@ impl ChatPanel {
             for index in self.tool_index.values_mut() {
                 *index = index.saturating_sub(excess);
             }
+            // The unfolded blocks move with their entries; those of the
+            // dropped ones go.
+            self.expanded_code_blocks = self
+                .expanded_code_blocks
+                .drain()
+                .filter_map(|key| {
+                    key.entry
+                        .checked_sub(excess)
+                        .map(|entry| CodeBlockKey { entry, ..key })
+                })
+                .collect();
         }
+        // No `scroll_to_end` here: following the tail is the list's own
+        // `FollowMode::Tail`, and a pushed entry (the end-of-turn separator
+        // among them) must not drag back a user who scrolled up (§9, R6).
         self.sync_list();
-        self.list.scroll_to_end();
     }
 
     /// The last stderr lines shown under an error notice (`02-visual.md` §9).
@@ -1357,16 +1709,31 @@ impl ChatPanel {
         if self.is_awaiting_permission() {
             return;
         }
+        // Images still being prepared, or a connection that does not take
+        // the ones attached, hold the message back (§5.1).
+        if self.is_preparing_images() || self.images_block_send() {
+            return;
+        }
         // The mentions are inline tokens in the text, so the order the user
         // wrote is the order the agent sees (`docs/etapas/etapa-2.md`).
-        let blocks = split_mentions(&self.input_text(cx), &self.mentions);
+        let mut blocks = split_mentions(&self.input_text(cx), &self.mentions);
+        // The images go after the text and the mentions, in the order they
+        // were attached (D4); a message may be images alone.
+        blocks.extend(
+            self.ready_images()
+                .map(|image| MessageBlock::Image(ImageRef::from_prepared(image))),
+        );
         if blocks.is_empty() {
             return;
         }
-        let content: Vec<PromptBlock> = blocks.iter().map(message_block_to_prompt).collect();
+        let content: Vec<PromptBlock> = blocks.iter().filter_map(message_block_to_prompt).collect();
+        self.attachments.clear();
         self.push(Entry::UserMessage(UserMessage {
             blocks: blocks.clone(),
         }));
+        // Sending is the user asking to see what they sent: back to the end,
+        // following again (§9, R6).
+        self.list.set_follow_mode(FollowMode::Tail);
         self.mentions.clear();
         self.popover = Popover::Closed;
         // The "solo lectura" line is only true until the first message: from
@@ -1377,6 +1744,7 @@ impl ChatPanel {
         match self.session_id.clone() {
             Some(session_id) => {
                 self.status = AgentStatus::Thinking;
+                self.activity_signal = AgentActivity::Thinking;
                 self.turn_started = Some(Instant::now());
                 cx.emit(ChatEvent::Command(AgentCommand::Prompt {
                     session_id,
@@ -1740,19 +2108,93 @@ impl ChatPanel {
     }
 
     /// Opens (or closes) a header/footer popover.
+    ///
+    /// A click on the very button that had opened the menu arrives right after
+    /// the click outside the menu closed it: that second gesture must leave it
+    /// closed instead of opening it again (`just_dismissed`).
     pub fn toggle_popover(&mut self, popover: Popover, cx: &mut Context<Self>) {
-        self.popover = if self.popover == popover {
-            Popover::Closed
+        let just_closed = self
+            .just_dismissed
+            .take()
+            .is_some_and(|(closed, press)| closed == popover && press == self.press_serial);
+        if just_closed {
+            cx.notify();
+            return;
+        }
+        if self.popover == popover {
+            self.popover = Popover::Closed;
+            cx.notify();
         } else {
-            popover
-        };
+            self.open_popover(popover, cx);
+        }
+    }
+
+    /// Shows `popover`; one that takes the focus gets it on the next paint.
+    fn open_popover(&mut self, popover: Popover, cx: &mut Context<Self>) {
+        self.focus_popover_pending = popover.takes_focus();
+        self.popover = popover;
         cx.notify();
     }
 
-    /// Closes whatever is open.
+    /// Closes whatever is open (`Esc`, choosing a row). The focus goes back to
+    /// whoever had it before the menu took it, on the next paint
+    /// ([`ChatPanel::sync_popover_focus`]).
     pub fn close_popover(&mut self, cx: &mut Context<Self>) {
         self.popover = Popover::Closed;
         cx.notify();
+    }
+
+    /// Closes whatever is open because the user went elsewhere: a click
+    /// outside the menu, the focus moving to another element or the window
+    /// losing it. Unlike [`ChatPanel::close_popover`] it remembers what it
+    /// closed, so the click on the button that opened the menu does not
+    /// reopen it, and it does not take the focus back from where it went.
+    pub(crate) fn dismiss_popover(&mut self, cx: &mut Context<Self>) {
+        if self.popover == Popover::Closed {
+            return;
+        }
+        self.just_dismissed = Some((
+            std::mem::replace(&mut self.popover, Popover::Closed),
+            self.press_serial,
+        ));
+        self.restore_focus = None;
+        cx.notify();
+    }
+
+    /// Moves the keyboard focus for the menus, while painting (the only place
+    /// the panel has the window at hand without changing its public API):
+    /// a menu that takes the focus gets it, remembering who had it; a menu
+    /// that closed while it still held it gives it back.
+    pub(crate) fn sync_popover_focus(
+        &mut self,
+        overlay_shown: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let holds_focus = self.popover_focus.is_focused(window);
+        if self.popover.takes_focus() && overlay_shown {
+            if self.focus_popover_pending && !holds_focus {
+                self.restore_focus = window.focused(cx).filter(|previous| {
+                    // The panel's own root is not a place worth returning to:
+                    // the composer is.
+                    *previous != self.focus_handle && *previous != self.popover_focus
+                });
+                window.focus(&self.popover_focus, cx);
+            }
+            self.focus_popover_pending = false;
+            return;
+        }
+        self.focus_popover_pending = false;
+        if holds_focus && !self.popover.takes_focus() {
+            let target = self
+                .restore_focus
+                .take()
+                .unwrap_or_else(|| self.input.read(cx).focus_handle(cx));
+            window.focus(&target, cx);
+        }
+        if !self.popover.takes_focus() {
+            self.restore_focus = None;
+        }
     }
 
     /// Moves the selection of the open popover.
@@ -1893,6 +2335,7 @@ impl ChatPanel {
     pub fn import_transcript(&mut self, dump: TranscriptDump, cx: &mut Context<Self>) {
         self.entries = dump.entries;
         self.bubble_views.borrow_mut().clear();
+        self.expanded_code_blocks.clear();
         self.rebuild_views(cx);
         cx.notify();
     }
@@ -1900,12 +2343,118 @@ impl ChatPanel {
 
 // -------------------------------------------------------------------- helpers
 
+/// Appends a streamed chunk to an answer and keeps its segments in step
+/// (`docs/specs/10-etapa7-ronda2.md` §10.3).
+///
+/// Only the tail is cut again, from the start of the last segment: what came
+/// before it is final (a prose run ends where a long block opens, and a long
+/// block ends at its closing fence). When the tail is still one segment of
+/// the same kind that reached the end of the text, the chunk is appended to
+/// its state without reparsing (the fast path of every chunk of an ordinary
+/// answer); otherwise the last state gets its new text and the segments that
+/// appeared get states of their own. The states before the tail are never
+/// touched, so the text above a block that starts folding keeps its entity.
+pub(crate) fn append_to_segments(text: &mut AgentText, chunk: &str, cx: &mut App) {
+    let old_len = text.markdown.len();
+    text.markdown.push_str(chunk);
+    let tail_start = text.segments.last().map_or(0, |last| last.range.start);
+    let mut fresh = split_markdown(&text.markdown[tail_start..]);
+    for segment in &mut fresh {
+        segment.range = segment.range.start + tail_start..segment.range.end + tail_start;
+    }
+    let markdown = &text.markdown;
+    let mut fresh = fresh.into_iter();
+    if let Some(last) = text.segments.last_mut() {
+        let Some(first) = fresh.next() else {
+            // The tail is whitespace only: nothing to show yet.
+            return;
+        };
+        let fast = fresh.len() == 0
+            && first.kind.same_variant(last.kind)
+            && first.range.start == last.range.start
+            && last.range.end == old_len
+            && first.range.end == markdown.len();
+        if fast {
+            append_chunk(&last.view, chunk, cx);
+        } else if first.range != last.range {
+            // With the same range the state already holds these bytes.
+            set_text(&last.view, &markdown[first.range.clone()], cx);
+        }
+        last.range = first.range;
+        last.kind = first.kind;
+    }
+    for segment in fresh {
+        let view = markdown_state(&markdown[segment.range.clone()], cx);
+        text.segments.push(TextSegment {
+            range: segment.range,
+            kind: segment.kind,
+            view,
+        });
+    }
+}
+
+/// Builds the segments of an answer from its whole Markdown, reusing the
+/// states it already had (an imported transcript, a loaded conversation).
+pub(crate) fn rebuild_segments(text: &mut AgentText, cx: &mut App) {
+    let fresh = split_markdown(&text.markdown);
+    let mut old = std::mem::take(&mut text.segments).into_iter();
+    for segment in fresh {
+        let source = &text.markdown[segment.range.clone()];
+        let view = match old.next() {
+            Some(reused) => {
+                set_text(&reused.view, source, cx);
+                reused.view
+            }
+            None => markdown_state(source, cx),
+        };
+        text.segments.push(TextSegment {
+            range: segment.range,
+            kind: segment.kind,
+            view,
+        });
+    }
+}
+
 /// Whether a tool card shows its detail without being asked.
 ///
 /// Only a failure does: everything else is noise while the turn runs
 /// (`02-visual.md` §7).
 pub(crate) fn expands_by_default(status: ToolCallStatus) -> bool {
     status == ToolCallStatus::Failed
+}
+
+/// If `text` is nothing but mention links as the Claude adapter writes them
+/// (`[@name](file://…)`, possibly several, with whitespace between), the
+/// mentioned file names; `None` for any other text.
+pub(crate) fn mention_links_only(text: &str) -> Option<Vec<String>> {
+    let mut rest = text.trim();
+    let mut names = Vec::new();
+    while !rest.is_empty() {
+        let after_open = rest.strip_prefix("[@")?;
+        let close = after_open.find("](")?;
+        let name = &after_open[..close];
+        let after_name = &after_open[close + 2..];
+        let end = after_name.find(')')?;
+        let uri = &after_name[..end];
+        if name.is_empty() || name.contains('\n') || !uri.starts_with("file://") {
+            return None;
+        }
+        names.push(name.to_string());
+        rest = after_name[end + 1..].trim_start();
+    }
+    (!names.is_empty()).then_some(names)
+}
+
+/// A user message that is only the replayed mention links of §11 (spec 10):
+/// what builds before the fix stored on every `session/load`.
+fn is_stray_mention_bubble(entry: &Entry) -> bool {
+    match entry {
+        Entry::UserMessage(message) => match message.blocks.as_slice() {
+            [MessageBlock::Text(text)] => mention_links_only(text).is_some(),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// The text of a content block, as the transcript shows it.
@@ -1923,11 +2472,26 @@ pub(crate) fn block_text(block: &ContentBlock) -> String {
 /// Turns a composed block into the ACP prompt block.
 ///
 /// A file chip becomes `PromptBlock::ResourceLink` with the **absolute** path,
-/// which is what `chat.md`'s acceptance criterion asks for.
-pub(crate) fn message_block_to_prompt(block: &MessageBlock) -> PromptBlock {
+/// which is what `chat.md`'s acceptance criterion asks for; an image becomes
+/// `PromptBlock::Image` with its bytes (base64 is `cincel-acp`'s job, D4). A
+/// comment card is not the user's prompt (the workspace sends the comments
+/// inside the review feedback) and an image whose bytes are gone cannot
+/// travel: both give `None`.
+pub(crate) fn message_block_to_prompt(block: &MessageBlock) -> Option<PromptBlock> {
     match block {
-        MessageBlock::Text(text) => PromptBlock::Text(text.clone()),
-        MessageBlock::File(path) => PromptBlock::mention(path),
+        MessageBlock::Text(text) => Some(PromptBlock::Text(text.clone())),
+        MessageBlock::File(path) => Some(PromptBlock::mention(path)),
+        MessageBlock::Image(image) => {
+            let data = image.data.clone()?;
+            match PromptBlock::image(&image.mime_type, data) {
+                Ok(block) => Some(block),
+                Err(error) => {
+                    tracing::warn!(%error, name = %image.name, "una imagen adjunta no se pudo enviar");
+                    None
+                }
+            }
+        }
+        MessageBlock::Comment(_) => None,
     }
 }
 

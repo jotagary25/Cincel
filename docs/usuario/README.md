@@ -15,7 +15,9 @@ solo.
 4. Cuando termina, cada cambio aparece en el editor como un segmento: lo que
    borró en rojo, lo que agregó en verde.
 5. Aceptás o rechazás cada segmento (o cada línea, o el archivo entero, o
-   todo el turno de una vez). Rechazar siempre se puede deshacer.
+   todo el turno de una vez). Rechazar siempre se puede deshacer. También
+   podés dejar un comentario sobre unas líneas para que el agente lo lea en
+   tu próximo mensaje.
 
 Capturas de referencia (tema oscuro, un proyecto de demostración):
 
@@ -30,9 +32,19 @@ Capturas de referencia (tema oscuro, un proyecto de demostración):
 - [Primer arranque](primer-arranque.md) — abrir una carpeta, las tres zonas
   de la ventana, pestañas, guardar.
 - [Conexiones](conexiones.md) — conectar Claude, Codex y Antigravity;
-  cuentas aisladas; renombrar, reparar, actualizar y desconectar.
+  la lista de conexiones; cuentas aisladas; renombrar, reparar, actualizar y
+  desconectar.
+- [El chat](chat.md) — el encabezado y el estado de la conexión, escribir
+  mensajes, lo que hace el agente mientras trabaja, leer sin que el chat te
+  mueva (y la flecha para volver al final), bloques de código largos
+  plegados, adjuntar imágenes (pegar, arrastrar, botón del clip), verlas en
+  grande y qué pasa si el agente no las acepta.
+- [Escribir en el editor](editor.md) — marcar dónde más aparece una palabra,
+  copiar y cortar la línea entera, la sangría, desplazarte más allá del
+  final del archivo y la limpieza al guardar.
 - [Revisión de cambios](revision.md) — la regla, los segmentos, aceptar y
-  rechazar, archivos creados y borrados, deshacer.
+  rechazar, comentarios para el agente, archivos creados y borrados,
+  deshacer.
 - [Atajos de teclado](atajos.md) — la tabla completa, por categoría.
 - [Ajustes](ajustes.md) — la pestaña de configuración y `settings.json`.
 - [Solución de problemas](problemas.md) — sesión vencida, sin navegador,

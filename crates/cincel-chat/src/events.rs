@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use cincel_acp::AgentCommand;
 
+use crate::model::{ChatImageSource, NoticeLevel};
+
 /// Everything [`crate::ChatPanel`] emits.
 #[non_exhaustive]
 pub enum ChatEvent {
@@ -77,6 +79,48 @@ pub enum ChatEvent {
     /// Put this text in the clipboard (a code block's "Copiar", the auth
     /// command).
     CopyToClipboard(String),
+    /// The paperclip button (or `chat::attach_image`): open the system file
+    /// dialog ("Adjuntar imagen", several files, filter "Imágenes": png, jpg,
+    /// jpeg, gif, webp) and hand the chosen files to
+    /// [`crate::ChatPanel::attach_paths`]
+    /// (`docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §5.3.2).
+    /// Only emitted when the active connection accepts images.
+    PickImages,
+    /// Show this as a pop-up notice (`toast`): why an image was not
+    /// attached, and the like.
+    Notify {
+        /// How loud it is.
+        level: NoticeLevel,
+        /// What it says, in Spanish.
+        text: String,
+    },
+    /// A thumbnail of a sent message was clicked: open the image viewer.
+    OpenImage {
+        /// Where the bytes are.
+        source: ChatImageSource,
+        /// File name it was attached with.
+        name: String,
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// Size in bytes.
+        bytes_len: u64,
+    },
+    /// The `×` of a comment tag in the composer box: delete that comment
+    /// (from the store and the margin too).
+    RemoveComment {
+        /// The store's comment id.
+        id: u64,
+    },
+    /// A comment tag or a comment card's header was clicked: open `path` at
+    /// `line`.
+    OpenLocation {
+        /// The file.
+        path: PathBuf,
+        /// 1-based line.
+        line: u32,
+    },
 }
 
 impl std::fmt::Debug for ChatEvent {
@@ -117,6 +161,41 @@ impl std::fmt::Debug for ChatEvent {
             ChatEvent::CopyToClipboard(text) => {
                 f.debug_tuple("CopyToClipboard").field(text).finish()
             }
+            ChatEvent::PickImages => f.write_str("PickImages"),
+            ChatEvent::Notify { level, text } => f
+                .debug_struct("Notify")
+                .field("level", level)
+                .field("text", text)
+                .finish(),
+            ChatEvent::OpenImage {
+                source,
+                name,
+                width,
+                height,
+                bytes_len,
+            } => {
+                let source = match source {
+                    ChatImageSource::File(path) => format!("File({})", path.display()),
+                    ChatImageSource::Bytes { mime_type, data } => {
+                        format!("Bytes({mime_type}, {} B)", data.len())
+                    }
+                };
+                f.debug_struct("OpenImage")
+                    .field("source", &source)
+                    .field("name", name)
+                    .field("width", width)
+                    .field("height", height)
+                    .field("bytes_len", bytes_len)
+                    .finish()
+            }
+            ChatEvent::RemoveComment { id } => {
+                f.debug_struct("RemoveComment").field("id", id).finish()
+            }
+            ChatEvent::OpenLocation { path, line } => f
+                .debug_struct("OpenLocation")
+                .field("path", path)
+                .field("line", line)
+                .finish(),
         }
     }
 }

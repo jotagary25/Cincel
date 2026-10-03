@@ -125,6 +125,11 @@ pub struct FilesSettings {
     /// With `autosave: "after_delay"`, how long to wait after the last
     /// keystroke before saving, in milliseconds.
     pub autosave_delay_ms: u64,
+    /// Strip trailing spaces and tabs from every line when saving
+    /// (`docs/specs/10-etapa7-ronda2.md` §7.8). Markdown files are exempt.
+    pub trim_trailing_whitespace_on_save: bool,
+    /// End the file with a line break when saving, if it lacks one.
+    pub ensure_final_newline_on_save: bool,
 }
 
 impl Default for FilesSettings {
@@ -137,6 +142,8 @@ impl Default for FilesSettings {
             ],
             autosave: Autosave::Off,
             autosave_delay_ms: 1000,
+            trim_trailing_whitespace_on_save: true,
+            ensure_final_newline_on_save: true,
         }
     }
 }
@@ -442,8 +449,27 @@ impl Settings {
                             }
                         },
                     ),
+                    trim_trailing_whitespace_on_save: reader.field(
+                        files,
+                        "trim_trailing_whitespace_on_save",
+                        d.trim_trailing_whitespace_on_save,
+                    ),
+                    ensure_final_newline_on_save: reader.field(
+                        files,
+                        "ensure_final_newline_on_save",
+                        d.ensure_final_newline_on_save,
+                    ),
                 };
-                reader.unknown_keys(files, &["exclude", "autosave", "autosave_delay_ms"]);
+                reader.unknown_keys(
+                    files,
+                    &[
+                        "exclude",
+                        "autosave",
+                        "autosave_delay_ms",
+                        "trim_trailing_whitespace_on_save",
+                        "ensure_final_newline_on_save",
+                    ],
+                );
                 value
             }),
             review: reader.object(object, "review", |reader, review| {
@@ -801,6 +827,35 @@ mod tests {
         let loaded = Settings::parse(&format!(r#"{{ "files": {json} }}"#));
         assert!(loaded.is_clean(), "{:?}", loaded.issues);
         assert_eq!(loaded.value.files, files);
+    }
+
+    #[test]
+    fn save_cleanup_settings_default_to_on_and_can_be_turned_off() {
+        let d = FilesSettings::default();
+        assert!(d.trim_trailing_whitespace_on_save);
+        assert!(d.ensure_final_newline_on_save);
+        // A file that omits the keys keeps them on.
+        let loaded = Settings::parse(r#"{ "files": { "autosave": "off" } }"#);
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert!(loaded.value.files.trim_trailing_whitespace_on_save);
+        assert!(loaded.value.files.ensure_final_newline_on_save);
+        let loaded = Settings::parse(
+            r#"{ "files": { "trim_trailing_whitespace_on_save": false,
+                            "ensure_final_newline_on_save": false } }"#,
+        );
+        assert!(loaded.is_clean(), "{:?}", loaded.issues);
+        assert!(!loaded.value.files.trim_trailing_whitespace_on_save);
+        assert!(!loaded.value.files.ensure_final_newline_on_save);
+        // The strict serde path (deny_unknown_fields) accepts the keys too.
+        let strict: FilesSettings = serde_json::from_str(
+            r#"{ "trim_trailing_whitespace_on_save": false, "ensure_final_newline_on_save": true }"#,
+        )
+        .unwrap();
+        assert!(!strict.trim_trailing_whitespace_on_save);
+        assert!(strict.ensure_final_newline_on_save);
+        let partial: FilesSettings = serde_json::from_str("{}").unwrap();
+        assert!(partial.trim_trailing_whitespace_on_save);
+        assert!(partial.ensure_final_newline_on_save);
     }
 
     #[test]

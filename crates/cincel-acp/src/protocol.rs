@@ -7,13 +7,16 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AvailableCommand, ContentBlock, CreateElicitationRequest,
-    CreateElicitationResponse, EnvVariable, Implementation, McpServer, McpServerStdio, Meta,
-    PermissionOption, PermissionOptionId, ResourceLink, SessionConfigId, SessionConfigOption,
-    SessionConfigOptionValue, SessionId, SessionModeId, SessionModeState, SessionUpdate,
-    StopReason, TextContent, ToolCallId, ToolCallUpdate,
+    CreateElicitationResponse, EnvVariable, ImageContent, Implementation, McpServer,
+    McpServerStdio, Meta, PermissionOption, PermissionOptionId, ResourceLink, SessionConfigId,
+    SessionConfigOption, SessionConfigOptionValue, SessionId, SessionModeId, SessionModeState,
+    SessionUpdate, StopReason, TextContent, ToolCallId, ToolCallUpdate,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use tokio::sync::oneshot;
 
+use crate::error::AcpError;
 use crate::registry::LaunchSpec;
 
 /// Identifies a permission request across the channel boundary.
@@ -170,9 +173,10 @@ impl McpServerSpec {
 
 /// One block of a [`AgentCommand::Prompt`].
 ///
-/// A baseline ACP agent supports `text` and `resource_link` (the two variants
-/// modeled here); richer blocks are Etapa-3+ work
-/// (`docs/specs/modulos/acp.md` §Prompt).
+/// A baseline ACP agent supports `text` and `resource_link`; `image` is only
+/// legal when the agent announced `promptCapabilities.image`
+/// ([`agent_supports_images`]; `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md`
+/// §5.3.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptBlock {
     /// Plain text typed by the user.
@@ -186,9 +190,41 @@ pub enum PromptBlock {
         /// MIME type, when known.
         mime_type: Option<String>,
     },
+    /// An attached image, sent as `ContentBlock::Image` with base64 `data`
+    /// and **no `uri`** (`codex-acp` would prefer an `http(s):`/`data:` `uri`
+    /// over the data). Build it with [`PromptBlock::image`] to validate the
+    /// MIME type; the worker validates every image block again before sending.
+    Image {
+        /// One of [`IMAGE_MIME_TYPES`].
+        mime_type: String,
+        /// Raw (not base64) image bytes; encoded in `into_wire`.
+        data: Arc<[u8]>,
+    },
 }
 
+/// MIME types Cincel sends as image blocks (the formats the chat accepts).
+pub const IMAGE_MIME_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
 impl PromptBlock {
+    /// Build an image block, rejecting any MIME type outside
+    /// [`IMAGE_MIME_TYPES`] (compared ignoring ASCII case, stored lowercase)
+    /// and empty data.
+    ///
+    /// # Errors
+    ///
+    /// [`AcpError::InvalidParams`] when the MIME type is not a supported
+    /// image type or `data` is empty.
+    pub fn image(mime_type: &str, data: impl Into<Arc<[u8]>>) -> Result<Self, AcpError> {
+        let mime_type = normalize_image_mime(mime_type)?;
+        let data = data.into();
+        if data.is_empty() {
+            return Err(AcpError::InvalidParams(
+                "la imagen no tiene datos".to_string(),
+            ));
+        }
+        Ok(PromptBlock::Image { mime_type, data })
+    }
+
     /// Build a `file://` resource link block for an absolute path.
     #[must_use]
     pub fn mention(path: &std::path::Path) -> Self {
@@ -211,8 +247,44 @@ impl PromptBlock {
                 name,
                 mime_type,
             } => ContentBlock::ResourceLink(ResourceLink::new(name, uri).mime_type(mime_type)),
+            PromptBlock::Image { mime_type, data } => {
+                ContentBlock::Image(ImageContent::new(BASE64_STANDARD.encode(&data), mime_type))
+            }
         }
     }
+}
+
+/// Lowercase `mime_type` when it is one of [`IMAGE_MIME_TYPES`].
+fn normalize_image_mime(mime_type: &str) -> Result<String, AcpError> {
+    let lowered = mime_type.trim().to_ascii_lowercase();
+    if IMAGE_MIME_TYPES.contains(&lowered.as_str()) {
+        Ok(lowered)
+    } else {
+        Err(AcpError::InvalidParams(format!(
+            "tipo de imagen no soportado: `{mime_type}`"
+        )))
+    }
+}
+
+/// Check the blocks of a prompt before they go on the wire: every
+/// [`PromptBlock::Image`] needs a supported MIME type and non-empty data
+/// (variants can be built directly, bypassing [`PromptBlock::image`]).
+///
+/// # Errors
+///
+/// [`AcpError::InvalidParams`] describing the first invalid image block.
+pub fn validate_prompt_blocks(blocks: &[PromptBlock]) -> Result<(), AcpError> {
+    for block in blocks {
+        if let PromptBlock::Image { mime_type, data } = block {
+            normalize_image_mime(mime_type)?;
+            if data.is_empty() {
+                return Err(AcpError::InvalidParams(
+                    "la imagen no tiene datos".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Text wrapper the review panel's feedback is sent back to the agent in
@@ -410,6 +482,14 @@ pub fn agent_supports_file_change_report(meta: Option<&Meta>) -> bool {
             .iter()
             .any(|capability| capability == AIR_FILE_CHANGE_REPORT_CAPABILITY)
     })
+}
+
+/// Whether the agent accepts `image` prompt blocks
+/// (`agentCapabilities.promptCapabilities.image`). ACP forbids sending them
+/// otherwise, so the chat checks this before attaching anything.
+#[must_use]
+pub fn agent_supports_images(capabilities: &AgentCapabilities) -> bool {
+    capabilities.prompt_capabilities.image
 }
 
 /// Whether the agent announced ACP `logout` (`agentCapabilities.auth.logout`).
@@ -1035,6 +1115,79 @@ mod tests {
     }
 
     #[test]
+    fn image_block_encodes_base64_without_uri() {
+        let bytes: Vec<u8> = (0..=255u8).collect();
+        let block = PromptBlock::image("image/png", bytes.clone()).expect("valid image");
+        let content =
+            build_prompt_content(vec![PromptBlock::Text("mirá".to_string()), block], None);
+        assert_eq!(content.len(), 2);
+        let ContentBlock::Image(image) = &content[1] else {
+            panic!("se esperaba image: {:?}", content[1]);
+        };
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.uri, None);
+        assert_eq!(
+            BASE64_STANDARD.decode(&image.data).expect("base64 valid"),
+            bytes
+        );
+        let json = serde_json::to_value(&content[1]).expect("serializes");
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["mimeType"], "image/png");
+        assert!(
+            json.get("uri").is_none(),
+            "image blocks carry no uri: {json}"
+        );
+    }
+
+    #[test]
+    fn image_constructor_rejects_bad_mime_and_empty_data() {
+        for mime in [
+            "",
+            "text/plain",
+            "image/svg+xml",
+            "image/",
+            "png",
+            "image/bmp",
+        ] {
+            assert!(
+                matches!(
+                    PromptBlock::image(mime, vec![1u8]),
+                    Err(AcpError::InvalidParams(_))
+                ),
+                "{mime:?} must be rejected"
+            );
+        }
+        assert!(matches!(
+            PromptBlock::image("image/png", Vec::<u8>::new()),
+            Err(AcpError::InvalidParams(_))
+        ));
+        // Case is normalized; every supported type is accepted.
+        for mime in IMAGE_MIME_TYPES {
+            let block = PromptBlock::image(&mime.to_ascii_uppercase(), vec![1u8]).expect("ok");
+            assert!(matches!(&block, PromptBlock::Image { mime_type, .. } if mime_type == mime));
+        }
+    }
+
+    #[test]
+    fn validate_prompt_blocks_catches_directly_built_image_variants() {
+        let good = PromptBlock::Image {
+            mime_type: "image/jpeg".to_string(),
+            data: Arc::from(vec![1u8, 2, 3]),
+        };
+        let bad_mime = PromptBlock::Image {
+            mime_type: "application/pdf".to_string(),
+            data: Arc::from(vec![1u8]),
+        };
+        let empty = PromptBlock::Image {
+            mime_type: "image/png".to_string(),
+            data: Arc::from(Vec::<u8>::new()),
+        };
+        assert!(validate_prompt_blocks(&[PromptBlock::Text("x".into()), good.clone()]).is_ok());
+        assert!(validate_prompt_blocks(&[good.clone(), bad_mime]).is_err());
+        assert!(validate_prompt_blocks(&[good, empty]).is_err());
+    }
+
+    #[test]
     fn mcp_server_spec_maps_to_stdio_variant() {
         let mut env = BTreeMap::new();
         env.insert("FOO".to_string(), "bar".to_string());
@@ -1185,6 +1338,18 @@ mod tests {
             .meta(as_meta(serde_json::json!({ "authStatus": {} })));
         assert!(agent_supports_logout(&full));
         assert!(agent_supports_auth_status(&full));
+    }
+
+    #[test]
+    fn agent_supports_images_reads_prompt_capabilities() {
+        use agent_client_protocol::schema::v1::PromptCapabilities;
+        assert!(!agent_supports_images(&AgentCapabilities::new()));
+        let with_images =
+            AgentCapabilities::new().prompt_capabilities(PromptCapabilities::new().image(true));
+        assert!(agent_supports_images(&with_images));
+        let without = AgentCapabilities::new()
+            .prompt_capabilities(PromptCapabilities::new().embedded_context(true));
+        assert!(!agent_supports_images(&without));
     }
 
     #[test]

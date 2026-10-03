@@ -22,9 +22,18 @@
 //!   `session/cancel` (or 30 s) before returning.
 //! * `"echo-env"` → the *second* text block is a variable name; the agent
 //!   answers `NAME=value` (or `NAME=<unset>`) from its own environment.
+//! * `"echo-images"` → answers `N imágenes: <mime> <W>x<H>, …` for the image
+//!   blocks it received, decoding each block's base64 data (dimensions come
+//!   from the PNG/GIF/JPEG/WebP header; `?x?` when unknown or undecodable).
 //! * `"url-elicitation"` → sends a url-mode `elicitation/create`
 //!   (`elicitationId: "elic-1"`), then `elicitation/complete` 300 ms later
 //!   without waiting, then reports the action it got back.
+//!
+//! `initialize` announces `promptCapabilities.image = true` (unless
+//! `FAKE_NO_IMAGES` is set). With `FAKE_PROMPT_LOG=<path>` every
+//! `session/prompt` appends one JSON line to that file with the received
+//! `prompt` array, image data replaced by its length and SHA-256 (see
+//! `describe_block`), so tests can assert what reached the agent.
 //!
 //! `initialize` announces `auth.logout` (unless `FAKE_NO_LOGOUT` is set),
 //! `agentCapabilities._meta.authStatus`, and the real `jetbrains.air` shape
@@ -63,13 +72,16 @@ use agent_client_protocol::schema::v1::{
     CreateElicitationRequest, Diff, ElicitationAction, ElicitationSessionScope, ElicitationUrlMode,
     Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     LogoutCapabilities, LogoutRequest, LogoutResponse, McpServer, Meta, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
-    ReadTextFileRequest, RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionId, SessionInfoUpdate, SessionNotification,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest,
+    PromptResponse, ReadTextFileRequest, RequestPermissionRequest, ResumeSessionRequest,
+    ResumeSessionResponse, SessionCapabilities, SessionId, SessionInfoUpdate, SessionNotification,
     SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, WriteTextFileRequest,
 };
 use agent_client_protocol::{Agent, ConnectionTo, Stdio};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use sha2::{Digest, Sha256};
 
 /// File the default scenario pretends to edit, relative to the session cwd.
 const TARGET_FILE: &str = "demo.txt";
@@ -127,6 +139,10 @@ async fn main() -> agent_client_protocol::Result<()> {
                                         .resume(SessionResumeCapabilities::new()),
                                 )
                                 .auth(auth)
+                                .prompt_capabilities(
+                                    PromptCapabilities::new()
+                                        .image(std::env::var_os("FAKE_NO_IMAGES").is_none()),
+                                )
                                 .meta(auth_status_capability_meta()),
                         )
                         .agent_info(Implementation::new("cincel-fake-agent", "0.1.0"))
@@ -259,6 +275,115 @@ async fn main() -> agent_client_protocol::Result<()> {
         )
         .connect_to(Stdio::new())
         .await
+}
+
+/// Describe one prompt block for `FAKE_PROMPT_LOG`: image data is replaced by
+/// its base64 length, decoded length and SHA-256 of the decoded bytes.
+fn describe_block(block: &ContentBlock) -> serde_json::Value {
+    match block {
+        ContentBlock::Text(text) => serde_json::json!({ "type": "text", "text": text.text }),
+        ContentBlock::ResourceLink(link) => serde_json::json!({
+            "type": "resource_link", "uri": link.uri, "name": link.name
+        }),
+        ContentBlock::Image(image) => {
+            let decoded = BASE64.decode(&image.data);
+            serde_json::json!({
+                "type": "image",
+                "mimeType": image.mime_type,
+                "dataLen": image.data.len(),
+                "bytes": decoded.as_ref().map(Vec::len).ok(),
+                "sha256": decoded.as_ref().ok().map(|bytes| hex_sha256(bytes)),
+                "uri": image.uri,
+                "decodeError": decoded.is_err(),
+            })
+        }
+        _ => serde_json::json!({ "type": "other" }),
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+/// Append the received prompt to `FAKE_PROMPT_LOG` (one JSON line per
+/// `session/prompt`), when set.
+fn log_prompt(prompt: &[ContentBlock]) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("FAKE_PROMPT_LOG") else {
+        return;
+    };
+    let line = serde_json::json!({
+        "prompt": prompt.iter().map(describe_block).collect::<Vec<_>>()
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        // One `write_all` so concurrent prompts never interleave a line.
+        let _ = file.write_all(format!("{line}\n").as_bytes());
+    }
+}
+
+/// Pixel size from a PNG, GIF, JPEG or WebP header (no full decode).
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let be32 = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    let le16 = |at: usize| {
+        Some(u32::from(u16::from_le_bytes(
+            bytes.get(at..at + 2)?.try_into().ok()?,
+        )))
+    };
+    let le24 = |at: usize| {
+        let b = bytes.get(at..at + 3)?;
+        Some(u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16)
+    };
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some((be32(16)?, be32(20)?));
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some((le16(6)?, le16(8)?));
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return match bytes.get(12..16)? {
+            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
+                Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+            }
+            b"VP8 " => Some((le16(26)? & 0x3fff, le16(28)? & 0x3fff)),
+            _ => None,
+        };
+    }
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        let mut at = 2;
+        while at + 4 <= bytes.len() {
+            if bytes[at] != 0xff {
+                return None;
+            }
+            let marker = bytes[at + 1];
+            let length = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+            // SOF0..SOF15 except DHT (c4), JPG (c8) and DAC (cc).
+            if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+                let height = u32::from(u16::from_be_bytes([
+                    *bytes.get(at + 5)?,
+                    *bytes.get(at + 6)?,
+                ]));
+                let width = u32::from(u16::from_be_bytes([
+                    *bytes.get(at + 7)?,
+                    *bytes.get(at + 8)?,
+                ]));
+                return Some((width, height));
+            }
+            at += 2 + length;
+        }
+    }
+    None
 }
 
 fn first_text(blocks: &[ContentBlock]) -> String {
@@ -412,8 +537,29 @@ async fn run_turn(
         .and_then(|sessions| sessions.get(&session_id.0.to_string()).cloned())
         .unwrap_or_default();
     let script = first_text(&request.prompt);
+    log_prompt(&request.prompt);
 
     match script.as_str() {
+        "echo-images" => {
+            let described: Vec<String> = request
+                .prompt
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Image(image) => {
+                        let dimensions = BASE64
+                            .decode(&image.data)
+                            .ok()
+                            .and_then(|bytes| image_dimensions(&bytes))
+                            .map_or_else(|| "?x?".to_string(), |(w, h)| format!("{w}x{h}"));
+                        Some(format!("{} {dimensions}", image.mime_type))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let text = format!("{} imágenes: {}", described.len(), described.join(", "));
+            send_text(cx, &session_id, &text).await;
+            StopReason::EndTurn
+        }
         "echo-mcp" => {
             let names: Vec<String> = state
                 .mcp_servers

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.90"
@@ -48,6 +48,11 @@ dirs = "6"
 # ACP (agregado por cincel-acp, E0-b)
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+# Base64 for `image` prompt blocks (E7-D); 0.22 is already in `Cargo.lock`.
+base64 = "0.22"
+# Attached images of the chat (E7-E): already in `Cargo.lock` through GPUI,
+# which turns on these four formats and more; MIT OR Apache-2.0.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 

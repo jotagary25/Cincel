@@ -13,10 +13,18 @@
 //! border of the gutter, the text, the `+`/`−` icons of the hovered line, the
 //! accept/reject pills, the "Turno anterior" tooltip and the floating review
 //! bar. The pills are an **overlay**, not a `BlockMap` row: they occupy no
-//! vertical space, so the cursor never has to skip a UI row, and since their
-//! position comes from the same wrap-row → y mapping as the text they scroll
-//! with it and follow the hunk when rows are inserted above it, frame for
-//! frame.
+//! vertical space, and since their position comes from the same row → y
+//! mapping as the text they scroll with it and follow the hunk when rows are
+//! inserted above it, frame for frame.
+//!
+//! # Comment blocks (spec 09 §6.5)
+//!
+//! The rows are placed by their *visual* row ([`crate::BlockMap`]): a comment
+//! box takes whole rows below the row it hangs from, and the element lays it
+//! out and paints it as a child element in the strip of its rows, from the
+//! text's left edge to 12 px before the scrollbar — only while it is in the
+//! viewport. The gutter keeps its width and the text its column; the comment
+//! mark goes in the 12 px gap between the numbers and the text.
 //!
 //! # Where the pill goes
 //!
@@ -24,9 +32,9 @@
 //! that leaves it room (`place_pill`): the hunk's first row, then its
 //! following rows in order, then the row just above the hunk — the first one
 //! whose shaped text ends at least [`PILL_TEXT_GAP`] before the pill's left
-//! edge. When none does, a compact pill (two 24 × 24 icon buttons) goes on the
-//! first row at 70 % opacity. Nothing moves: the gutter and the text origin
-//! never depend on the review.
+//! edge. When none does, a compact pill (three 24 × 24 icon buttons: `✓`,
+//! `✗` and the comment icon) goes on the first row at 70 % opacity. Nothing
+//! moves: the gutter and the text origin never depend on the review.
 //!
 //! # The `+`/`−` of a line
 //!
@@ -50,6 +58,7 @@ use gpui::{
     point, px, quad, relative, size,
 };
 
+use crate::block_map::VisualCell;
 use crate::display_map::{DisplayCell, DisplayRow, RowKind, RowText};
 use crate::git_gutter::GitGutterKind;
 use crate::input::WeakInputHandler;
@@ -57,8 +66,8 @@ use crate::review::{ReviewAction, ReviewHunkKind};
 use crate::search::MatchLocation;
 use crate::settings::EditorChrome;
 use crate::theme::{
-    self, CURRENT_LINE_ALPHA, DIFF_BG_ALPHA, DIFF_WORD_ALPHA, EditorTheme, PHANTOM_TEXT_ALPHA,
-    SEARCH_CURRENT_ALPHA, SEARCH_MATCH_ALPHA,
+    self, CURRENT_LINE_ALPHA, DIFF_BG_ALPHA, DIFF_WORD_ALPHA, EditorTheme, OCCURRENCE_ALPHA,
+    PHANTOM_TEXT_ALPHA, SEARCH_CURRENT_ALPHA, SEARCH_MATCH_ALPHA,
 };
 use crate::view::{
     BarButtonRender, EditorView, LayoutSnapshot, PillRender, ReviewFrame, RowRender,
@@ -90,8 +99,9 @@ pub(crate) const GIT_DELETED_MARK_HEIGHT: f32 = 6.;
 pub(crate) const GUTTER_TEXT_GAP: f32 = 12.;
 /// Height of the accept/reject pill (02-visual §6.1).
 pub const PILL_HEIGHT: f32 = 24.;
-/// Width of the accept/reject pill (02-visual §6.1).
-pub const PILL_WIDTH: f32 = 190.;
+/// Width of the pill: "✓ Aceptar" · "✗ Rechazar" · "Comentar" in three
+/// equal parts (spec 09 §6.3, which widens the 190 px of 02-visual §6.1).
+pub const PILL_WIDTH: f32 = 280.;
 /// Margin between the pill and the right edge of the text area.
 pub const PILL_MARGIN: f32 = 12.;
 /// Font size of the pill labels.
@@ -126,7 +136,13 @@ const BAR_FONT_SIZE: f32 = 13.;
 /// Side of the spinner and the clock icons.
 const ICON_SIZE: f32 = 12.;
 /// Width of the scrollbar (02-visual §5).
-const SCROLLBAR_WIDTH: f32 = 8.;
+pub(crate) const SCROLLBAR_WIDTH: f32 = 8.;
+/// Padding at both ends of the full pill (its surface, not a button).
+pub const PILL_PADDING: f32 = 4.;
+/// Side of the "Comentar" icon of the pill (spec 09 §6.3: 12 px).
+pub const PILL_COMMENT_ICON: f32 = 12.;
+/// Side of a comment mark in the margin (spec 09 §6.3: 10 px).
+pub const COMMENT_MARK_SIZE: f32 = 10.;
 /// Shortest the scrollbar thumb can get.
 const SCROLLBAR_MIN_THUMB: f32 = 24.;
 /// Extra wrap rows shaped above and below the viewport.
@@ -245,23 +261,35 @@ struct PillLayout {
     bounds: Bounds<Pixels>,
     accept: Bounds<Pixels>,
     reject: Bounds<Pixels>,
+    /// The third part, "Comentar" (enabled while the agent writes too).
+    comment: Bounds<Pixels>,
     accept_line: ShapedLine,
     reject_line: ShapedLine,
+    /// The word "Comentar" (`None` on the compact pill, icon only).
+    comment_line: Option<ShapedLine>,
     accept_x: Pixels,
     reject_x: Pixels,
-    /// `None` for the compact pill, which has no separator.
-    separator_x: Option<Pixels>,
+    comment_x: Pixels,
+    /// Where the "Comentar" icon goes.
+    comment_icon: Bounds<Pixels>,
+    /// The separators between the parts (none on the compact pill).
+    separators: Vec<Pixels>,
     glyph: Option<(Glyph, Bounds<Pixels>)>,
     previous_turn: bool,
     check_color: Hsla,
     cross_color: Hsla,
     label_color: Hsla,
+    comment_icon_color: Hsla,
+    comment_label_color: Hsla,
     /// The half under the mouse (`true` = accept).
     hovered: Option<bool>,
+    /// Whether "Comentar" is under the mouse.
+    comment_hovered: bool,
     /// The whole pill, so the text's I-beam never shows over it.
     surface_hitbox: Option<Hitbox>,
     accept_hitbox: Option<Hitbox>,
     reject_hitbox: Option<Hitbox>,
+    comment_hitbox: Option<Hitbox>,
 }
 
 /// The `+`/`−` icons of the hovered line.
@@ -329,6 +357,9 @@ pub struct EditorPrepaint {
     /// The bracket at or before the cursor and its match.
     brackets: Vec<Bounds<Pixels>>,
     matches: Vec<(Bounds<Pixels>, bool)>,
+    /// The occurrences of the word under the cursor (spec 10 §7.1), painted
+    /// right before [`Self::matches`].
+    occurrence_quads: Vec<Bounds<Pixels>>,
     current_line: Vec<Bounds<Pixels>>,
     text_origin_x: Pixels,
     gutter_width: Pixels,
@@ -343,6 +374,27 @@ pub struct EditorPrepaint {
     /// vertical scrollbar lives in (its track and thumb). Filled after the
     /// view is laid out.
     margin_hitboxes: Vec<Hitbox>,
+    /// The visible comment blocks, laid out and prepainted as children.
+    blocks: Vec<BlockPaint>,
+    /// The comment marks of the margin.
+    marks: Vec<MarkLayout>,
+    /// The tooltip of the hovered mark: its surface, its lines, their height
+    /// and the padding.
+    mark_tooltip: Option<(Bounds<Pixels>, Vec<ShapedLine>, Pixels, Pixels)>,
+}
+
+/// A comment block ready to paint: the strip of its rows and its element.
+struct BlockPaint {
+    /// The strip of its rows (its element is laid out inside it).
+    bounds: Bounds<Pixels>,
+    element: gpui::AnyElement,
+}
+
+/// A comment mark of the margin.
+struct MarkLayout {
+    id: u64,
+    bounds: Bounds<Pixels>,
+    hitbox: Option<Hitbox>,
 }
 
 /// The editor element.
@@ -399,6 +451,39 @@ fn shape(
     window
         .text_system()
         .shape_line(SharedString::from(text), font_size, runs, None)
+}
+
+/// Greedy word wrap of one paragraph into lines no wider than `max_width`,
+/// measured with `shape` (a word longer than the line stays on its own line).
+fn wrap_words(
+    paragraph: &str,
+    max_width: Pixels,
+    mut shape: impl FnMut(&str) -> ShapedLine,
+) -> Vec<ShapedLine> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut shaped: Option<ShapedLine> = None;
+    for word in paragraph.split(' ').filter(|word| !word.is_empty()) {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        let line = shape(&candidate);
+        if line.width() > max_width && !current.is_empty() {
+            lines.extend(shaped.take());
+            current = word.to_string();
+            shaped = Some(shape(&current));
+        } else {
+            current = candidate;
+            shaped = Some(line);
+        }
+    }
+    lines.extend(shaped);
+    if lines.is_empty() {
+        lines.push(shape(""));
+    }
+    lines
 }
 
 /// Shapes a one-colour line through the view's cache.
@@ -717,8 +802,9 @@ fn place_pill(
         .or_else(|| first.map(|(row, y)| (row, y, true)))
 }
 
-/// Lays out the pill of hunk `hunk_ix` on the row at `row_y`: the full pill,
-/// or the compact one (two 24 × 24 icon buttons at 70 %) when no row had room.
+/// Lays out the pill of hunk `hunk_ix` on the row at `row_y`: the full pill
+/// ("✓ Aceptar" · "✗ Rechazar" · "Comentar", three equal parts), or the
+/// compact one (three 24 × 24 icon buttons at 70 %) when no row had room.
 #[allow(clippy::too_many_arguments)]
 fn layout_pill(
     view: &mut EditorView,
@@ -748,21 +834,32 @@ fn layout_pill(
     } else {
         None
     };
-    let top = row_y + (line_height - px(PILL_HEIGHT)) / 2.;
+    // Spec 09 §6.3: everything the pill paints follows the interface zoom.
+    let scale = view.settings().scale();
+    let pill_height = px(PILL_HEIGHT * scale);
+    let icon = px(ICON_SIZE * scale);
+    let comment_icon_size = px(PILL_COMMENT_ICON * scale);
+    let font_size = PILL_FONT_SIZE * scale;
+    // "Comentar" is not a decision: it reacts while the agent writes too.
+    let comment_icon_color = theme::color(theme.text_accent);
+    let comment_label_color = theme::color(theme.text);
+    let comment_hovered = view.hover_pill_comment == Some(id);
+    let top = row_y + (line_height - pill_height) / 2.;
 
     if compact {
         let faded = |color: Hsla| Hsla {
             a: color.a * COMPACT_PILL_OPACITY,
             ..color
         };
-        let accept_line = shape_ui_runs(view, &[("✓", faded(check_color))], PILL_FONT_SIZE, window);
-        let reject_line = shape_ui_runs(view, &[("✗", faded(cross_color))], PILL_FONT_SIZE, window);
-        let button = px(COMPACT_PILL_BUTTON);
-        let gap = px(COMPACT_PILL_GAP);
-        // While the agent writes, a third cell in front holds the spinner.
-        let cells = if glyph.is_some() { 3. } else { 2. };
+        let accept_line = shape_ui_runs(view, &[("✓", faded(check_color))], font_size, window);
+        let reject_line = shape_ui_runs(view, &[("✗", faded(cross_color))], font_size, window);
+        let button = px(COMPACT_PILL_BUTTON * scale);
+        let gap = px(COMPACT_PILL_GAP * scale);
+        // `✓`, `✗` and the comment icon; while the agent writes, a cell in
+        // front holds the spinner.
+        let cells = if glyph.is_some() { 4. } else { 3. };
         let width = button * cells + gap * (cells - 1.);
-        let bounds = Bounds::new(point(right - width, top), size(width, px(PILL_HEIGHT)));
+        let bounds = Bounds::new(point(right - width, top), size(width, pill_height));
         let first = bounds.left()
             + if glyph.is_some() {
                 button + gap
@@ -771,20 +868,31 @@ fn layout_pill(
             };
         let accept = Bounds::new(point(first, top), size(button, button));
         let reject = Bounds::new(point(first + button + gap, top), size(button, button));
+        let comment = Bounds::new(
+            point(first + (button + gap) * 2., top),
+            size(button, button),
+        );
         let glyph = glyph.map(|glyph| {
             (
                 glyph,
                 Bounds::new(
                     point(
-                        bounds.left() + (button - px(ICON_SIZE)) / 2.,
-                        top + (px(PILL_HEIGHT) - px(ICON_SIZE)) / 2.,
+                        bounds.left() + (button - icon) / 2.,
+                        top + (pill_height - icon) / 2.,
                     ),
-                    size(px(ICON_SIZE), px(ICON_SIZE)),
+                    size(icon, icon),
                 ),
             )
         });
         let accept_x = accept.left() + (button - accept_line.width()) / 2.;
         let reject_x = reject.left() + (button - reject_line.width()) / 2.;
+        let comment_icon = Bounds::new(
+            point(
+                comment.left() + (button - comment_icon_size) / 2.,
+                comment.top() + (button - comment_icon_size) / 2.,
+            ),
+            size(comment_icon_size, comment_icon_size),
+        );
         return PillLayout {
             hunk: id,
             enabled,
@@ -794,68 +902,98 @@ fn layout_pill(
             bounds,
             accept,
             reject,
+            comment,
             accept_line,
             reject_line,
+            comment_line: None,
             accept_x,
             reject_x,
-            separator_x: None,
+            comment_x: comment_icon.left(),
+            comment_icon,
+            separators: Vec::new(),
             glyph,
             previous_turn,
             check_color,
             cross_color,
             label_color,
+            comment_icon_color: faded(comment_icon_color),
+            comment_label_color,
             hovered,
+            comment_hovered,
             surface_hitbox: None,
             accept_hitbox: None,
             reject_hitbox: None,
+            comment_hitbox: None,
         };
     }
 
     let accept_line = shape_ui_runs(
         view,
         &[("✓", check_color), (" Aceptar", label_color)],
-        PILL_FONT_SIZE,
+        font_size,
         window,
     );
     let reject_line = shape_ui_runs(
         view,
         &[("✗", cross_color), (" Rechazar", label_color)],
-        PILL_FONT_SIZE,
+        font_size,
+        window,
+    );
+    let comment_line = shape_ui_runs(
+        view,
+        &[(crate::comments::texts::COMMENT, comment_label_color)],
+        font_size,
         window,
     );
 
-    let bounds = Bounds::new(
-        point(right - px(PILL_WIDTH), top),
-        size(px(PILL_WIDTH), px(PILL_HEIGHT)),
-    );
+    let width = px(PILL_WIDTH * scale);
+    let bounds = Bounds::new(point(right - width, top), size(width, pill_height));
+    // The clock or the spinner keeps a cell of its own at the left; the rest
+    // splits into three equal parts.
+    // A 4 px padding at both ends is the pill's own surface, not a button.
+    let inset = px(PILL_PADDING * scale);
     let glyph_width = if glyph.is_some() {
-        px(ICON_SIZE + 6.)
+        icon + px(10. * scale)
     } else {
-        px(0.)
+        inset
     };
-    let gap = px(8.);
-    let content = glyph_width + accept_line.width() + gap * 2. + px(1.) + reject_line.width();
-    let start = bounds.left() + ((bounds.size.width - content) / 2.).max(px(8.));
+    let parts_left = bounds.left() + glyph_width;
+    let parts_right = bounds.right() - inset;
+    let part = (parts_right - parts_left) / 3.;
+    let accept = Bounds::new(point(parts_left, bounds.top()), size(part, pill_height));
+    let reject = Bounds::new(
+        point(parts_left + part, bounds.top()),
+        size(part, pill_height),
+    );
+    let comment = Bounds::from_corners(
+        point(parts_left + part * 2., bounds.top()),
+        point(parts_right, bounds.bottom()),
+    );
     let glyph = glyph.map(|glyph| {
         (
             glyph,
             Bounds::new(
-                point(start, bounds.top() + (px(PILL_HEIGHT) - px(ICON_SIZE)) / 2.),
-                size(px(ICON_SIZE), px(ICON_SIZE)),
+                point(
+                    bounds.left() + px(6. * scale),
+                    bounds.top() + (pill_height - icon) / 2.,
+                ),
+                size(icon, icon),
             ),
         )
     });
-    let accept_x = start + glyph_width;
-    let separator_x = accept_x + accept_line.width() + gap;
-    let reject_x = separator_x + px(1.) + gap;
-    let accept = Bounds::from_corners(
-        point(accept_x - gap / 2., bounds.top()),
-        point(separator_x, bounds.bottom()),
+    let accept_x = accept.left() + ((part - accept_line.width()) / 2.).max(px(0.));
+    let reject_x = reject.left() + ((part - reject_line.width()) / 2.).max(px(0.));
+    let comment_gap = px(4. * scale);
+    let content = comment_icon_size + comment_gap + comment_line.width();
+    let comment_start = comment.left() + ((comment.size.width - content) / 2.).max(px(0.));
+    let comment_icon = Bounds::new(
+        point(
+            comment_start,
+            bounds.top() + (pill_height - comment_icon_size) / 2.,
+        ),
+        size(comment_icon_size, comment_icon_size),
     );
-    let reject = Bounds::from_corners(
-        point(separator_x, bounds.top()),
-        point(bounds.right(), bounds.bottom()),
-    );
+    let comment_x = comment_start + comment_icon_size + comment_gap;
     PillLayout {
         hunk: id,
         enabled,
@@ -865,20 +1003,28 @@ fn layout_pill(
         bounds,
         accept,
         reject,
+        comment,
         accept_line,
         reject_line,
+        comment_line: Some(comment_line),
         accept_x,
         reject_x,
-        separator_x: Some(separator_x),
+        comment_x,
+        comment_icon,
+        separators: vec![reject.left(), comment.left()],
         glyph,
         previous_turn,
         check_color,
         cross_color,
         label_color,
+        comment_icon_color,
+        comment_label_color,
         hovered,
+        comment_hovered,
         surface_hitbox: None,
         accept_hitbox: None,
         reject_hitbox: None,
+        comment_hitbox: None,
     }
 }
 
@@ -1180,11 +1326,23 @@ impl Element for EditorElement {
             // prose font.
             view.ensure_wrap(text_width, char_width, window);
 
+            // Comment blocks (spec 09 D10): whole rows below the text rows
+            // they talk about. Built after the wrap, before anything that
+            // needs a y, and the scroll follows the row on top when a block
+            // above it changed.
             let wrap_rows = view.wrap_row_count();
+            let box_width = view.comment_box_width(text_width);
+            let placements = view.layout_comment_blocks(box_width, window, cx);
+            view.update_block_map(wrap_rows, placements);
+            let visual_rows = view.blocks.total_rows();
+
             let viewport_height = bounds.size.height;
             let visible_row_count = f32::from(viewport_height) / f32::from(line_height);
-            let max_scroll =
-                (wrap_rows as f32 * f32::from(line_height) - f32::from(viewport_height)).max(0.);
+            // Spec 10 §6: the last row can scroll up to mid-screen (code
+            // editor only); the scrollbar counts the same margin as content.
+            let viewport_px = f32::from(viewport_height);
+            let end_margin = view.end_margin(viewport_px);
+            let max_scroll = view.max_scroll_top(viewport_px);
 
             // A scroll asked for before the first layout could not be clamped
             // then; do it now, before the cursor gets a say.
@@ -1198,7 +1356,7 @@ impl Element for EditorElement {
             if view.autoscroll {
                 view.autoscroll = false;
                 let center = std::mem::take(&mut view.autoscroll_center);
-                let cursor_row = view.cursor_wrap_row();
+                let cursor_row = view.blocks.to_visual_row(view.cursor_wrap_row());
                 let cursor_top = cursor_row as f32 * f32::from(line_height);
                 let cursor_bottom = cursor_top + f32::from(line_height);
                 let viewport = f32::from(viewport_height);
@@ -1215,6 +1373,23 @@ impl Element for EditorElement {
                     view.scroll_top = cursor_bottom - f32::from(viewport_height);
                 }
             }
+            // A box just opened comes into view (its bottom first, without
+            // pushing its top out).
+            if let Some(range) = view
+                .autoscroll_block
+                .take()
+                .and_then(|id| view.blocks.block_range(id))
+            {
+                let block_top = range.start as f32 * f32::from(line_height);
+                let block_bottom = range.end as f32 * f32::from(line_height);
+                let viewport = f32::from(viewport_height);
+                if block_bottom > view.scroll_top + viewport {
+                    view.scroll_top = block_bottom - viewport;
+                }
+                if block_top < view.scroll_top {
+                    view.scroll_top = block_top;
+                }
+            }
             view.scroll_top = view.scroll_top.clamp(0., max_scroll);
 
             // One `ScrollChanged` per frame at most, whatever moved the scroll
@@ -1227,14 +1402,30 @@ impl Element for EditorElement {
 
             let first_row = ((view.scroll_top / f32::from(line_height)).floor() as u32)
                 .saturating_sub(OVERSCAN);
+            // `first_row..last_row` are *visual* rows (comment blocks
+            // included); the text rows among them are the wrap rows below.
             let last_row =
-                (first_row + visible_row_count.ceil() as u32 + 2 * OVERSCAN + 1).min(wrap_rows);
+                (first_row + visible_row_count.ceil() as u32 + 2 * OVERSCAN + 1).min(visual_rows);
             let top =
                 bounds.top() - px(view.scroll_top - first_row as f32 * f32::from(line_height));
+            let visible_wraps = view.blocks.wrap_rows_in(first_row..last_row);
 
             // Highlights of the visible byte range, queried once per frame.
-            let (visible_start, visible_end) = view.visible_byte_range(first_row, last_row);
+            let (visible_start, visible_end) =
+                view.visible_byte_range(visible_wraps.start, visible_wraps.end);
             let spans = view.highlights(visible_start..visible_end).to_vec();
+
+            // Occurrences of the word under the cursor (spec 10 §7.1): looked
+            // for in the same visible bytes, real rows only (phantom text is
+            // not in the buffer).
+            let occurrences: Vec<Range<usize>> = match view.live_occurrence_query().cloned() {
+                Some(query) if visible_end > visible_start => crate::search::find_occurrences(
+                    &view.buffer_text_in(visible_start..visible_end),
+                    visible_start,
+                    &query,
+                ),
+                _ => Vec::new(),
+            };
 
             let selection = view.selection_range();
             let has_selection = view.has_selection();
@@ -1264,19 +1455,27 @@ impl Element for EditorElement {
             let deleted_word = theme::alpha(theme.diff_deleted, DIFF_WORD_ALPHA);
             let added_word = theme::alpha(theme.diff_added, DIFF_WORD_ALPHA);
 
-            let mut rows = Vec::with_capacity((last_row - first_row) as usize);
+            let mut rows = Vec::with_capacity(last_row.saturating_sub(first_row) as usize);
             let probe = view.render_probe();
             let mut probe_rows = Vec::new();
             let mut selections = Vec::new();
             let mut brackets = Vec::new();
             let mut matches = Vec::new();
+            let mut occurrence_quads = Vec::new();
             let mut current_line = Vec::new();
             let mut marked = Vec::new();
             let mut cursor = None;
             let mut widest = px(0.);
 
-            for wrap_row in first_row..last_row {
-                let origin_y = top + line_height * (wrap_row - first_row) as f32;
+            for visual_row in first_row..last_row {
+                // A comment block paints itself (below); it has no text.
+                let VisualCell::Wrap(wrap_row) = view.blocks.from_visual_row(visual_row) else {
+                    continue;
+                };
+                if wrap_row >= wrap_rows {
+                    break;
+                }
+                let origin_y = top + line_height * (visual_row - first_row) as f32;
                 let (display_row, segment) = view.wrap.to_display(wrap_row);
                 let cell = view.display_map.to_buffer(display_row);
                 let kind = view.display_map.diff().row_kind(display_row);
@@ -1540,6 +1739,20 @@ impl Element for EditorElement {
                         );
                         matches.push((row_bounds(from, to), is_current));
                     }
+                    // Occurrences of the word under the cursor, clipped to the
+                    // segment like the search matches.
+                    let first = occurrences.partition_point(|found| found.end <= row_start);
+                    for found in &occurrences[first..] {
+                        if found.start >= row_end.max(row_start) {
+                            break;
+                        }
+                        let from =
+                            ((found.start.max(row_start) - row_start) as u32).max(range.start);
+                        let to = ((found.end.min(row_end) - row_start) as u32).min(range.end);
+                        if from < to {
+                            occurrence_quads.push(row_bounds(from, to));
+                        }
+                    }
                     // Marked (IME) text.
                     if let Some(marked_range) = &marked_range
                         && marked_range.end > row_start
@@ -1586,11 +1799,13 @@ impl Element for EditorElement {
                         current_search_match: matches[matches_before..]
                             .iter()
                             .any(|(_, current)| *current),
+                        y: origin_y,
                     });
                 }
                 layout.words = words;
                 rows.push(layout);
             }
+            view.occurrence_ranges = occurrences;
 
             // Horizontal scrolling only exists without soft wrap.
             let max_scroll_x = if view.soft_wrap() {
@@ -1601,7 +1816,12 @@ impl Element for EditorElement {
             view.scroll_left = view.scroll_left.clamp(0., max_scroll_x);
 
             // The 2 px border of every visible hunk, in the kind's colour.
-            let wrap_y = |wrap_row: WrapRow| top + line_height * (wrap_row - first_row) as f32;
+            // Rows are placed by their visual row: the comment blocks above
+            // them push them down.
+            let blocks = view.blocks.clone();
+            let visual_y =
+                |visual_row: u32| top + line_height * (visual_row as f32 - first_row as f32);
+            let wrap_y = |wrap_row: WrapRow| visual_y(blocks.to_visual_row(wrap_row));
 
             // Deletion marks of the git column: 3 × 6 px centred on the
             // boundary between the rows the deleted lines sat between, plus
@@ -1633,10 +1853,15 @@ impl Element for EditorElement {
                 } else {
                     continue;
                 };
-                if boundary < first_row || boundary > last_row {
+                let boundary_visual = if boundary > 0 && boundary >= wrap_rows {
+                    blocks.to_visual_row(boundary - 1) + 1
+                } else {
+                    blocks.to_visual_row(boundary)
+                };
+                if boundary_visual < first_row || boundary_visual > last_row {
                     continue;
                 }
-                let y = wrap_y(boundary);
+                let y = visual_y(boundary_visual);
                 let height = px(GIT_DELETED_MARK_HEIGHT);
                 let mark_top = match (real_above, real_below) {
                     (true, true) => y - height / 2.,
@@ -1665,9 +1890,9 @@ impl Element for EditorElement {
                 if range.is_empty() {
                     continue;
                 }
-                let first = view.wrap.to_wrap_row(range.start, 0);
+                let first = blocks.to_visual_row(view.wrap.to_wrap_row(range.start, 0));
                 let last_display = range.end - 1;
-                let last = view.wrap.to_wrap_row(last_display, u32::MAX) + 1;
+                let last = blocks.to_visual_row(view.wrap.to_wrap_row(last_display, u32::MAX)) + 1;
                 let from = first.max(first_row);
                 let to = last.min(last_row);
                 if from >= to {
@@ -1680,7 +1905,7 @@ impl Element for EditorElement {
                 };
                 hunk_borders.push((
                     Bounds::new(
-                        point(border_x, wrap_y(from)),
+                        point(border_x, visual_y(from)),
                         size(px(HUNK_BORDER_WIDTH), line_height * (to - from) as f32),
                     ),
                     color,
@@ -1709,7 +1934,7 @@ impl Element for EditorElement {
             }
             pill_hunks.sort_unstable();
             let pill_right = bounds.right() - px(SCROLLBAR_WIDTH + PILL_MARGIN);
-            let pill_left = pill_right - px(PILL_WIDTH);
+            let pill_left = pill_right - px(PILL_WIDTH * view.settings().scale());
             // Where the painted text of a display row's first segment ends,
             // from the lines just shaped (only laid-out rows can host a pill).
             let text_right = |display_row: DisplayRow| -> Option<(Pixels, Pixels)> {
@@ -1770,7 +1995,8 @@ impl Element for EditorElement {
                 .and_then(|row| {
                     let (hunk_ix, line) = view.review_line_at_row(row)?;
                     let wrap_row = view.wrap.to_wrap_row(row, 0);
-                    if wrap_row < first_row || wrap_row >= last_row {
+                    let visual_row = blocks.to_visual_row(wrap_row);
+                    if visual_row < first_row || visual_row >= last_row {
                         return None;
                     }
                     let icon_size = line_icon_size(f32::from(numbers_right - numbers_left));
@@ -1827,6 +2053,135 @@ impl Element for EditorElement {
 
             let bar = layout_bar(view, bounds, &theme, window);
 
+            // Comment blocks in the viewport (only those: the ones above or
+            // below are never built), each an element laid out in the strip
+            // of its rows, from the text's left edge to 12 px before the
+            // scrollbar. They are prepainted below, outside this update.
+            let scale = view.settings().scale();
+            let mut block_paints = Vec::new();
+            let mut block_probe = Vec::new();
+            for placement in blocks.blocks() {
+                let Some(range) = blocks.block_range(placement.id) else {
+                    continue;
+                };
+                if range.end <= first_row || range.start >= last_row {
+                    continue;
+                }
+                let Some(layout) = view.block_layout(placement.id).cloned() else {
+                    continue;
+                };
+                let strip = Bounds::new(
+                    point(text_origin_x, visual_y(range.start)),
+                    size(box_width, line_height * placement.rows as f32),
+                );
+                let element = view.render_comment_block(&layout, box_width, strip.size.height, cx);
+                if probe {
+                    block_probe.push(crate::view::CommentBlockRender {
+                        id: placement.id,
+                        kind: layout.kind,
+                        visual_row: range.start,
+                        rows: placement.rows,
+                        bounds: strip,
+                        box_height: layout.height,
+                    });
+                }
+                block_paints.push(BlockPaint {
+                    bounds: strip,
+                    element,
+                });
+            }
+
+            // The comment marks: one per row (the first comment of the row),
+            // centred in the gap between the numbers and the text, so they
+            // never widen the gutter nor touch the git and agent columns.
+            let mut marks: Vec<MarkLayout> = Vec::new();
+            let mut marked_rows: Vec<DisplayRow> = Vec::new();
+            let mark_side = px(COMMENT_MARK_SIZE * scale);
+            for layout in &view.block_layouts {
+                let (Some(row), Some(_)) = (layout.mark_row, layout.comment) else {
+                    continue;
+                };
+                if marked_rows.contains(&row) {
+                    continue;
+                }
+                marked_rows.push(row);
+                let visual = blocks.to_visual_row(view.wrap.to_wrap_row(row, 0));
+                if visual < first_row || visual >= last_row {
+                    continue;
+                }
+                let center_x = numbers_right + px(GUTTER_TEXT_GAP / 2.);
+                let y = visual_y(visual) + (line_height - mark_side) / 2.;
+                marks.push(MarkLayout {
+                    id: layout.id,
+                    bounds: Bounds::new(
+                        point(center_x - mark_side / 2., y),
+                        size(mark_side, mark_side),
+                    ),
+                    hitbox: None,
+                });
+            }
+            let mark_probe: Vec<crate::view::CommentMarkRender> = if probe {
+                marks
+                    .iter()
+                    .filter_map(|mark| {
+                        let layout = view.block_layout(mark.id)?;
+                        Some(crate::view::CommentMarkRender {
+                            id: mark.id,
+                            display_row: layout.mark_row?,
+                            bounds: mark.bounds,
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // The tooltip of the hovered mark: the first 200 characters.
+            let mark_tooltip = view.hover_mark.and_then(|id| {
+                let mark = marks.iter().find(|mark| mark.id == id)?;
+                let text = view
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id == id)
+                    .map(|comment| crate::comments::tooltip_text(&comment.text))?;
+                let font_size = px(PILL_FONT_SIZE * scale);
+                let tip_line = px(PILL_FONT_SIZE * 1.5 * scale);
+                let padding = px(6. * scale);
+                let max_width = px(360. * scale).min(bounds.size.width - px(16.));
+                let ui_font = view.style.ui_font.clone();
+                let lines: Vec<ShapedLine> = text
+                    .split('\n')
+                    .flat_map(|paragraph| {
+                        wrap_words(paragraph, max_width - padding * 2., |piece| {
+                            shape(piece.to_string(), &ui_font, font_size, text_color, window)
+                        })
+                    })
+                    .take(12)
+                    .collect();
+                let width = lines
+                    .iter()
+                    .map(|line| line.width())
+                    .fold(px(0.), |a, b| a.max(b))
+                    + padding * 2.;
+                let height = tip_line * lines.len().max(1) as f32 + padding;
+                let below = mark.bounds.bottom() + px(4.);
+                let y = if below + height <= bounds.bottom() {
+                    below
+                } else {
+                    mark.bounds.top() - px(4.) - height
+                };
+                let x = mark
+                    .bounds
+                    .left()
+                    .min(bounds.right() - width)
+                    .max(bounds.left());
+                Some((
+                    Bounds::new(point(x, y), size(width, height)),
+                    lines,
+                    tip_line,
+                    padding,
+                ))
+            });
+
             // Scrollbar: 8 px, only while there is something to scroll.
             let alpha = view.scrollbar_alpha();
             let scrollbar = (max_scroll > 0. && alpha > 0.).then(|| {
@@ -1835,7 +2190,7 @@ impl Element for EditorElement {
                     size(px(SCROLLBAR_WIDTH), bounds.size.height),
                 );
                 let visible = f32::from(viewport_height);
-                let content = wrap_rows as f32 * f32::from(line_height);
+                let content = visual_rows as f32 * f32::from(line_height) + end_margin;
                 let thumb_height = (visible / content * visible)
                     .max(SCROLLBAR_MIN_THUMB)
                     .min(visible);
@@ -1862,7 +2217,7 @@ impl Element for EditorElement {
                 text_origin_x,
                 line_height,
                 char_width,
-                first_wrap_row: first_row,
+                first_visual_row: first_row,
                 rows: rows
                     .iter()
                     .map(|row| (row.wrap_row, row.display_row, row.segment, row.line.clone()))
@@ -1885,6 +2240,12 @@ impl Element for EditorElement {
                             cross_color: pill.cross_color,
                             label_color: pill.label_color,
                             hovered: pill.hovered,
+                            accept_bounds: pill.accept,
+                            reject_bounds: pill.reject,
+                            comment_bounds: pill.comment,
+                            comment_hovered: pill.comment_hovered,
+                            comment_icon_color: pill.comment_icon_color,
+                            comment_label_color: pill.comment_label_color,
                         })
                         .collect(),
                     line_icons: line_icons.as_ref().map(|icons| (icons.hunk, icons.line)),
@@ -1915,8 +2276,20 @@ impl Element for EditorElement {
                             .join(" ")
                     }),
                     bar_enabled: bar.as_ref().is_some_and(|bar| bar.enabled),
-                    tooltip: tooltip.as_ref().map(|_| "Turno anterior".to_string()),
+                    tooltip: tooltip
+                        .as_ref()
+                        .map(|_| "Turno anterior".to_string())
+                        .or_else(|| {
+                            mark_tooltip.as_ref().and(view.hover_mark).and_then(|id| {
+                                view.comments
+                                    .iter()
+                                    .find(|comment| comment.id == id)
+                                    .map(|comment| crate::comments::tooltip_text(&comment.text))
+                            })
+                        }),
                     hunks: Vec::new(),
+                    blocks: block_probe,
+                    comment_marks: mark_probe,
                 }
             } else {
                 ReviewFrame::default()
@@ -1983,6 +2356,7 @@ impl Element for EditorElement {
                 selections,
                 brackets,
                 matches,
+                occurrence_quads,
                 current_line,
                 text_origin_x,
                 gutter_width,
@@ -1994,6 +2368,9 @@ impl Element for EditorElement {
                 scrollbar,
                 theme,
                 margin_hitboxes: Vec::new(),
+                blocks: block_paints,
+                marks,
+                mark_tooltip,
             }
         });
 
@@ -2014,8 +2391,31 @@ impl Element for EditorElement {
             .map(|margin| window.insert_hitbox(margin, HitboxBehavior::Normal))
             .collect();
 
+        // The comment blocks, laid out and prepainted as children of the
+        // editor (their buttons and the field get hitboxes and dispatch
+        // nodes under it), clipped to the editor. Before the review
+        // controls, which float over everything.
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for block in &mut prepaint.blocks {
+                block.element.prepaint_as_root(
+                    block.bounds.origin,
+                    size(
+                        AvailableSpace::Definite(block.bounds.size.width),
+                        AvailableSpace::Definite(block.bounds.size.height),
+                    ),
+                    window,
+                    cx,
+                );
+            }
+        });
+        for mark in &mut prepaint.marks {
+            mark.hitbox =
+                Some(window.insert_hitbox(mark.bounds.dilate(px(2.)), HitboxBehavior::Normal));
+        }
+
         // Real hitboxes for the review buttons, inserted on top of the editor.
-        // Disabled controls get none, so a click on them does nothing.
+        // Disabled controls get none, so a click on them does nothing;
+        // "Comentar" always has one (it is not a decision).
         for pill in &mut prepaint.pills {
             pill.surface_hitbox = Some(window.insert_hitbox(pill.bounds, HitboxBehavior::Normal));
             if pill.enabled {
@@ -2024,6 +2424,7 @@ impl Element for EditorElement {
                 pill.reject_hitbox =
                     Some(window.insert_hitbox(pill.reject, HitboxBehavior::Normal));
             }
+            pill.comment_hitbox = Some(window.insert_hitbox(pill.comment, HitboxBehavior::Normal));
         }
         if let Some(icons) = prepaint.line_icons.as_mut() {
             icons.accept_hitbox = Some(window.insert_hitbox(icons.accept, HitboxBehavior::Normal));
@@ -2167,6 +2568,14 @@ impl Element for EditorElement {
                 ));
             }
 
+            // Square corners, under the search matches and the selection.
+            for occurrence in &prepaint.occurrence_quads {
+                window.paint_quad(fill(
+                    *occurrence,
+                    theme::alpha(theme.selection, OCCURRENCE_ALPHA),
+                ));
+            }
+
             for (quad, is_current) in &prepaint.matches {
                 let alpha = if *is_current {
                     SEARCH_CURRENT_ALPHA
@@ -2263,6 +2672,12 @@ impl Element for EditorElement {
                 window.paint_quad(fill(cursor, theme::color(theme.cursor)));
             }
 
+            // The comment blocks, over the rows they own and under every
+            // floating control.
+            for block in &mut prepaint.blocks {
+                block.element.paint(window, cx);
+            }
+
             // `+`/`−` of the hovered line.
             if let Some(icons) = &prepaint.line_icons {
                 paint_line_icon(
@@ -2303,7 +2718,7 @@ impl Element for EditorElement {
                     hover.corner_radii = Corners::all(px(4.));
                     window.paint_quad(hover);
                 }
-                let text_y = pill.bounds.top() + (px(PILL_HEIGHT) - line_height) / 2.;
+                let text_y = pill.bounds.top() + (pill.bounds.size.height - line_height) / 2.;
                 if let Some((glyph, glyph_bounds)) = pill.glyph {
                     paint_glyph(
                         glyph,
@@ -2326,16 +2741,79 @@ impl Element for EditorElement {
                         .ok();
                     };
                 paint_label(&pill.accept_line, pill.accept_x, window, cx);
-                if let Some(separator_x) = pill.separator_x {
+                for separator_x in &pill.separators {
                     window.paint_quad(fill(
                         Bounds::new(
-                            point(separator_x, pill.bounds.top() + px(5.)),
-                            size(px(1.), px(PILL_HEIGHT - 10.)),
+                            point(*separator_x, pill.bounds.top() + px(5.)),
+                            size(px(1.), pill.bounds.size.height - px(10.)),
                         ),
                         theme::alpha(theme.text_muted, 0.5),
                     ));
                 }
                 paint_label(&pill.reject_line, pill.reject_x, window, cx);
+                // "Comentar": the icon in `text.accent`, the word in `text`.
+                if pill.comment_hovered {
+                    let mut hover = fill(
+                        Bounds::from_corners(
+                            point(
+                                pill.comment.left().max(pill.bounds.left() + px(2.)),
+                                pill.comment.top() + px(2.),
+                            ),
+                            point(
+                                pill.comment.right().min(pill.bounds.right() - px(2.)),
+                                pill.comment.bottom() - px(2.),
+                            ),
+                        ),
+                        theme::alpha(theme.surface, pill.opacity),
+                    );
+                    hover.corner_radii = Corners::all(px(4.));
+                    window.paint_quad(hover);
+                }
+                window
+                    .paint_svg(
+                        pill.comment_icon,
+                        gpui_kit::assets::IconName::MessageSquarePlus.path(),
+                        None,
+                        gpui::TransformationMatrix::unit(),
+                        pill.comment_icon_color,
+                        cx,
+                    )
+                    .ok();
+                if let Some(line) = &pill.comment_line {
+                    paint_label(line, pill.comment_x, window, cx);
+                }
+            }
+
+            // The comment marks of the margin.
+            for mark in &prepaint.marks {
+                window
+                    .paint_svg(
+                        mark.bounds,
+                        gpui_kit::assets::IconName::MessageSquareText.path(),
+                        None,
+                        gpui::TransformationMatrix::unit(),
+                        theme::color(theme.text_accent),
+                        cx,
+                    )
+                    .ok();
+            }
+            if let Some((tip_bounds, lines, tip_line, padding)) = &prepaint.mark_tooltip {
+                let (tip_line, padding) = (*tip_line, *padding);
+                paint_surface(*tip_bounds, 4., 1., &theme, window);
+                for (ix, line) in lines.iter().enumerate() {
+                    line.paint(
+                        point(
+                            tip_bounds.left() + padding,
+                            tip_bounds.top() + padding / 2. + tip_line * ix as f32,
+                        ),
+                        tip_line,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .ok();
+                }
             }
 
             if let Some(tooltip) = &prepaint.tooltip {
@@ -2422,10 +2900,19 @@ impl Element for EditorElement {
                 if let Some(hitbox) = &pill.surface_hitbox {
                     set(hitbox, CursorStyle::Arrow, window);
                 }
-                for hitbox in [&pill.accept_hitbox, &pill.reject_hitbox]
-                    .into_iter()
-                    .flatten()
+                for hitbox in [
+                    &pill.accept_hitbox,
+                    &pill.reject_hitbox,
+                    &pill.comment_hitbox,
+                ]
+                .into_iter()
+                .flatten()
                 {
+                    set(hitbox, CursorStyle::PointingHand, window);
+                }
+            }
+            for mark in &prepaint.marks {
+                if let Some(hitbox) = &mark.hitbox {
                     set(hitbox, CursorStyle::PointingHand, window);
                 }
             }
@@ -2457,6 +2944,7 @@ impl Element for EditorElement {
             bounds: Bounds<Pixels>,
             accept: Option<Hitbox>,
             reject: Option<Hitbox>,
+            comment: Option<Hitbox>,
         }
         let pill_targets: Vec<PillTarget> = prepaint
             .pills
@@ -2466,7 +2954,25 @@ impl Element for EditorElement {
                 bounds: pill.bounds,
                 accept: pill.accept_hitbox.clone(),
                 reject: pill.reject_hitbox.clone(),
+                comment: pill.comment_hitbox.clone(),
             })
+            .collect();
+        // "Comentar" of each pill, for its hover background.
+        let pill_comments: Vec<(u64, Bounds<Pixels>)> = prepaint
+            .pills
+            .iter()
+            .map(|pill| (pill.hunk, pill.comment))
+            .collect();
+        // The comment marks: a click folds or unfolds, the mouse shows the
+        // tooltip.
+        let mark_targets: Vec<(u64, Bounds<Pixels>, Option<Hitbox>)> = prepaint
+            .marks
+            .iter()
+            .map(|mark| (mark.id, mark.bounds.dilate(px(2.)), mark.hitbox.clone()))
+            .collect();
+        let mark_zones: Vec<(u64, Bounds<Pixels>)> = mark_targets
+            .iter()
+            .map(|(id, bounds, _)| (*id, *bounds))
             .collect();
         // What the mouse can hover for a `bg.surface` highlight: the halves
         // of the enabled pills and the enabled buttons of the bar.
@@ -2553,6 +3059,8 @@ impl Element for EditorElement {
                 };
                 let mut action = None;
                 let mut swallowed = false;
+                let mut comment_hunk = None;
+                let mut toggle_mark = None;
                 for pill in &pill_targets {
                     if pill.bounds.contains(&event.position) {
                         swallowed = true;
@@ -2560,9 +3068,19 @@ impl Element for EditorElement {
                             action = Some(ReviewAction::AcceptHunk(pill.hunk));
                         } else if clicked(&pill.reject, window) {
                             action = Some(ReviewAction::RejectHunk(pill.hunk));
+                        } else if clicked(&pill.comment, window) {
+                            comment_hunk = Some(pill.hunk);
                         }
                         break;
                     }
+                }
+                if !swallowed
+                    && let Some((id, _, _)) = mark_targets
+                        .iter()
+                        .find(|(_, _, hitbox)| clicked(hitbox, window))
+                {
+                    swallowed = true;
+                    toggle_mark = Some(*id);
                 }
                 if !swallowed && let Some((hunk, line, accept, reject)) = &icon_targets {
                     if clicked(accept, window) {
@@ -2591,6 +3109,17 @@ impl Element for EditorElement {
                 }
                 if swallowed {
                     window.focus(&focus_handle, cx);
+                    if let Some(hunk) = comment_hunk {
+                        // The box takes the keyboard (after the focus above),
+                        // and the editor's own focus-on-click must not take
+                        // it back.
+                        view.update(cx, |view, cx| view.comment_hunk(hunk, window, cx))
+                            .ok();
+                        window.prevent_default();
+                    }
+                    if let Some(id) = toggle_mark {
+                        view.update(cx, |view, cx| view.toggle_comment(id, cx)).ok();
+                    }
                     if let Some(action) = action {
                         // The bar's arrows move like the keys do.
                         view.update(cx, |view, cx| match action {
@@ -2634,6 +3163,54 @@ impl Element for EditorElement {
             }
         });
 
+        // The right button (D12): over the text, a click outside the selection
+        // moves the cursor there first (inside it, it stays) and the context
+        // menu (gpui-kit's `PopupMenu`) opens there; over a comment box, a
+        // pill, the bar or the margin, nothing opens.
+        let overlay_zones: Vec<Bounds<Pixels>> = prepaint
+            .pills
+            .iter()
+            .map(|pill| pill.bounds)
+            .chain(prepaint.bar.as_ref().map(|bar| bar.bounds))
+            .chain(prepaint.margin_hitboxes.iter().map(|hitbox| hitbox.bounds))
+            .collect();
+        window.on_mouse_event({
+            let view = self.view.downgrade();
+            let hitbox = hitbox.clone();
+            let focus_handle = focus_handle.clone();
+            move |event: &MouseDownEvent, phase: DispatchPhase, window: &mut Window, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Right {
+                    return;
+                }
+                let on_text = hitbox.is_hovered_at(event.position, window)
+                    && !overlay_zones
+                        .iter()
+                        .any(|zone| zone.contains(&event.position));
+                // A text field (the chat composer) has no context menu.
+                let enabled = view
+                    .read_with(cx, |view, _| view.comments_enabled())
+                    .unwrap_or(false);
+                if !on_text || !enabled {
+                    return;
+                }
+                window.focus(&focus_handle, cx);
+                let _ = view.update(cx, |view, cx| {
+                    let point = view.point_for_position(event.position, window);
+                    let selection = view.selection_range();
+                    let inside =
+                        view.has_selection() && selection.start <= point && point <= selection.end;
+                    if !inside {
+                        view.begin_selection(point, false, 1, cx);
+                        view.end_selection();
+                    }
+                    view.open_context_menu(event.position, window, cx);
+                });
+                // The menu has the keyboard now; the editor's own
+                // focus-on-click must not take it back.
+                window.prevent_default();
+            }
+        });
+
         window.on_mouse_event({
             let view = self.view.downgrade();
             let max_scroll = prepaint.max_scroll;
@@ -2661,17 +3238,29 @@ impl Element for EditorElement {
                         .iter()
                         .find(|(_, bounds)| bounds.contains(&event.position))
                         .map(|(hunk, _)| *hunk);
+                    let hover_pill_comment = pill_comments
+                        .iter()
+                        .find(|(_, bounds)| bounds.contains(&event.position))
+                        .map(|(hunk, _)| *hunk);
+                    let hover_mark = mark_zones
+                        .iter()
+                        .find(|(_, bounds)| bounds.contains(&event.position))
+                        .map(|(id, _)| *id);
                     if hover_row != view.hover_row
                         || hover_clock != view.hover_clock
                         || hover_pill != view.hover_pill
                         || hover_pill_zone != view.hover_pill_zone
                         || hover_bar != view.hover_bar
+                        || hover_pill_comment != view.hover_pill_comment
+                        || hover_mark != view.hover_mark
                     {
                         view.hover_row = hover_row;
                         view.hover_clock = hover_clock;
                         view.hover_pill = hover_pill;
                         view.hover_pill_zone = hover_pill_zone;
                         view.hover_bar = hover_bar;
+                        view.hover_pill_comment = hover_pill_comment;
+                        view.hover_mark = hover_mark;
                         cx.notify();
                     }
                     if let (Some(grab), Some((track, thumb))) = (view.scrollbar_drag, scrollbar) {

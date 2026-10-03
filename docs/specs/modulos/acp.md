@@ -8,7 +8,7 @@ Cliente ACP: descubrir, lanzar y hablar con agentes. Sin GPUI. Corre en un hilo 
 - **Lanzamiento**: proceso hijo con stdin/stdout/stderr en pipes, `cwd` del proyecto, entorno del usuario ajustado por un `ProcessEnv` (`AgentConnection::start_with_env`: variables a poner, a quitar —con prefijo `NOMBRE_*`— y directorios al frente del `PATH`). `NO_BROWSER` ya no se inyecta (E4): es opcional por lanzamiento con `LaunchSpec::with_no_browser()`. `AgentRegistry::launch_command_with_node(descriptor, node)` corre las distribuciones `npx` con el `node` privado (`node <prefix>/lib/node_modules/npm/bin/npx-cli.js -y paquete@versión`), sin `npx` global. Lectura de stdout línea a línea sin límite de tamaño; stderr drenado a log y a los últimos 64 KiB para diagnósticos. Matar el grupo de procesos al cerrar.
 - **Conexión**: `agent-client-protocol` 2.2.x (schema 1.9.1; feature `acp-v2-spike` declarada y apagada), `ProtocolVersion::V1`. Capacidades anunciadas: `fs.readTextFile = true`, `fs.writeTextFile = true`, `terminal = false`, `elicitation` si el SDK lo permite, `auth.terminal = true` (Cincel delega al terminal del sistema pero declara la capacidad para que el agente ofrezca esos métodos). Negociar `agentFileChangeReport` con la extensión `jetbrains.air` real: el cliente manda `{"version":1,"capabilities":["agentFileChangeReport"]}` en `clientCapabilities._meta.jetbrains.air` (donde lo leen `claude-agent-acp` y `codex-acp`; también se repite en el `_meta` del `InitializeRequest`) y lee el array de strings `capabilities` del `_meta` de nivel superior del `InitializeResponse` (`version` entero ≥ 1).
 - **Sesión**: `session/new` con `cwd` y `mcpServers` de settings; guardar `sessionId`; soporte de `session/load` si el agente lo anuncia (historial). Modos y `configOptions` (ambos), `available_commands_update`, `current_mode_update`, `config_option_update`.
-- **Prompt**: bloques `text` y `resource_link` para menciones `@archivo`; antes de enviar, si `ReviewStore::report_for_agent` devuelve texto, se antepone como bloque `text` propio marcado con `<user_review_feedback>`. Tras `end_turn`, si el agente soporta `agentFileChangeReport`, procesar la lista de rutas.
+- **Prompt**: bloques `text` y `resource_link` para menciones `@archivo`, y desde la Etapa 7 `image` (ver más abajo); antes de enviar, si el workspace entrega retroalimentación (`ReviewStore::report_for_agent` con los rechazos y las ediciones a mano, más, desde la Etapa 7, los comentarios del usuario: `cincel_review::format_feedback`), se antepone como bloque `text` propio marcado con `<user_review_feedback>`. Tras `end_turn`, si el agente soporta `agentFileChangeReport`, procesar la lista de rutas.
 - **Handlers**: `session/request_permission` → evento a la UI con `oneshot`; timeout ninguno; si se cancela el turno, responder `cancelled`. `fs/read_text_file` y `fs/write_text_file` → eventos con `oneshot`; rutas fuera del proyecto → error `invalid_params`; `line > total` → `invalid_params`.
 - **Cancelación**: `session/cancel`; marcar tool calls `pending`/`in_progress` como canceladas al recibir `stopReason: cancelled`.
 - **Autenticación**: si `initialize` devuelve `authMethods` y `session/new` falla con `auth_required`, emitir `AuthRequired { methods, message: Option<String> }` (Etapa 5, `docs/specs/07-etapa5-productividad.md` §10.1: `message` es el motivo que dio el agente en el error ACP, preferido de un campo de texto en `data` si lo trae); la UI muestra el comando (`args` del método `terminal`) y ofrece reintentar. `AgentCommand::Authenticate { method_id }` corre fuera del loop de comandos (un OAuth puede esperar minutos al navegador) y termina con `AgentEvent::AuthSucceeded { method_id }` o `AuthFailed { method_id, message }`. `AgentCommand::Logout` envía ACP `logout` solo si el agente anunció `agentCapabilities.auth.logout` y responde `AgentEvent::LoggedOut { ok }` (`ok: false` sin enviar nada si no lo anunció). La extensión `_auth/status_update` (anunciada con `agentCapabilities._meta.authStatus`) se traduce a `AgentEvent::AuthStatus { kind, label, detail, account: Option<AuthAccount { email, organization, plan }> }`. `elicitation/complete` cierra la elicitación URL pendiente (si la UI no respondió, se responde `accept` en su nombre) y emite `AgentEvent::ElicitationCompleted { id, elicitation_id }`. Helpers: `agent_supports_logout`, `agent_supports_auth_status`, `agent_supports_file_change_report`.
@@ -57,3 +57,45 @@ suma `message: Option<String>` con el motivo que dio el agente al rechazar
 tail de `stderr` que ya se registraba). El workspace lo redacta y recorta a
 240 caracteres antes de guardarlo en el banner de sesión vencida del chat
 (`modulos/chat.md`); reemplaza la deuda técnica anotada al cerrar la Etapa 4.
+
+## Etapa 7: imágenes en el prompt
+
+Spec: `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §5.3.3 (D4, D6).
+Detalle y desviaciones en `docs/etapas/etapa-7.md`.
+
+- **`PromptBlock::Image { mime_type: String, data: Arc<[u8]> }`**. Los bytes
+  van crudos (no base64) y `into_wire` los convierte en
+  `ContentBlock::Image(ImageContent::new(base64, mime_type))` con
+  `BASE64_STANDARD` (`base64` 0.22) **sin `uri`**: `codex-acp` 1.13.1 usa el
+  `uri` en lugar de los datos si empieza con `http(s):` o `data:`, y
+  `claude-agent-acp` 0.84.0 usa `data` si viene; sin `uri` los tres adaptadores
+  toman los datos. `PromptBlock::image(mime_type, data)` es el constructor que
+  valida: acepta solo `IMAGE_MIME_TYPES` (`image/png`, `image/jpeg`,
+  `image/gif`, `image/webp`, sin distinguir mayúsculas, guardado en minúsculas)
+  y datos no vacíos; el worker vuelve a validar cada bloque `image` antes de
+  enviar (`AcpError::InvalidParams` describe el primero inválido). Las imágenes
+  van después de los bloques de texto y menciones, en el orden en que se
+  adjuntaron.
+- **Capacidad**: `pub fn agent_supports_images(&AgentCapabilities) -> bool`
+  (= `agentCapabilities.promptCapabilities.image`), que el chat lee en
+  `AgentEvent::Connected`. ACP obliga al cliente a no mandar `image` si el
+  agente no lo anunció; sin conexión o antes de `Connected` el chat no adjunta.
+- **Capacidades de los adaptadores** (leídas en la máquina de referencia el
+  2026-09-30, sin copiar nada al repo): `claude-agent-acp` 0.84.0 `true`
+  (también `embeddedContext`); `codex-acp` 1.13.1 y 1.12.0 `true` (de la caché
+  de `npx`; Cincel todavía no lo tenía en su carpeta de agentes); Antigravity
+  1.2.1 `true` (también `audio` y `embedded_context`). Un modelo de Codex que
+  no acepta imágenes responde con error ("The current model does not support
+  image input") aunque el adaptador las anuncie: se muestra como cualquier
+  error del turno.
+- **Agente falso** (`tests/fake_agent/main.rs`): anuncia
+  `prompt_capabilities.image = true` salvo con `FAKE_NO_IMAGES`;
+  `FAKE_PROMPT_LOG=<ruta>` agrega una línea JSON por `session/prompt` con el
+  arreglo `prompt` tal como llegó (tipo, texto, `mimeType`, largo de `data` y
+  SHA-256 de los datos decodificados, no los datos); el guion `"echo-images"`
+  responde `N imágenes: <mime> <W>x<H>, …` decodificando lo recibido.
+- **Tests**: unitarios en `protocol.rs` (base64 sin `uri`, tipos válidos y
+  rechazo del inválido, `agent_supports_images`) y en `tests/integration.rs`
+  (`image_blocks_reach_the_agent_with_exact_bytes`,
+  `agent_supports_images_follows_the_announced_capability`,
+  `image_block_with_invalid_mime_is_rejected_before_sending`).

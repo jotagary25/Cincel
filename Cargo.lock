@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "cincel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cincel-log",
@@ -1097,10 +1097,11 @@ dependencies = [
 
 [[package]]
 name = "cincel-acp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "async-channel",
+ "base64 0.22.1",
  "dirs 6.0.0",
  "flate2",
  "futures",
@@ -1122,8 +1123,9 @@ dependencies = [
 
 [[package]]
 name = "cincel-chat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "cincel-acp",
  "cincel-editor",
  "cincel-syntax",
@@ -1131,14 +1133,17 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "tracing",
 ]
 
 [[package]]
 name = "cincel-connections"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "cincel-acp",
@@ -1164,14 +1169,16 @@ dependencies = [
 
 [[package]]
 name = "cincel-editor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cincel-syntax",
  "cincel-text",
+ "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
  "parking_lot",
  "regex",
+ "serde",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
@@ -1179,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-log"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
  "tempfile",
@@ -1190,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-perf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rustix",
@@ -1205,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-project"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "cincel-text",
@@ -1227,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-review"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cincel-text",
  "imara-diff",
@@ -1242,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-settings"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "cincel-watch",
@@ -1258,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-syntax"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arborium-dockerfile",
  "arborium-markdown",
@@ -1284,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "imara-diff",
  "ropey 1.6.1",
@@ -1294,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-watch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "notify 8.2.0",
  "tempfile",
@@ -1302,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-workspace"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1320,6 +1327,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "lzma-rs",
  "parking_lot",
  "regex",

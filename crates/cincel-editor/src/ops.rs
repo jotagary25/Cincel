@@ -338,6 +338,98 @@ pub fn reindent_paste(text: &str, prefix: &str, row_indent: &str) -> String {
     out
 }
 
+/// `indent` with one level removed, by the rule of `Shift+Tab`
+/// (`EditorView::indent_rows` with `add == false`): one `unit` if the indent
+/// starts with it, else one tab, else the leading spaces there are, never
+/// more than the length of `unit`. `indent` is the leading whitespace of a
+/// row; the result is a suffix of it.
+pub fn outdent_once<'a>(indent: &'a str, unit: &str) -> &'a str {
+    let removed = if indent.starts_with(unit) {
+        unit.len()
+    } else if indent.starts_with('\t') {
+        1
+    } else {
+        indent.len() - indent.trim_start_matches(' ').len()
+    }
+    .min(unit.len().max(1));
+    indent.get(removed..).unwrap_or("")
+}
+
+/// How many spaces `Backspace` deletes when the cursor stands at `column`
+/// with only spaces before it: up to the previous indent stop of width
+/// `size`, i.e. `((column - 1) % size) + 1`. Zero at column 0; a `size` of 0
+/// counts as 1.
+pub fn spaces_to_previous_stop(column: usize, size: usize) -> usize {
+    if column == 0 {
+        return 0;
+    }
+    (column - 1) % size.max(1) + 1
+}
+
+/// Edits that clean a file up before it is saved
+/// (`docs/specs/10-etapa7-ronda2.md` §7.8), as buffer-byte edits over the text
+/// *before* any of them applies.
+///
+/// `lines` are the rows of the buffer without their `\n` (the `str::lines`
+/// shape: a text that ends in a line break has no extra empty row), so the
+/// offset of each row is the sum of the previous lengths plus one per break.
+/// `ends_with_newline` says whether the last row is followed by a break.
+/// `protected_rows` are rows (0-based, end exclusive) that are never touched.
+///
+/// With `trim`, the spaces and tabs at the end of every unprotected row go.
+/// With `final_newline`, a non-empty text that does not end in a line break
+/// gets one (`"\n"`; `cincel-text` writes it as `\r\n` in a CRLF file). The
+/// check runs on the trimmed text, so a last row of only blanks is trimmed
+/// and the text is not given a second break. An empty text stays empty and
+/// blank rows at the end are kept. A protected last row gets no break. Returns no edits when there is nothing to
+/// clean.
+pub fn save_cleanup_edits(
+    lines: &[&str],
+    protected_rows: &[Range<u32>],
+    trim: bool,
+    final_newline: bool,
+    ends_with_newline: bool,
+) -> Vec<Edit> {
+    let is_protected = |row: usize| {
+        let row = row as u32;
+        protected_rows.iter().any(|range| range.contains(&row))
+    };
+    let mut edits: Vec<Edit> = Vec::new();
+    let mut offset = 0usize;
+    // Where the text ends and whether its last row is still non-blank once
+    // trimmed (so it needs the break).
+    let mut text_end = 0usize;
+    let mut last_row_kept = None;
+    let mut last_row_protected = false;
+    for (row, line) in lines.iter().enumerate() {
+        let start = offset;
+        let end = start + line.len();
+        offset = end + 1;
+        text_end = end;
+        last_row_protected = is_protected(row);
+        let trimmed_len = if trim && !last_row_protected {
+            line.trim_end_matches([' ', '\t']).len()
+        } else {
+            line.len()
+        };
+        if trimmed_len < line.len() {
+            edits.push((start + trimmed_len..end, String::new()));
+        }
+        last_row_kept = Some(trimmed_len > 0);
+    }
+    if final_newline && !ends_with_newline {
+        // A last row that trims to nothing is either the only row (an empty
+        // file stays empty) or follows a break already.
+        // A last row inside a pending agent segment is not touched either:
+        // its line break would be a change the user has not reviewed.
+        let needs_break = last_row_kept == Some(true) && !last_row_protected;
+        if needs_break {
+            edits.push((text_end..text_end, "\n".to_owned()));
+        }
+    }
+    edits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +582,152 @@ mod tests {
         // Column 0 and single lines stay exact.
         assert_eq!(reindent_paste("  a\n  b\n", "", ""), "  a\n  b\n");
         assert_eq!(reindent_paste("x", "    ", "    "), "x");
+    }
+
+    #[test]
+    fn outdent_once_follows_the_shift_tab_rule() {
+        let unit = "    ";
+        assert_eq!(outdent_once("        ", unit), "    ", "one unit");
+        assert_eq!(outdent_once("    ", unit), "");
+        assert_eq!(outdent_once("      ", unit), "  ", "6 spaces lose one unit");
+        assert_eq!(
+            outdent_once("  ", unit),
+            "",
+            "fewer spaces than a unit: all"
+        );
+        assert_eq!(outdent_once(" ", unit), "");
+        assert_eq!(
+            outdent_once("\t\t", unit),
+            "\t",
+            "a tab when the unit is spaces"
+        );
+        assert_eq!(outdent_once("\t\t", "\t"), "\t");
+        assert_eq!(outdent_once("\t", "\t"), "");
+        assert_eq!(outdent_once("  \t", unit), "\t", "mixed: the spaces first");
+        assert_eq!(outdent_once("  ", "\t"), " ", "never more than the unit");
+        assert_eq!(outdent_once("", unit), "");
+        assert_eq!(outdent_once("   ", "  "), " ", "a two-space unit");
+    }
+
+    #[test]
+    fn spaces_to_previous_stop_reaches_the_previous_multiple() {
+        assert_eq!(spaces_to_previous_stop(0, 4), 0);
+        assert_eq!(spaces_to_previous_stop(1, 4), 1);
+        assert_eq!(spaces_to_previous_stop(2, 4), 2);
+        assert_eq!(spaces_to_previous_stop(4, 4), 4);
+        assert_eq!(spaces_to_previous_stop(5, 4), 1);
+        assert_eq!(spaces_to_previous_stop(6, 4), 2);
+        assert_eq!(spaces_to_previous_stop(8, 4), 4);
+        assert_eq!(spaces_to_previous_stop(3, 2), 1);
+        assert_eq!(spaces_to_previous_stop(4, 2), 2);
+        assert_eq!(spaces_to_previous_stop(5, 1), 1, "a one-column unit");
+        assert_eq!(spaces_to_previous_stop(5, 0), 1, "size 0 counts as 1");
+    }
+
+    /// Runs `save_cleanup_edits` over `text` the way the editor does and
+    /// returns the cleaned text.
+    fn cleaned(text: &str, protected: &[Range<u32>], trim: bool, final_newline: bool) -> String {
+        let ends = text.ends_with('\n');
+        let body = text.strip_suffix('\n').unwrap_or(text);
+        let rows: Vec<&str> = if text.is_empty() {
+            Vec::new()
+        } else {
+            body.split('\n').collect()
+        };
+        let edits = save_cleanup_edits(&rows, protected, trim, final_newline, ends);
+        apply(text, &edits)
+    }
+
+    #[test]
+    fn save_cleanup_trims_blanks_and_adds_the_final_newline() {
+        assert_eq!(cleaned("a  \nb\t\nc", &[], true, true), "a\nb\nc\n");
+        assert_eq!(cleaned("a \t \nb\n", &[], true, true), "a\nb\n");
+    }
+
+    #[test]
+    fn save_cleanup_options_are_independent() {
+        assert_eq!(cleaned("a  \nb", &[], true, false), "a\nb");
+        assert_eq!(cleaned("a  \nb", &[], false, true), "a  \nb\n");
+        assert_eq!(cleaned("a  \nb", &[], false, false), "a  \nb");
+        assert!(save_cleanup_edits(&["a  ", "b"], &[], false, false, false).is_empty());
+    }
+
+    #[test]
+    fn save_cleanup_without_work_returns_no_edits() {
+        assert!(save_cleanup_edits(&["a", "b"], &[], true, true, true).is_empty());
+        assert!(save_cleanup_edits(&[], &[], true, true, false).is_empty());
+        assert!(save_cleanup_edits(&["a"], &[], true, false, false).is_empty());
+    }
+
+    #[test]
+    fn save_cleanup_edit_offsets_count_one_per_break() {
+        let edits = save_cleanup_edits(&["ab ", "c", "d\t "], &[], true, true, false);
+        // "ab \nc\nd\t " is 9 bytes: the first row trims at 2..3, the last at
+        // 7..9, and the final break goes at the end of the text.
+        assert_eq!(
+            edits,
+            vec![
+                (2..3, String::new()),
+                (7..9, String::new()),
+                (9..9, "\n".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn save_cleanup_leaves_protected_rows_alone() {
+        assert_eq!(
+            cleaned("a  \nb  \nc  \nd  ", &[1..3], true, true),
+            "a\nb  \nc  \nd\n"
+        );
+        // Several ranges; a protected last row keeps its blanks and gets no
+        // break (see the next test).
+        assert_eq!(
+            cleaned("a  \nb  \nc  ", &[0..1, 2..3], true, true),
+            "a  \nb\nc  "
+        );
+        assert_eq!(
+            cleaned("a  \nb  \nc  \n", &[0..1, 2..3], true, true),
+            "a  \nb\nc  \n"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn save_cleanup_adds_no_break_after_a_protected_last_row() {
+        assert_eq!(cleaned("a  \nb  ", &[1..2], true, true), "a\nb  ");
+        assert_eq!(cleaned("a  \nb", &[1..2], true, true), "a\nb");
+        assert_eq!(cleaned("a  \nb", &[0..1], true, true), "a  \nb\n");
+    }
+
+    #[test]
+    fn save_cleanup_keeps_an_empty_file_empty() {
+        assert_eq!(cleaned("", &[], true, true), "");
+        assert!(save_cleanup_edits(&[], &[], true, true, false).is_empty());
+        // Only blanks and no break: trimmed away, nothing to terminate.
+        assert_eq!(cleaned("   ", &[], true, true), "");
+        // With the trim off the blanks are content, so the break is added.
+        assert_eq!(cleaned("   ", &[], false, true), "   \n");
+    }
+
+    #[test]
+    fn save_cleanup_keeps_trailing_blank_rows() {
+        assert_eq!(cleaned("a\n\n\n", &[], true, true), "a\n\n\n");
+        assert_eq!(cleaned("a\n\n  ", &[], true, true), "a\n\n");
+        assert_eq!(cleaned("a\n   ", &[], true, true), "a\n");
+        assert_eq!(cleaned("\n", &[], true, true), "\n");
+        assert_eq!(cleaned("  \n", &[], true, true), "\n");
+    }
+
+    #[test]
+    fn save_cleanup_only_trims_spaces_and_tabs() {
+        // Non-breaking space and other Unicode blanks are content.
+        assert_eq!(
+            cleaned("a\u{a0}\nb\u{2003}\n", &[], true, true),
+            "a\u{a0}\nb\u{2003}\n"
+        );
+        // Blanks inside the row stay.
+        assert_eq!(cleaned("a  b \n", &[], true, true), "a  b\n");
     }
 }
