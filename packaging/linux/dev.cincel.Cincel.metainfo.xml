@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: what software centres (COSMIC Store, GNOME Software,
+     KDE Discover) show for Cincel. Validated by `packaging/verify.sh` with
+     `appstreamcli validate`. Screenshots are the ones in `docs/capturas/`,
+     served from the `main` branch of the public repository. -->
+<component type="desktop-application">
+  <id>dev.cincel.Cincel</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Cincel</name>
+  <summary>Code editor where you review every change an AI agent makes</summary>
+  <summary xml:lang="es">Editor de código donde revisás cada cambio que hace un agente</summary>
+
+  <description>
+    <p>
+      Cincel is a minimalist code editor for Linux with a chat panel for AI
+      coding agents (Claude Code, Codex, Google Antigravity and any agent that
+      speaks the open Agent Client Protocol), using your own subscriptions.
+    </p>
+    <p>
+      Every change an agent makes is shown inline in the editor, segment by
+      segment, for you to accept, reject or comment on before it lands. The
+      editor itself stays small and fast: a text buffer of its own, incremental
+      syntax highlighting, search and replace, a file finder and an integrated
+      review of the agent's work.
+    </p>
+    <p xml:lang="es">
+      Cincel es un editor de código minimalista para Linux con un panel de chat
+      para agentes de programación (Claude Code, Codex, Google Antigravity y
+      cualquier agente que hable el protocolo abierto ACP), usando tus propias
+      suscripciones.
+    </p>
+    <p xml:lang="es">
+      Cada cambio que hace un agente se muestra dentro del editor, segmento por
+      segmento, para que lo aceptes, lo rechaces o lo comentes antes de que
+      quede. El editor sigue siendo chico y rápido: buffer de texto propio,
+      resaltado de sintaxis incremental, buscar y reemplazar, buscador de
+      archivos y la revisión integrada del trabajo del agente.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">dev.cincel.Cincel.desktop</launchable>
+  <provides>
+    <binary>cincel</binary>
+  </provides>
+
+  <!-- `developer_name` and not `<developer>`: the validator of Ubuntu 22.04
+       (AppStream 0.15) does not know the 1.0 tag yet, and both understand this one. -->
+  <developer_name>Cincel contributors</developer_name>
+
+  <url type="homepage">https://github.com/jotagary25/Cincel</url>
+  <url type="bugtracker">https://github.com/jotagary25/Cincel/issues</url>
+
+  <keywords>
+    <keyword>editor</keyword>
+    <keyword>code</keyword>
+    <keyword>agent</keyword>
+    <keyword>review</keyword>
+    <keyword xml:lang="es">revisión</keyword>
+    <keyword xml:lang="es">agente</keyword>
+  </keywords>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Reviewing an agent's changes inline, with the floating accept/reject bar</caption>
+      <caption xml:lang="es">Revisión de los cambios de un agente dentro del editor, con la barra flotante de aceptar y rechazar</caption>
+      <image type="source" width="1400" height="900">https://raw.githubusercontent.com/jotagary25/Cincel/main/docs/capturas/revision.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Chat panel with an agent</caption>
+      <caption xml:lang="es">Panel de chat con un agente</caption>
+      <image type="source" width="1400" height="900">https://raw.githubusercontent.com/jotagary25/Cincel/main/docs/capturas/chat.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Settings</caption>
+      <caption xml:lang="es">Configuración</caption>
+      <image type="source" width="1400" height="900">https://raw.githubusercontent.com/jotagary25/Cincel/main/docs/capturas/configuracion.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Fast file finder</caption>
+      <caption xml:lang="es">Buscador rápido de archivos</caption>
+      <image type="source" width="1400" height="900">https://raw.githubusercontent.com/jotagary25/Cincel/main/docs/capturas/buscador.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.2.1" date="2026-10-03">
+      <url>https://github.com/jotagary25/Cincel/releases/tag/v0.2.1</url>
+      <description>
+        <p>AppStream metadata, so software centres show Cincel with its name, icon, description and screenshots.</p>
+        <p xml:lang="es">Metadatos AppStream, para que las tiendas de aplicaciones muestren a Cincel con su nombre, icono, descripción y capturas.</p>
+      </description>
+    </release>
+    <release version="0.2.0" date="2026-10-03">
+      <url>https://github.com/jotagary25/Cincel/releases/tag/v0.2.0</url>
+      <description>
+        <p>Review comments for the agent, images in the chat, connection state in the chat header, agent activity row, folded long code blocks, and editor improvements (occurrence highlight, whole-line clipboard, indentation helpers, clean-up on save).</p>
+        <p xml:lang="es">Comentarios para el agente, imágenes en el chat, estado de la conexión en el encabezado, fila de actividad del agente, bloques de código largos plegados y mejoras del editor (apariciones de la palabra, portapapeles de línea, ayudas de sangría, limpieza al guardar).</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-09-29">
+      <url>https://github.com/jotagary25/Cincel/releases/tag/v0.1.0</url>
+      <description>
+        <p>First release.</p>
+        <p xml:lang="es">Primera versión.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -29,6 +29,7 @@ echo "== install_test.sh: prefix temporal $PREFIX =="
 expected_files='
 bin/cincel
 share/applications/dev.cincel.Cincel.desktop
+share/metainfo/dev.cincel.Cincel.metainfo.xml
 share/icons/hicolor/scalable/apps/dev.cincel.Cincel.svg
 share/icons/hicolor/16x16/apps/dev.cincel.Cincel.png
 share/icons/hicolor/32x32/apps/dev.cincel.Cincel.png

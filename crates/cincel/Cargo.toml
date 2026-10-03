@@ -34,6 +34,7 @@ revision = "1"
 assets = [
     { source = "target/release/cincel", dest = "usr/bin/cincel", mode = "755" },
     { source = "../../packaging/linux/dev.cincel.Cincel.desktop", dest = "usr/share/applications/dev.cincel.Cincel.desktop", mode = "644" },
+    { source = "../../packaging/linux/dev.cincel.Cincel.metainfo.xml", dest = "usr/share/metainfo/dev.cincel.Cincel.metainfo.xml", mode = "644" },
     { source = "../../packaging/icons/dev.cincel.Cincel.svg", dest = "usr/share/icons/hicolor/scalable/apps/dev.cincel.Cincel.svg", mode = "644" },
     { source = "../../packaging/icons/png/16x16/apps/dev.cincel.Cincel.png", dest = "usr/share/icons/hicolor/16x16/apps/dev.cincel.Cincel.png", mode = "644" },
     { source = "../../packaging/icons/png/32x32/apps/dev.cincel.Cincel.png", dest = "usr/share/icons/hicolor/32x32/apps/dev.cincel.Cincel.png", mode = "644" },

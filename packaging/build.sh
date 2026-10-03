@@ -83,6 +83,7 @@ rm -rf "$STAGE_DIR"
 mkdir -p \
     "$STAGE_DIR/bin" \
     "$STAGE_DIR/share/applications" \
+    "$STAGE_DIR/share/metainfo" \
     "$STAGE_DIR/share/icons/hicolor/scalable/apps" \
     "$STAGE_DIR/share/doc/cincel"
 for size in 16x16 32x32 48x48 64x64 128x128 256x256 512x512; do
@@ -95,6 +96,8 @@ install -m 0755 "$REPO_ROOT/packaging/install.sh" "$STAGE_DIR/install.sh"
 install -m 0755 "$REPO_ROOT/$CARGO_TARGET_SUBDIR/release/cincel" "$STAGE_DIR/bin/cincel"
 install -m 0644 "$REPO_ROOT/packaging/linux/dev.cincel.Cincel.desktop" \
     "$STAGE_DIR/share/applications/dev.cincel.Cincel.desktop"
+install -m 0644 "$REPO_ROOT/packaging/linux/dev.cincel.Cincel.metainfo.xml" \
+    "$STAGE_DIR/share/metainfo/dev.cincel.Cincel.metainfo.xml"
 install -m 0644 "$REPO_ROOT/packaging/icons/dev.cincel.Cincel.svg" \
     "$STAGE_DIR/share/icons/hicolor/scalable/apps/dev.cincel.Cincel.svg"
 install -m 0644 "$REPO_ROOT/LICENSE" "$STAGE_DIR/share/doc/cincel/LICENSE"

@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "cincel"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "cincel-log",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-acp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-client-protocol",
  "async-channel",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-chat"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "cincel-acp",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-connections"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-channel",
  "cincel-acp",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-editor"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cincel-syntax",
  "cincel-text",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-log"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "regex",
  "tempfile",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-perf"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "rustix",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-project"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-channel",
  "cincel-text",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-review"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cincel-text",
  "imara-diff",
@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-settings"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-channel",
  "cincel-watch",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-syntax"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arborium-dockerfile",
  "arborium-markdown",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-text"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "imara-diff",
  "ropey 1.6.1",
@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-watch"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "notify 8.2.0",
  "tempfile",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "cincel-workspace"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-channel",

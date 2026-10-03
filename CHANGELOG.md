@@ -3,6 +3,15 @@
 All notable changes to Cincel are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-10-03
+
+Metadatos AppStream en los paquetes: las tiendas de aplicaciones muestran a
+Cincel con su nombre, icono, descripción y capturas. Sin cambios en el editor
+ni en el chat.
+
+### Added
+- AppStream metainfo in the `.deb` and the tarball.
+
 ## [0.2.0] - 2026-10-01
 
 Resumen en español (etapa 7 del plan, `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md`, y su ronda 2, `docs/specs/10-etapa7-ronda2.md`):

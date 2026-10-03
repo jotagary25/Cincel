@@ -466,7 +466,7 @@ nuevos) y el orquestador verificó el conjunto (R2-I) y cerró (R2-J).
   `UserMessageChunk` con `ResourceLink`/`Resource` durante la reproducción
   (test `a_replayed_file_mention_is_not_shown_as_a_new_message`). **Segunda
   parte (2026-10-01, tras la prueba del autor)**: el adaptador de Claude
-  convierte cada mención en el **texto** `[@nombre](file://…)` antes de
+  convierte cada mención en el **texto** `[@nombre]` seguido de `(file://…)` (un enlace Markdown) antes de
   guardar el prompt (`formatUriAsLink` en `promptToClaude`) y lo reproduce
   así, no como `ResourceLink`; además las versiones anteriores ya habían
   guardado esa burbuja en el archivo de la conversación. Ahora
@@ -565,7 +565,7 @@ cincel-chat/test-support` en los crates con GPUI:
 | `--bench typing` (`cinco-mil.rs`, 200 teclas, dos corridas) | p50 6,8 / 16,5 ms; p95 17,3 / 23,4 ms; máx. 23,3 / 24,6 ms (misma franja que antes de la ronda: R2-F midió 17–24 ms de p95 antes y después) |
 | `--bench idle` (60 s) | 0 cuadros pintados, 0,017 % de CPU, 207 MB |
 | `tools/privacy-check.sh` (árbol) | ok (0) tras la corrección de `login.rs`; historial informativo como siempre |
-| `tools/privacy-check.sh` sobre los dos paquetes desempaquetados | sin nada del autor ni de la máquina. Quedan tres hallazgos esperados, no corregibles desde el repo: la firma `appro@openssl.org` del código de cifrado CRYPTOGAMS dentro del binario (viene de la dependencia de TLS; la 0.1.0 publicada ya la tenía), el `copyright` del `.deb` con el `Maintainer` que el autor puso en su `packaging/maintainer.txt` (no versionado, decisión suya de la Etapa 6) y, hasta hoy, los correos de los autores de las licencias de terceros en `THIRD-PARTY-LICENSES.html`, que el script ahora salta porque ese archivo se reproduce tal cual por exigencia de las licencias |
+| `tools/privacy-check.sh` sobre los dos paquetes desempaquetados | sin nada del autor ni de la máquina. Quedan tres hallazgos esperados, no corregibles desde el repo: la firma del autor del código de cifrado CRYPTOGAMS (una dirección de correo de openssl.org) dentro del binario (viene de la dependencia de TLS; la 0.1.0 publicada ya la tenía), el `copyright` del `.deb` con el `Maintainer` que el autor puso en su `packaging/maintainer.txt` (no versionado, decisión suya de la Etapa 6) y, hasta hoy, los correos de los autores de las licencias de terceros en `THIRD-PARTY-LICENSES.html`, que el script ahora salta porque ese archivo se reproduce tal cual por exigencia de las licencias |
 | `tools/check-links.sh` + tests `user_docs` | ok |
 | `packaging/build.sh` + `packaging/verify.sh` (Ubuntu 22.04 y 24.04) | ok: `.deb` y `.tar.gz` 0.2.0 reconstruidos en `dist/` (2026-10-01), `verify.sh: todo bien` en 22.04 y 24.04; el smoke en Wayland (banco sway) se omite como siempre porque `cincel-perf` y su imagen no están en esta máquina |
 | `pgrep -af "sleep\|cincel"; docker ps` | vacíos (en `pgrep` solo quedó el Cincel instalado del autor con su agente, anterior a la sesión) |
@@ -635,6 +635,20 @@ Tal como la deja la spec 10 §16, para recorrerla con el paquete de `dist/`
 
 ## Después de la 0.2.0
 
+- **0.2.1 (2026-10-03): metadatos AppStream.** Al abrir el `.deb` de la
+  0.2.0 con la Tienda de COSMIC, Cincel aparecía con un icono genérico de
+  archivo comprimido porque el paquete no traía metadatos AppStream. La 0.2.1
+  agrega `packaging/linux/dev.cincel.Cincel.metainfo.xml` (nombre, resumen y
+  descripción en inglés y español, enlaces, palabras clave, las cuatro
+  capturas de `docs/capturas/` servidas desde `main`, notas de las tres
+  versiones), instalado en `usr/share/metainfo/` por el `.deb` (`cargo deb`),
+  por `install.sh` y por el comprimido (`build.sh` y el workflow Release);
+  `install_test.sh` lo exige y `verify.sh` lo valida con `appstreamcli
+  validate` en los contenedores. Sin cambios en el editor ni en el chat.
+  Aparte: la Tienda de COSMIC no ofrece "Actualizar" al abrir un `.deb` de
+  una versión superior a la instalada (defecto suyo, reportado a System76 en
+  los issues 494 de `cosmic-store` y 2968 de `cosmic-epoch`); la actualización
+  se hace con `sudo apt install ./cincel_<versión>-1_amd64.deb`.
 - **Etapa 8: terminal integrado** (decisión del autor, 2026-09-30). Pospuesto;
   tendrá su propia spec, todavía sin escribir.
 - **Límite conocido de las imágenes**: un modelo de Codex que no acepta

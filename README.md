@@ -47,8 +47,8 @@ page](https://github.com/jotagary25/cincel/releases) (the author replaces
 ### Tarball
 
 ```sh
-tar -xzf cincel-0.2.0-x86_64-linux.tar.gz
-cd cincel-0.2.0-x86_64-linux
+tar -xzf cincel-0.2.1-x86_64-linux.tar.gz
+cd cincel-0.2.1-x86_64-linux
 ./install.sh
 ```
 
@@ -59,7 +59,7 @@ keeps your settings, connections and pending reviews).
 ### `.deb` (Ubuntu / Pop!\_OS 22.04+)
 
 ```sh
-sudo apt install ./cincel_0.2.0-1_amd64.deb
+sudo apt install ./cincel_0.2.1-1_amd64.deb
 ```
 
 Or double-click the file in a graphical file manager.
@@ -147,7 +147,7 @@ o cada línea.** Nunca revisás cambios en el chat.
   caja del chat y viajan una sola vez, con tu próximo mensaje, junto con las
   líneas y lo que decidiste.
 - **Instalar**: el comprimido (`tar.gz` + `./install.sh`, sin `sudo`) o el
-  paquete `.deb` (`sudo apt install ./cincel_0.2.0-1_amd64.deb`, o doble
+  paquete `.deb` (`sudo apt install ./cincel_0.2.1-1_amd64.deb`, o doble
   clic) — comandos exactos más arriba, en "Installation".
 - **Manual completo, en español**: [`docs/usuario/`](docs/usuario/) —
   instalación, primer arranque, conectar agentes, el chat, escribir en el

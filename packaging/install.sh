@@ -25,6 +25,7 @@ Opciones:
 Lo que instala (bajo DIR):
   bin/cincel
   share/applications/dev.cincel.Cincel.desktop
+  share/metainfo/dev.cincel.Cincel.metainfo.xml
   share/icons/hicolor/.../dev.cincel.Cincel.{svg,png}
   share/doc/cincel/...
 
@@ -70,6 +71,7 @@ ICON_SIZES="16x16 32x32 48x48 64x64 128x128 256x256 512x512"
 list_installed_files() {
     echo "bin/cincel"
     echo "share/applications/dev.cincel.Cincel.desktop"
+    echo "share/metainfo/dev.cincel.Cincel.metainfo.xml"
     echo "share/icons/hicolor/scalable/apps/dev.cincel.Cincel.svg"
     for size in $ICON_SIZES; do
         echo "share/icons/hicolor/$size/apps/dev.cincel.Cincel.png"
@@ -81,7 +83,7 @@ list_installed_files() {
 }
 
 do_install() {
-    mkdir -p "$PREFIX/bin" "$PREFIX/share/applications" \
+    mkdir -p "$PREFIX/bin" "$PREFIX/share/applications" "$PREFIX/share/metainfo" \
         "$PREFIX/share/icons/hicolor/scalable/apps" "$PREFIX/share/doc/cincel"
     for size in $ICON_SIZES; do
         mkdir -p "$PREFIX/share/icons/hicolor/$size/apps"
@@ -95,6 +97,9 @@ do_install() {
         "$SCRIPT_DIR/share/applications/dev.cincel.Cincel.desktop" \
         > "$PREFIX/share/applications/dev.cincel.Cincel.desktop"
 
+    install -m 0644 \
+        "$SCRIPT_DIR/share/metainfo/dev.cincel.Cincel.metainfo.xml" \
+        "$PREFIX/share/metainfo/dev.cincel.Cincel.metainfo.xml"
     install -m 0644 \
         "$SCRIPT_DIR/share/icons/hicolor/scalable/apps/dev.cincel.Cincel.svg" \
         "$PREFIX/share/icons/hicolor/scalable/apps/dev.cincel.Cincel.svg"

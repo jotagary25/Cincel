@@ -80,6 +80,8 @@ verify_deb_in() {
             cincel --version
             apt-get install -y --no-install-recommends desktop-file-utils >/dev/null
             desktop-file-validate /usr/share/applications/dev.cincel.Cincel.desktop
+            apt-get install -y --no-install-recommends appstream >/dev/null
+            appstreamcli validate --no-net /usr/share/metainfo/dev.cincel.Cincel.metainfo.xml
             apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers ca-certificates fonts-dejavu-core >/dev/null
             CINCEL_ALLOW_SOFTWARE_GPU=1 xvfb-run -a cincel --smoke-test /tmp
             apt-get remove -y cincel >/dev/null

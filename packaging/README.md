@@ -15,6 +15,10 @@ Scripts y metadatos para producir los dos paquetes de la versión 1.0
   `verify.sh`).
 - `icons/`: el SVG del icono y los PNG generados con `icons/render.sh`.
 - `linux/dev.cincel.Cincel.desktop`: la entrada de menú.
+- `linux/dev.cincel.Cincel.metainfo.xml`: los metadatos AppStream que leen
+  las tiendas de aplicaciones (nombre, descripción, capturas, versiones);
+  `verify.sh` los valida con `appstreamcli validate`. Al publicar una versión,
+  agregarle su `<release>`.
 - `about.toml` + `about.hbs`: config y plantilla de `cargo about generate`
   para `THIRD-PARTY-LICENSES.html` (se genera en el release, no se
   versiona).
