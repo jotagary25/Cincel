@@ -635,6 +635,19 @@ Tal como la deja la spec 10 §16, para recorrerla con el paquete de `dist/`
 
 ## Después de la 0.2.0
 
+- **2026-10-05: el workflow "Slow tests" falló al compilar.** En la ronda 1 se
+  le agregaron dos tests de tiempo de los crates con GPUI sin el paso que
+  instala las bibliotecas del sistema (solo lo tenían `ci.yml` y
+  `release.yml`), y como corre solo los lunes el fallo apareció días después
+  de publicar la 0.2.1. Corrección: el paso vive una sola vez en
+  `.github/actions/build-deps/action.yml` (liberar disco + `apt-get install`
+  de la lista de `packaging/docker/Dockerfile.build`, con `extra-packages`
+  para lo que necesite `cargo deb`) y los tres workflows lo llaman con
+  `uses: ./.github/actions/build-deps`. Regla: todo job que compile
+  `cincel-editor`, `cincel-chat`, `cincel-workspace` o `cincel` lo llama, y
+  un workflow programado se dispara a mano (`gh workflow run`) apenas se
+  cambia. Pendiente a decidir: correr los tres tests lentos también en el
+  workflow Release, antes de armar los paquetes.
 - **0.2.1 (2026-10-03): metadatos AppStream.** Al abrir el `.deb` de la
   0.2.0 con la Tienda de COSMIC, Cincel aparecía con un icono genérico de
   archivo comprimido porque el paquete no traía metadatos AppStream. La 0.2.1

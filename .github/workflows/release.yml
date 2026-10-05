@@ -42,18 +42,9 @@ jobs:
           fi
           echo "version=$version" >>"$GITHUB_OUTPUT"
 
-      - name: Free disk space (unused preinstalled toolchains)
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-
-      - name: Install build dependencies (packaging/docker/Dockerfile.build, plus cargo-deb's own deps)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev \
-            libvulkan-dev libfontconfig-dev \
-            dpkg-dev fakeroot
+      - uses: ./.github/actions/build-deps
+        with:
+          extra-packages: dpkg-dev fakeroot # cargo-deb's own deps
 
       - name: rustup show (applies rust-toolchain.toml)
         run: rustup show
