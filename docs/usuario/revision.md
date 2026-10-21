@@ -28,18 +28,26 @@ pendientes.
 
 ## Aceptar y rechazar
 
-Sobre cada segmento aparece un botón flotante con tres partes:
-**Aceptar | Rechazar | Comentar**. Las dos primeras deciden; la tercera te
-deja escribirle una nota al agente sin decidir nada (ver
-[Comentarios](#comentarios-para-el-agente)). Si la ventana es angosta, los
-tres botones se ven más chicos, solo con su icono. Al pasar el mouse por una
-línea del segmento aparecen además `+` y `−` para decidir esa línea sola.
+En la línea de arriba de cada segmento, a la derecha, aparece un botón
+flotante con tres partes: **Aceptar | Rechazar | Comentar**. Las dos
+primeras deciden; la tercera te deja escribirle una nota al agente sin
+decidir nada (ver [Comentarios](#comentarios-para-el-agente)). El botón
+siempre está en ese mismo lugar: puede tapar el texto de la línea de arriba,
+pero nunca tapa el segmento. Si el segmento empieza en la primera línea del
+archivo, el botón va en la línea de abajo. En un segmento más alto que la
+pantalla, al bajar, el botón se va con su línea; usá `Ctrl+Enter` /
+`Ctrl+Backspace` o la barra de abajo. Si el panel es muy angosto, los tres
+botones se ven solo con su icono. Al pasar el mouse por una línea del
+segmento aparecen además `+` y `−` para decidir esa línea sola.
 
 Además, abajo a la derecha del editor hay una barra flotante con:
 **"✓ Aceptar todo" / "✗ Rechazar todo"** (deciden el turno completo, no solo
 este archivo), flechas para saltar al cambio anterior o siguiente, un
 contador ("cambio 1 de 3") y **"Revisar todo"**, que abre el panel de
-revisión (`Ctrl+Shift+R`) con la lista de archivos y sus `+N −M`.
+revisión (`Ctrl+Shift+R`) con la lista de archivos y sus `+N −M`. Si el
+panel es angosto, la barra se achica sola: primero pierde los atajos
+escritos y después deja solo los iconos (`✓` `✗` `↑` `↓` `1/3` `≡`); los
+botones hacen lo mismo en cualquier tamaño.
 
 Niveles de decisión, de más chico a más grande:
 

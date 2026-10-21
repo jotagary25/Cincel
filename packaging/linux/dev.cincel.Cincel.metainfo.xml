@@ -87,6 +87,13 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.2" date="2026-10-21">
+      <url>https://github.com/jotagary25/Cincel/releases/tag/v0.2.2</url>
+      <description>
+        <p>The floating review bar shrinks in stages in narrow panes, and the per-segment Accept / Reject / Comment buttons always sit on the row above the segment.</p>
+        <p xml:lang="es">La barra flotante de revisión se achica por etapas en paneles angostos, y los botones Aceptar / Rechazar / Comentar van siempre en la línea de arriba del segmento.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-10-03">
       <url>https://github.com/jotagary25/Cincel/releases/tag/v0.2.1</url>
       <description>

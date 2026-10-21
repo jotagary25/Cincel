@@ -654,10 +654,10 @@ fn the_bar_of_a_deleted_file_has_no_file_buttons(cx: &mut TestAppContext) {
     );
 }
 
-/// The pill sticks out of its hunk (here it sits on the row above, the
-/// hunk's own row has no room): the mouse going from the hunk up to the
-/// pill must not make it go away, and the click decides the hunk. The
-/// hover zone is the hunk's rows plus the pill itself.
+/// The pill sits outside its hunk (on the row above, even though the hunk's
+/// own row is a long one): the mouse going from the hunk up to the pill must
+/// not make it go away, and the click decides the hunk. The hover zone is
+/// the hunk's rows plus the pill itself.
 #[gpui::test]
 fn the_pill_stays_while_the_mouse_reaches_it_from_above(cx: &mut TestAppContext) {
     let long = "x".repeat(400);
@@ -942,7 +942,8 @@ fn an_enabled_pill_shows_the_hand_on_its_buttons_and_the_arrow_elsewhere(cx: &mu
     let (line_height, _, bounds) = geometry(&view, &mut visual);
     let width = crate::element::PILL_WIDTH;
     let pill_left = f32::from(bounds.right()) - 8. - 12. - width;
-    let y = line_height * 1.5;
+    // The hunk starts on display row 1: its pill sits on row 0.
+    let y = line_height * 0.5;
     assert_eq!(
         cursor_at(&view, &mut visual, pill_left + 40., y),
         CursorStyle::PointingHand,
@@ -981,7 +982,8 @@ fn a_disabled_pill_shows_the_arrow_and_ignores_clicks(cx: &mut TestAppContext) {
     let (line_height, _, bounds) = geometry(&view, &mut visual);
     let width = crate::element::PILL_WIDTH;
     let pill_left = f32::from(bounds.right()) - 8. - 12. - width;
-    let y = line_height * 1.5;
+    // The hunk starts on display row 1: its pill sits on row 0.
+    let y = line_height * 0.5;
     // "Aceptar", "Rechazar" and the padding; "Comentar" (the right third)
     // keeps reacting, which `comment_box_tests` covers.
     for x in [pill_left + 40., pill_left + width / 2., pill_left + 2.] {
@@ -1254,67 +1256,170 @@ fn toggling_the_review_reshapes_no_text_row(cx: &mut TestAppContext) {
     assert_eq!(after.text_origin_x, plain.text_origin_x);
 }
 
-// -- pill placement (etapa-3 § correcciones) -------------------------------------
+// -- pill placement (spec 11 §4) -------------------------------------------------
 
 /// A line long enough to run under the pill at any test window width.
 fn long_line() -> String {
     "x".repeat(400)
 }
 
+/// Whether `pill` reaches into the vertical span of any painted row of hunk
+/// `hunk_ix` (its phantom and added rows).
+fn pill_covers_its_hunk(
+    painted: &FrameRender,
+    pill: &crate::view::PillRender,
+    hunk_ix: usize,
+    line_height: f32,
+) -> bool {
+    painted
+        .rows
+        .iter()
+        .filter(
+            |row| matches!(row.kind, RowKind::Phantom(ix) | RowKind::Added(ix) if ix == hunk_ix),
+        )
+        .any(|row| {
+            let top = f32::from(row.y);
+            f32::from(pill.bounds.top()) < top + line_height
+                && f32::from(pill.bounds.bottom()) > top
+        })
+}
+
 #[gpui::test]
-fn the_pill_sits_on_a_short_first_row(cx: &mut TestAppContext) {
-    let (view, _handle, mut visual) = open_default(cx, TEXT, two_hunks());
-    set_cursor(&view, &mut visual, DisplayPoint::new(3, 0));
+fn the_pill_sits_on_the_row_above_even_over_a_long_line(cx: &mut TestAppContext) {
+    let text = format!("r0\nr1\nr2\nr3\n{}\nseg\nr6\n", long_line());
+    let (view, _handle, mut visual) = open_default(cx, &text, review(vec![hunk(1, &[], 5..6)]));
+    set_cursor(&view, &mut visual, DisplayPoint::new(5, 0));
+    let (line_height, _, _) = geometry(&view, &mut visual);
     let painted = frame(&view, &mut visual);
     let pill = painted.review.pills[0];
-    // Display rows 1 and 2 are the phantom `x` and `y`: the first one wins.
-    assert_eq!(pill.display_row, 1);
+    assert_eq!(pill.display_row, 4, "the row above, whatever its text");
     assert!(!pill.compact);
+    assert_eq!(pill.opacity, 1.);
     assert_eq!(pill.bounds.size.height, px(crate::element::PILL_HEIGHT));
+    // Over the long line's text (its last screen row when it wraps), which
+    // runs past the pill.
+    let row = painted
+        .rows
+        .iter()
+        .filter(|row| row.display_row == 4)
+        .max_by_key(|row| row.segment)
+        .expect("row 4 painted");
+    assert!(f32::from(pill.bounds.bottom()) <= f32::from(row.y) + line_height + 0.01);
+    assert!(f32::from(pill.bounds.center().y) > f32::from(row.y));
+    assert!(!pill_covers_its_hunk(&painted, &pill, 0, line_height));
 }
 
 #[gpui::test]
-fn a_long_first_row_sends_the_pill_to_the_next_short_one(cx: &mut TestAppContext) {
-    let text = format!("a\n{}\nb\nc\n", long_line());
-    let (view, _handle, mut visual) = open_default(cx, &text, review(vec![hunk(1, &[], 1..3)]));
-    let plain_origin = frame(&view, &mut visual).text_origin_x;
-    set_cursor(&view, &mut visual, DisplayPoint::new(1, 0));
+fn a_hunk_on_the_first_row_gets_the_pill_below_it(cx: &mut TestAppContext) {
+    let (view, _handle, mut visual) = open_default(cx, TEXT, review(vec![hunk(1, &[], 0..2)]));
+    set_cursor(&view, &mut visual, DisplayPoint::new(0, 0));
+    let (line_height, _, _) = geometry(&view, &mut visual);
     let painted = frame(&view, &mut visual);
     let pill = painted.review.pills[0];
-    assert_eq!(pill.display_row, 2, "the short second row");
-    assert!(!pill.compact);
-    assert_eq!(painted.text_origin_x, plain_origin, "nothing moved");
+    assert_eq!(pill.display_row, 2, "range.end, the row just below");
+    assert!(!pill_covers_its_hunk(&painted, &pill, 0, line_height));
 }
 
 #[gpui::test]
-fn the_row_above_is_the_last_candidate(cx: &mut TestAppContext) {
-    let text = format!("a\n{}\n{}\nc\n", long_line(), long_line());
-    let (view, _handle, mut visual) = open_default(cx, &text, review(vec![hunk(1, &[], 1..3)]));
+fn a_hunk_that_is_the_whole_file_gets_the_pill_on_its_first_row(cx: &mut TestAppContext) {
+    // Two rows, no trailing newline: the hunk is every row there is.
+    let (view, _handle, mut visual) = open_default(cx, "a\nb", review(vec![hunk(1, &[], 0..2)]));
     set_cursor(&view, &mut visual, DisplayPoint::new(1, 0));
     let pill = frame(&view, &mut visual).review.pills[0];
-    assert_eq!(pill.display_row, 0, "the short row just above the hunk");
-    assert!(!pill.compact);
+    assert_eq!(pill.display_row, 0);
 }
 
 #[gpui::test]
-fn with_no_room_anywhere_the_pill_turns_compact_and_translucent(cx: &mut TestAppContext) {
-    let text = format!("{}\n{}\n{}\nc\n", long_line(), long_line(), long_line());
-    let (view, _handle, mut visual) = open_default(cx, &text, review(vec![hunk(7, &[], 1..3)]));
-    let plain = frame(&view, &mut visual);
+fn a_pure_deletion_gets_the_pill_on_the_row_above_its_phantom_rows(cx: &mut TestAppContext) {
+    let long = long_line();
+    let (view, _handle, mut visual) = open_default(
+        cx,
+        &format!("{long}\nb\nc\n"),
+        review(vec![hunk(3, &[long.as_str(), "corto"], 1..1)]),
+    );
+    set_cursor(&view, &mut visual, DisplayPoint::new(1, 0));
+    let (line_height, _, _) = geometry(&view, &mut visual);
+    let painted = frame(&view, &mut visual);
+    let pill = painted.review.pills[0];
+    // Display rows 1 and 2 are the phantom rows: the pill goes on row 0.
+    assert_eq!(painted.row(1).unwrap().kind, RowKind::Phantom(0));
+    assert_eq!(pill.display_row, 0);
+    assert!(!pill.compact);
+    assert!(!pill_covers_its_hunk(&painted, &pill, 0, line_height));
+}
+
+#[gpui::test]
+fn no_pill_covers_the_rows_of_its_hunk(cx: &mut TestAppContext) {
+    // Long enough to run under the pill, short enough that the whole file
+    // stays on screen even wrapped at 300 px.
+    let long = "x".repeat(120);
+    let text = format!("a\n{long}\nc\nd\n{long}\nf\ng\nh\n");
+    // A modified hunk on the first row, an added one below a long line, a
+    // pure deletion and an added row at the end.
+    let hunks = review(vec![
+        hunk(1, &["x"], 0..1),
+        hunk(2, &[], 2..4),
+        hunk(3, &["z", "w"], 5..5),
+        hunk(4, &[], 7..8),
+    ]);
+    let (view, _handle, mut visual) = open_default(cx, &text, hunks);
+    for width in [1200., 600., 300.] {
+        visual.simulate_resize(gpui::size(px(width), px(600.)));
+        visual.run_until_parked();
+        let (line_height, _, _) = geometry(&view, &mut visual);
+        let rows = frame(&view, &mut visual).rows;
+        for hunk_ix in 0..4 {
+            let first = rows
+                .iter()
+                .find(|row| {
+                    matches!(row.kind, RowKind::Phantom(ix) | RowKind::Added(ix) if ix == hunk_ix)
+                })
+                .expect("the hunk is painted")
+                .display_row;
+            set_cursor(&view, &mut visual, DisplayPoint::new(first, 0));
+            let painted = frame(&view, &mut visual);
+            let pill = painted
+                .review
+                .pills
+                .iter()
+                .find(|pill| pill.hunk == hunk_ix as u64 + 1)
+                .copied()
+                .unwrap_or_else(|| panic!("{width}: hunk {hunk_ix} sin pill"));
+            assert!(
+                !pill_covers_its_hunk(&painted, &pill, hunk_ix, line_height),
+                "{width}: hunk {hunk_ix}, pill {:?}",
+                pill.bounds
+            );
+            assert_eq!(pill.compact, width < 400., "{width}");
+        }
+    }
+}
+
+#[gpui::test]
+fn a_narrow_text_area_turns_the_pill_compact_on_the_row_above(cx: &mut TestAppContext) {
+    let (view, _handle, mut visual) = open_default(cx, TEXT, review(vec![hunk(7, &[], 1..3)]));
+    visual.simulate_resize(gpui::size(px(300.), px(600.)));
+    visual.run_until_parked();
     let events = record(&view, &mut visual);
     set_cursor(&view, &mut visual, DisplayPoint::new(2, 0));
+    let (line_height, text_origin, bounds) = geometry(&view, &mut visual);
+    let pill_right = f32::from(bounds.right()) - 8. - crate::element::PILL_MARGIN;
+    assert!(
+        pill_right - text_origin < crate::element::PILL_WIDTH,
+        "the text area is narrower than the full pill"
+    );
     let painted = frame(&view, &mut visual);
     let pill = painted.review.pills[0];
     assert!(pill.compact);
-    assert_eq!(pill.display_row, 1, "the first row of the hunk");
-    assert_eq!(pill.opacity, crate::element::COMPACT_PILL_OPACITY);
+    assert_eq!(pill.display_row, 0, "the row above the hunk");
+    assert_eq!(pill.opacity, 1.);
+    assert!(!pill_covers_its_hunk(&painted, &pill, 0, line_height));
     // Spec 09 §6.3: three 24 × 24 buttons with 4 px between them (80 px).
     assert_eq!(
         pill.bounds.size.width,
         px(3. * crate::element::COMPACT_PILL_BUTTON + 2. * crate::element::COMPACT_PILL_GAP)
     );
-    assert_eq!(painted.gutter_width, plain.gutter_width);
-    assert_eq!(painted.text_origin_x, plain.text_origin_x);
+    assert_eq!(pill.bounds.right(), px(pill_right));
 
     // Its hitboxes are where it was painted: the left button accepts, the
     // middle one rejects (the third comments).
@@ -1333,18 +1438,49 @@ fn with_no_room_anywhere_the_pill_turns_compact_and_translucent(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn a_pure_deletion_places_the_pill_on_its_phantom_rows(cx: &mut TestAppContext) {
-    let long = long_line();
-    let (view, _handle, mut visual) = open_default(
-        cx,
-        &format!("{long}\nb\nc\n"),
-        review(vec![hunk(3, &[long.as_str(), "corto"], 1..1)]),
-    );
-    set_cursor(&view, &mut visual, DisplayPoint::new(1, 0));
-    let pill = frame(&view, &mut visual).review.pills[0];
-    // Display rows 1 and 2 are the phantom rows; the second is short.
-    assert_eq!(pill.display_row, 2);
-    assert!(!pill.compact);
+fn the_pill_leaves_with_the_row_above_when_scrolled_away(cx: &mut TestAppContext) {
+    let text = (0..260)
+        .map(|row| format!("fila {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (view, _handle, mut visual) = open_default(cx, &text, review(vec![hunk(1, &[], 1..201)]));
+    set_cursor(&view, &mut visual, DisplayPoint::new(100, 0));
+    let (line_height, _, _) = geometry(&view, &mut visual);
+    let scroll_to = |visual: &mut VisualTestContext, rows: f32| {
+        visual.update(|_window, cx| {
+            view.update(cx, |view, cx| {
+                view.scroll_top = rows * line_height;
+                cx.notify();
+            })
+        });
+        visual.run_until_parked();
+    };
+    scroll_to(&mut visual, 50.);
+    let painted = frame(&view, &mut visual);
+    assert!(painted.rows.iter().all(|row| row.display_row > 1));
+    assert!(painted.review.pills.is_empty(), "no pill stuck to the edge");
+    scroll_to(&mut visual, 0.);
+    let pills = frame(&view, &mut visual).review.pills;
+    assert_eq!(pills.len(), 1, "back with its row");
+    assert_eq!(pills[0].display_row, 0);
+}
+
+#[gpui::test]
+fn the_pill_moves_neither_the_gutter_nor_the_text(cx: &mut TestAppContext) {
+    for width in [1200., 300.] {
+        let (view, _handle, mut visual) =
+            open_default(cx, TEXT, review(vec![hunk(1, &["x"], 2..4)]));
+        visual.simulate_resize(gpui::size(px(width), px(600.)));
+        visual.run_until_parked();
+        let plain = frame(&view, &mut visual);
+        assert!(plain.review.pills.is_empty());
+        set_cursor(&view, &mut visual, DisplayPoint::new(3, 0));
+        let painted = frame(&view, &mut visual);
+        assert_eq!(painted.review.pills.len(), 1, "{width}");
+        assert_eq!(painted.review.pills[0].compact, width < 400.);
+        assert_eq!(painted.gutter_width, plain.gutter_width, "{width}");
+        assert_eq!(painted.text_origin_x, plain.text_origin_x, "{width}");
+    }
 }
 
 // -- centring the target of a jump -----------------------------------------

@@ -283,20 +283,28 @@ fn clicking_the_pill_emits_accept_and_reject(cx: &mut TestAppContext) {
             f32::from(layout.bounds.right()),
         )
     });
-    // The pill sits on the first display row of each hunk (1 and 4), right
-    // aligned: inset by the scrollbar (8 px) plus its own margin (12 px).
-    // Three equal parts (spec 09 §6.3): "Rechazar" is the middle one.
+    // The hunks start on display rows 1 and 4; each pill sits on the row
+    // just above (0 and 3), right aligned: inset by the scrollbar (8 px) plus
+    // its own margin (12 px). Three equal parts (spec 09 §6.3): "Rechazar" is
+    // the middle one.
     let pill_right = right - 8. - 12.;
     let accept_x = pill_right - crate::element::PILL_WIDTH + 40.;
     let reject_x = pill_right - crate::element::PILL_WIDTH / 2.;
 
-    // The pill of a hunk shows while the mouse is over it.
-    let at = gpui::point(gpui::px(accept_x), gpui::px(line_height * 1.5));
-    visual.simulate_mouse_move(at, None, gpui::Modifiers::default());
+    // The pill of a hunk shows while the mouse is over the hunk, and stays
+    // while the mouse goes up onto it.
+    let mouse_to = |visual: &mut VisualTestContext, x: f32, row: f32| {
+        let at = gpui::point(gpui::px(x), gpui::px(line_height * row));
+        visual.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        visual.run_until_parked();
+        at
+    };
+    mouse_to(&mut visual, accept_x, 1.5);
+    let at = mouse_to(&mut visual, accept_x, 0.5);
     visual.simulate_click(at, gpui::Modifiers::default());
     visual.run_until_parked();
-    let at = gpui::point(gpui::px(reject_x), gpui::px(line_height * 4.5));
-    visual.simulate_mouse_move(at, None, gpui::Modifiers::default());
+    mouse_to(&mut visual, reject_x, 4.5);
+    let at = mouse_to(&mut visual, reject_x, 3.5);
     visual.simulate_click(at, gpui::Modifiers::default());
     visual.run_until_parked();
 

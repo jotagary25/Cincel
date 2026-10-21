@@ -3,6 +3,20 @@
 All notable changes to Cincel are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] - 2026-10-21
+
+Dos arreglos de la revisión en el editor: la barra flotante de abajo se
+achica por etapas en paneles angostos en vez de cortarse, y los botones
+Aceptar / Rechazar / Comentar van siempre en la línea de arriba del segmento,
+nunca sobre él.
+
+### Changed
+- Floating review bar shrinks in stages (no written shortcuts, then icons only) instead of being clipped in narrow panes.
+- Per-segment Accept / Reject / Comment pill always sits on the row above the segment (below it when the segment starts at the first line); the translucent pill over the segment is gone.
+
+### Security
+- Dependencies updated for RUSTSEC-2026-0346/0347 (rustls 0.23.46), RUSTSEC-2026-0382 (rustls-webpki 0.103.16), RUSTSEC-2026-0381 (webpki-roots 1.0.10) and RUSTSEC-2026-0367/0368/0369 (zip 9.0.5, used to unpack agent adapters).
+
 ## [0.2.1] - 2026-10-03
 
 Metadatos AppStream en los paquetes: las tiendas de aplicaciones muestran a

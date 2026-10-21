@@ -280,12 +280,13 @@ pub struct PillRender {
     pub enabled: bool,
     /// Whether it showed the "Turno anterior" clock.
     pub previous_turn: bool,
-    /// Display row the pill sits on (the smart placement of 02-visual §6.1).
+    /// Display row the pill sits on: the one just above its hunk, else the
+    /// one just below it (spec 11 R4).
     pub display_row: DisplayRow,
-    /// Whether no row had room for the full pill, so the compact two-icon
-    /// version was painted over the code instead.
+    /// Whether the text area was too narrow for the full pill, so the
+    /// compact three-icon version was painted instead.
     pub compact: bool,
-    /// Opacity of the pill (1, or 0.7 for the compact one).
+    /// Opacity of the pill (always 1: it never sits over its hunk).
     pub opacity: f32,
     /// Where the pill was painted.
     pub bounds: Bounds<Pixels>,
@@ -375,6 +376,14 @@ pub struct ReviewFrame {
     pub bar: Option<String>,
     /// Whether the controls of the bar react.
     pub bar_enabled: bool,
+    /// Level of content of the bar (0 full, 1 without the written
+    /// shortcuts, 2 icons only; spec 11 R1). 0 when there is no bar.
+    pub bar_level: u8,
+    /// Where the bar was painted.
+    pub bar_bounds: Option<Bounds<Pixels>>,
+    /// Whether the bar showed its leading glyph (the spinner while the
+    /// agent writes).
+    pub bar_glyph: bool,
     /// Tooltip painted, if any.
     pub tooltip: Option<String>,
     /// Hunks of the review state the frame was painted from.

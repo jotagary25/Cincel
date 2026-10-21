@@ -12,6 +12,9 @@ ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: transitivo de ureq/rustls; se retira al subir ureq" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz: transitivo de cosmic-text (gpui); sin reemplazo hasta que gpui lo suba" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser: transitivo de cosmic-text (gpui); sin reemplazo hasta que gpui lo suba" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: transitivo de zbus (gpui, portales XDG en Linux); sin version mantenida hasta que gpui suba zbus (2026-10-21)" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: transitivo de zbus (gpui, portales XDG en Linux); sin version mantenida hasta que gpui suba zbus (2026-10-21)" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: transitivo de zbus (gpui); macro de compilacion, sin superficie en tiempo de ejecucion (2026-10-21)" },
 ]
 [bans]
 multiple-versions = "allow"

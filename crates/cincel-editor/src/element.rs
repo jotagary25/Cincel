@@ -28,13 +28,21 @@
 //!
 //! # Where the pill goes
 //!
-//! Right aligned at the text area's right edge, 24 px high, on the first row
-//! that leaves it room (`place_pill`): the hunk's first row, then its
-//! following rows in order, then the row just above the hunk — the first one
-//! whose shaped text ends at least [`PILL_TEXT_GAP`] before the pill's left
-//! edge. When none does, a compact pill (three 24 × 24 icon buttons: `✓`,
-//! `✗` and the comment icon) goes on the first row at 70 % opacity. Nothing
-//! moves: the gutter and the text origin never depend on the review.
+//! Always in the same place (spec 11 R4–R6): right aligned at the text
+//! area's right edge, 24 px high, on the screen row just above the hunk's
+//! first display row (phantom rows included), whatever text that row holds —
+//! it may cover code above, never the hunk. A hunk starting on display row
+//! 0 gets it on the row just below its last one; a hunk that is the whole
+//! file, on its first row (the only case where it covers the hunk). Centred
+//! on that row; when it is taller than the row it grows away from the hunk
+//! (`pill_top`), so not even its edge reaches the hunk's rows. It is
+//! painted only while that row is among the laid-out rows: scrolled away, the
+//! hunk has no pill (it never sticks to an edge, which would put it over the
+//! hunk). When the text area is narrower than [`PILL_WIDTH`] (at the
+//! interface zoom), a compact pill takes its place: three 24 × 24 icon
+//! buttons (`✓`, `✗` and the comment icon) at full opacity. The text of the
+//! row never decides anything. Nothing moves: the gutter and the text origin
+//! never depend on the review.
 //!
 //! # The `+`/`−` of a line
 //!
@@ -106,14 +114,10 @@ pub const PILL_WIDTH: f32 = 280.;
 pub const PILL_MARGIN: f32 = 12.;
 /// Font size of the pill labels.
 const PILL_FONT_SIZE: f32 = 12.;
-/// Room the pill wants between the end of a row's text and its left edge.
-pub const PILL_TEXT_GAP: f32 = 12.;
 /// Side of a button of the compact pill.
 pub const COMPACT_PILL_BUTTON: f32 = 24.;
 /// Gap between the buttons of the compact pill.
 pub const COMPACT_PILL_GAP: f32 = 4.;
-/// Opacity of the compact pill, which sits over code.
-pub const COMPACT_PILL_OPACITY: f32 = 0.7;
 /// Side of the `+`/`−` line icons (02-visual §6.1: 14 px).
 pub const LINE_ICON_SIZE: f32 = 14.;
 /// Side of the line icons when two 14 px ones do not fit in the number column.
@@ -255,7 +259,7 @@ struct PillLayout {
     enabled: bool,
     /// Display row it sits on.
     display_row: DisplayRow,
-    /// The two-icon version, painted over code.
+    /// The three-icon version, for a text area narrower than the full pill.
     compact: bool,
     opacity: f32,
     bounds: Bounds<Pixels>,
@@ -322,6 +326,9 @@ struct BarLayout {
     glyph: Option<(Glyph, Bounds<Pixels>)>,
     items: Vec<BarItem>,
     enabled: bool,
+    /// Which of the three levels of content it shows (0 full, 1 without
+    /// the written shortcuts, 2 icons only; spec 11 R1).
+    level: u8,
     /// The whole bar, so the text's I-beam never shows over it.
     surface_hitbox: Option<Hitbox>,
 }
@@ -777,43 +784,50 @@ pub(crate) fn pill_colors(theme: &EditorTheme, enabled: bool) -> (Hsla, Hsla, Hs
     }
 }
 
-/// A row the pill may sit on: its display row, the y of its first wrap row
-/// and where its painted text ends (`None` when it is not laid out).
-struct PillCandidate {
-    display_row: DisplayRow,
+/// The display row the pill of the hunk covering `range` sits on (module
+/// docs, "Where the pill goes"): the row just above it, else the row just
+/// below it, else its own first row (a hunk that is the whole file).
+fn pill_row(range: &Range<DisplayRow>, display_rows: u32) -> DisplayRow {
+    if range.start > 0 {
+        range.start - 1
+    } else if range.end < display_rows {
+        range.end
+    } else {
+        range.start
+    }
+}
+
+/// Top of a pill `pill_height` high on the row at `row_y`, which lies on
+/// `side` of its hunk: centred on the row, except that a pill taller than
+/// the row grows away from the hunk (bottom on the row's bottom above it, top
+/// on the row's top below it), so it never reaches the hunk's rows.
+fn pill_top(
     row_y: Pixels,
-    text_right: Pixels,
+    line_height: Pixels,
+    pill_height: Pixels,
+    side: std::cmp::Ordering,
+) -> Pixels {
+    let centred = (line_height - pill_height) / 2.;
+    row_y
+        + match side {
+            std::cmp::Ordering::Less => centred.min(line_height - pill_height),
+            std::cmp::Ordering::Greater => centred.max(px(0.)),
+            std::cmp::Ordering::Equal => centred,
+        }
 }
 
-/// Where the pill of a hunk goes (module docs, "Where the pill goes"):
-/// `Some((row, y, false))` for the first candidate whose text ends at least
-/// [`PILL_TEXT_GAP`] before `pill_left`, else `(first row, y, true)` for the
-/// compact pill. `None` when the hunk's first row is not on screen and no
-/// candidate qualified.
-fn place_pill(
-    candidates: &[PillCandidate],
-    first: Option<(DisplayRow, Pixels)>,
-    pill_left: Pixels,
-) -> Option<(DisplayRow, Pixels, bool)> {
-    candidates
-        .iter()
-        .find(|candidate| candidate.text_right + px(PILL_TEXT_GAP) <= pill_left)
-        .map(|candidate| (candidate.display_row, candidate.row_y, false))
-        .or_else(|| first.map(|(row, y)| (row, y, true)))
-}
-
-/// Lays out the pill of hunk `hunk_ix` on the row at `row_y`: the full pill
+/// Lays out the pill of hunk `hunk_ix` with its top at `top`: the full pill
 /// ("✓ Aceptar" · "✗ Rechazar" · "Comentar", three equal parts), or the
-/// compact one (three 24 × 24 icon buttons at 70 %) when no row had room.
+/// compact one (three 24 × 24 icon buttons) when the text area is too narrow
+/// for the full one.
 #[allow(clippy::too_many_arguments)]
 fn layout_pill(
     view: &mut EditorView,
     hunk_ix: usize,
     display_row: DisplayRow,
-    row_y: Pixels,
+    top: Pixels,
     compact: bool,
     right: Pixels,
-    line_height: Pixels,
     theme: &EditorTheme,
     window: &Window,
 ) -> PillLayout {
@@ -844,15 +858,10 @@ fn layout_pill(
     let comment_icon_color = theme::color(theme.text_accent);
     let comment_label_color = theme::color(theme.text);
     let comment_hovered = view.hover_pill_comment == Some(id);
-    let top = row_y + (line_height - pill_height) / 2.;
 
     if compact {
-        let faded = |color: Hsla| Hsla {
-            a: color.a * COMPACT_PILL_OPACITY,
-            ..color
-        };
-        let accept_line = shape_ui_runs(view, &[("✓", faded(check_color))], font_size, window);
-        let reject_line = shape_ui_runs(view, &[("✗", faded(cross_color))], font_size, window);
+        let accept_line = shape_ui_runs(view, &[("✓", check_color)], font_size, window);
+        let reject_line = shape_ui_runs(view, &[("✗", cross_color)], font_size, window);
         let button = px(COMPACT_PILL_BUTTON * scale);
         let gap = px(COMPACT_PILL_GAP * scale);
         // `✓`, `✗` and the comment icon; while the agent writes, a cell in
@@ -898,7 +907,7 @@ fn layout_pill(
             enabled,
             display_row,
             compact: true,
-            opacity: COMPACT_PILL_OPACITY,
+            opacity: 1.,
             bounds,
             accept,
             reject,
@@ -916,7 +925,7 @@ fn layout_pill(
             check_color,
             cross_color,
             label_color,
-            comment_icon_color: faded(comment_icon_color),
+            comment_icon_color,
             comment_label_color,
             hovered,
             comment_hovered,
@@ -1044,6 +1053,17 @@ type BarSpec = (String, Hsla, Hsla, Option<ReviewAction>, f32);
 /// (not while the agent writes, when the bar only shows the spinner), with
 /// the glyph in `status.ok` / `status.error` and the word in `text`. The
 /// hovered button gets a `bg.surface` background.
+///
+/// # Levels (spec 11 R1–R3)
+///
+/// The bar never leaves the element nor changes height: it takes the first
+/// of three levels that fits in `bounds.width − 2 · BAR_MARGIN` — 0 is the
+/// full bar, 1 drops the written shortcuts, 2 keeps only icons
+/// ([`bar_specs`]). The review bar (the one with hunks) sets the level the
+/// other two states start from, so the three shrink together at the same
+/// widths; each of them still goes one level further down if its own text
+/// does not fit. Level 2 is final: if even it does not fit, the bar sticks
+/// to the left margin and the right end is what gets cut.
 fn layout_bar(
     view: &mut EditorView,
     bounds: Bounds<Pixels>,
@@ -1054,131 +1074,37 @@ fn layout_bar(
     if !window.is_window_active() {
         return None;
     }
-    let text = theme::color(theme.text);
-    let muted = theme::color(theme.text_muted);
-    let accent = theme::color(theme.text_accent);
-    let (check, cross, label) = pill_colors(theme, true);
-    let mut specs: Vec<BarSpec> = Vec::new();
-    let mut glyph = None;
+    // Nothing to show: no shaping at all.
     let review = &view.review;
-    let enabled = if review.turn_active {
-        glyph = Some(Glyph::Spinner(view.spinner_phase));
-        specs.push(("El agente está editando…".into(), text, text, None, 0.));
-        false
-    } else if !review.hunks.is_empty() {
-        let target = view.review_target().unwrap_or(0);
-        let total = review.pending_in_file.max(review.hunks.len());
-        let sep = |specs: &mut Vec<BarSpec>| {
-            specs.push(("·".into(), muted, muted, None, 10.));
-        };
-        // A file decided only as a whole (a deletion) has no buttons of its
-        // own here: its single hunk's pill decides it.
-        specs.push((
-            "✓ Aceptar todo".into(),
-            check,
-            label,
-            Some(ReviewAction::AcceptTurn),
-            0.,
-        ));
-        specs.push(("Ctrl+Alt+↵".into(), muted, muted, None, 6.));
-        sep(&mut specs);
-        specs.push((
-            "✗ Rechazar todo".into(),
-            cross,
-            label,
-            Some(ReviewAction::RejectTurn),
-            10.,
-        ));
-        specs.push(("Ctrl+Alt+⌫".into(), muted, muted, None, 6.));
-        sep(&mut specs);
-        specs.push((
-            "↑ Alt+K".into(),
-            text,
-            text,
-            Some(ReviewAction::PrevHunk),
-            10.,
-        ));
-        specs.push((
-            "↓ Alt+J".into(),
-            text,
-            text,
-            Some(ReviewAction::NextHunk),
-            8.,
-        ));
-        sep(&mut specs);
-        specs.push((
-            format!("cambio {} de {total}", target + 1),
-            text,
-            text,
-            None,
-            10.,
-        ));
-        sep(&mut specs);
-        specs.push((
-            "Revisar todo".into(),
-            accent,
-            accent,
-            Some(ReviewAction::OpenReviewPanel),
-            10.,
-        ));
-        true
-    } else if view.review_notice {
-        specs.push((
-            format!(
-                "Sin cambios pendientes en este archivo · {} en otros archivos",
-                review.pending_in_other_files
-            ),
-            text,
-            text,
-            None,
-            0.,
-        ));
-        specs.push((
-            "→ siguiente archivo (Alt+L)".into(),
-            accent,
-            accent,
-            Some(ReviewAction::NextFile),
-            6.,
-        ));
-        true
-    } else {
+    if !review.turn_active && review.hunks.is_empty() && !view.review_notice {
         return None;
-    };
-
-    let glyph_width = if glyph.is_some() {
-        px(ICON_SIZE + 8.)
-    } else {
-        px(0.)
-    };
-    let hover_bar = view.hover_bar;
-    let mut x = px(BAR_PADDING) + glyph_width;
-    let mut items = Vec::with_capacity(specs.len());
-    for (index, (text, glyph_color, label_color, action, gap)) in specs.into_iter().enumerate() {
-        x += px(gap);
-        let (head, tail) = split_glyph(&text);
-        let line = shape_ui_runs(
-            view,
-            &[(head, glyph_color), (tail, label_color)],
-            BAR_FONT_SIZE,
-            window,
-        );
-        let width = line.width();
-        let hovered = enabled && action.is_some() && hover_bar == Some(index);
-        items.push(BarItem {
-            text,
-            line,
-            x,
-            action,
-            hitbox: None,
-            glyph_color,
-            label_color,
-            hovered,
-        });
-        x += width;
     }
-    let width = x + px(BAR_PADDING);
+    let avail = bounds.size.width - px(2. * BAR_MARGIN);
+    let fits = |view: &mut EditorView, specs: &[BarSpec], glyph: Option<Glyph>| {
+        shape_bar(view, specs, glyph, false, window).1 <= avail
+    };
+    // The review bar's own level: the first one whose full content fits.
+    let mut level = (0..BAR_LAST_LEVEL)
+        .find(|&level| {
+            let specs = review_bar_specs(view, level, theme);
+            fits(view, &specs, None)
+        })
+        .unwrap_or(BAR_LAST_LEVEL);
+    let content = loop {
+        let content = bar_specs(view, level, theme)?;
+        if level == BAR_LAST_LEVEL || fits(view, &content.specs, content.glyph) {
+            break content;
+        }
+        level += 1;
+    };
+    let BarContent {
+        specs,
+        glyph,
+        enabled,
+    } = content;
+    let (mut items, width) = shape_bar(view, &specs, glyph, enabled, window);
     let origin = point(
-        bounds.right() - px(BAR_MARGIN) - width,
+        (bounds.right() - px(BAR_MARGIN) - width).max(bounds.left() + px(BAR_MARGIN)),
         bounds.bottom() - px(BAR_MARGIN) - px(BAR_HEIGHT),
     );
     for item in &mut items {
@@ -1202,8 +1128,228 @@ fn layout_bar(
         glyph,
         items,
         enabled,
+        level,
         surface_hitbox: None,
     })
+}
+
+/// Last level of the floating bar: icons only (spec 11 R2).
+const BAR_LAST_LEVEL: u8 = 2;
+
+/// What the floating bar holds at one level: its segments, the glyph at its
+/// left and whether its controls react.
+struct BarContent {
+    specs: Vec<BarSpec>,
+    glyph: Option<Glyph>,
+    enabled: bool,
+}
+
+/// The floating bar's content at `level` (spec 11 R2–R3), or `None` when
+/// the bar is hidden.
+///
+/// - While the agent writes: "El agente está editando…", then
+///   "Editando…", then the spinner alone.
+/// - With hunks: [`review_bar_specs`].
+/// - The notice: "Sin cambios pendientes en este archivo · N en otros
+///   archivos → siguiente archivo (Alt+L)", then "N en otros archivos →
+///   siguiente (Alt+L)", then the "→ siguiente archivo" button alone.
+fn bar_specs(view: &EditorView, level: u8, theme: &EditorTheme) -> Option<BarContent> {
+    let text = theme::color(theme.text);
+    let accent = theme::color(theme.text_accent);
+    let review = &view.review;
+    if review.turn_active {
+        let specs = match level {
+            0 => vec![("El agente está editando…".into(), text, text, None, 0.)],
+            1 => vec![("Editando…".into(), text, text, None, 0.)],
+            _ => Vec::new(),
+        };
+        Some(BarContent {
+            specs,
+            glyph: Some(Glyph::Spinner(view.spinner_phase)),
+            enabled: false,
+        })
+    } else if !review.hunks.is_empty() {
+        Some(BarContent {
+            specs: review_bar_specs(view, level, theme),
+            glyph: None,
+            enabled: true,
+        })
+    } else if view.review_notice {
+        let others = review.pending_in_other_files;
+        let next = |label: &str, gap: f32| -> BarSpec {
+            (
+                label.into(),
+                accent,
+                accent,
+                Some(ReviewAction::NextFile),
+                gap,
+            )
+        };
+        let specs = match level {
+            0 => vec![
+                (
+                    format!("Sin cambios pendientes en este archivo · {others} en otros archivos"),
+                    text,
+                    text,
+                    None,
+                    0.,
+                ),
+                next("→ siguiente archivo (Alt+L)", 6.),
+            ],
+            1 => vec![
+                (format!("{others} en otros archivos"), text, text, None, 0.),
+                next("→ siguiente (Alt+L)", 6.),
+            ],
+            _ => vec![next("→ siguiente archivo", 0.)],
+        };
+        Some(BarContent {
+            specs,
+            glyph: None,
+            enabled: true,
+        })
+    } else {
+        None
+    }
+}
+
+/// The segments of the review bar (the one with hunks) at `level`.
+///
+/// Level 0: "✓ Aceptar todo Ctrl+Alt+↵ · ✗ Rechazar todo Ctrl+Alt+⌫ · ↑ Alt+K
+/// ↓ Alt+J · cambio N de M · Revisar todo". Level 1 drops the written
+/// shortcuts ("↑" and "↓" stay buttons). Level 2: "✓ ✗ ↑ ↓ N/M ≡", no
+/// separators. Every button keeps its action at every level. A file decided
+/// only as a whole (a deletion) has no buttons of its own here: its single
+/// hunk's pill decides it.
+fn review_bar_specs(view: &EditorView, level: u8, theme: &EditorTheme) -> Vec<BarSpec> {
+    let text = theme::color(theme.text);
+    let muted = theme::color(theme.text_muted);
+    let accent = theme::color(theme.text_accent);
+    let (check, cross, label) = pill_colors(theme, true);
+    let review = &view.review;
+    let target = view.review_target().unwrap_or(0);
+    let total = review.pending_in_file.max(review.hunks.len());
+    let mut specs: Vec<BarSpec> = Vec::new();
+    if level >= BAR_LAST_LEVEL {
+        specs.push(("✓".into(), check, check, Some(ReviewAction::AcceptTurn), 0.));
+        specs.push((
+            "✗".into(),
+            cross,
+            cross,
+            Some(ReviewAction::RejectTurn),
+            10.,
+        ));
+        specs.push(("↑".into(), text, text, Some(ReviewAction::PrevHunk), 10.));
+        specs.push(("↓".into(), text, text, Some(ReviewAction::NextHunk), 10.));
+        specs.push((format!("{}/{total}", target + 1), text, text, None, 10.));
+        specs.push((
+            "≡".into(),
+            accent,
+            accent,
+            Some(ReviewAction::OpenReviewPanel),
+            10.,
+        ));
+        return specs;
+    }
+    let shortcuts = level == 0;
+    let sep = |specs: &mut Vec<BarSpec>| {
+        specs.push(("·".into(), muted, muted, None, 10.));
+    };
+    specs.push((
+        "✓ Aceptar todo".into(),
+        check,
+        label,
+        Some(ReviewAction::AcceptTurn),
+        0.,
+    ));
+    if shortcuts {
+        specs.push(("Ctrl+Alt+↵".into(), muted, muted, None, 6.));
+    }
+    sep(&mut specs);
+    specs.push((
+        "✗ Rechazar todo".into(),
+        cross,
+        label,
+        Some(ReviewAction::RejectTurn),
+        10.,
+    ));
+    if shortcuts {
+        specs.push(("Ctrl+Alt+⌫".into(), muted, muted, None, 6.));
+    }
+    sep(&mut specs);
+    specs.push((
+        if shortcuts { "↑ Alt+K" } else { "↑" }.into(),
+        text,
+        text,
+        Some(ReviewAction::PrevHunk),
+        10.,
+    ));
+    specs.push((
+        if shortcuts { "↓ Alt+J" } else { "↓" }.into(),
+        text,
+        text,
+        Some(ReviewAction::NextHunk),
+        8.,
+    ));
+    sep(&mut specs);
+    specs.push((
+        format!("cambio {} de {total}", target + 1),
+        text,
+        text,
+        None,
+        10.,
+    ));
+    sep(&mut specs);
+    specs.push((
+        "Revisar todo".into(),
+        accent,
+        accent,
+        Some(ReviewAction::OpenReviewPanel),
+        10.,
+    ));
+    specs
+}
+
+/// Shapes the bar's segments: the items, with `x` relative to the bar's left
+/// edge, and the bar's whole width (both paddings included).
+fn shape_bar(
+    view: &mut EditorView,
+    specs: &[BarSpec],
+    glyph: Option<Glyph>,
+    enabled: bool,
+    window: &Window,
+) -> (Vec<BarItem>, Pixels) {
+    let glyph_width = if glyph.is_some() {
+        px(ICON_SIZE + 8.)
+    } else {
+        px(0.)
+    };
+    let hover_bar = view.hover_bar;
+    let mut x = px(BAR_PADDING) + glyph_width;
+    let mut items = Vec::with_capacity(specs.len());
+    for (index, (text, glyph_color, label_color, action, gap)) in specs.iter().enumerate() {
+        x += px(*gap);
+        let (head, tail) = split_glyph(text);
+        let line = shape_ui_runs(
+            view,
+            &[(head, *glyph_color), (tail, *label_color)],
+            BAR_FONT_SIZE,
+            window,
+        );
+        let width = line.width();
+        let hovered = enabled && action.is_some() && hover_bar == Some(index);
+        items.push(BarItem {
+            text: text.clone(),
+            line,
+            x,
+            action: *action,
+            hitbox: None,
+            glyph_color: *glyph_color,
+            label_color: *label_color,
+            hovered,
+        });
+        x += width;
+    }
+    (items, x + px(BAR_PADDING))
 }
 
 /// Bounds of a clickable item of the floating bar (its hitbox and its hover
@@ -1913,11 +2059,11 @@ impl Element for EditorElement {
             }
 
             // Pills: always on the hunk with the cursor, and on the one under
-            // the mouse (02-visual §6.1), each on the first row that leaves it
-            // room (module docs, "Where the pill goes"). "Under the mouse" is
-            // the hunk's rows plus its own pill: a pill sticks out of its
-            // rows (the row above, or its top edge), and the mouse reaching
-            // it from above must not make it go away.
+            // the mouse (02-visual §6.1), each on the row right next to it
+            // (module docs, "Where the pill goes"). "Under the mouse" is the
+            // hunk's rows plus its own pill: a pill sits outside its rows
+            // (the row above, or below), and the mouse reaching it from there
+            // must not make it go away.
             let mut pill_hunks: Vec<usize> = Vec::new();
             if let Some(ix) = view.hunk_under_cursor() {
                 pill_hunks.push(ix);
@@ -1934,53 +2080,41 @@ impl Element for EditorElement {
             }
             pill_hunks.sort_unstable();
             let pill_right = bounds.right() - px(SCROLLBAR_WIDTH + PILL_MARGIN);
-            let pill_left = pill_right - px(PILL_WIDTH * view.settings().scale());
-            // Where the painted text of a display row's first segment ends,
-            // from the lines just shaped (only laid-out rows can host a pill).
-            let text_right = |display_row: DisplayRow| -> Option<(Pixels, Pixels)> {
-                rows.iter()
-                    .find(|row| row.display_row == display_row && row.segment == 0)
-                    .map(|row| {
-                        (
-                            row.origin_y,
-                            text_origin_x + row.indent_x + row.line.width() - scroll_left,
-                        )
-                    })
-            };
+            // Only the width of the text area decides the compact pill,
+            // never the text of a row (spec 11 R6).
+            let compact = pill_right - text_origin_x < px(PILL_WIDTH * view.settings().scale());
+            let display_rows = view.display_map.display_row_count();
             let mut pills = Vec::new();
             for hunk_ix in pill_hunks {
                 let range = view.display_map.diff().hunk_display_range(hunk_ix);
                 if range.is_empty() {
                     continue;
                 }
-                let mut candidate_rows: Vec<DisplayRow> = range.clone().collect();
-                if range.start > 0 {
-                    candidate_rows.push(range.start - 1);
-                }
-                let candidates: Vec<PillCandidate> = candidate_rows
-                    .into_iter()
-                    .filter_map(|display_row| {
-                        let (row_y, text_right) = text_right(display_row)?;
-                        Some(PillCandidate {
-                            display_row,
-                            row_y,
-                            text_right,
-                        })
-                    })
-                    .collect();
-                let first = text_right(range.start).map(|(y, _)| (range.start, y));
-                let Some((display_row, row_y, compact)) = place_pill(&candidates, first, pill_left)
-                else {
-                    continue;
+                let display_row = pill_row(&range, display_rows);
+                // The screen row right next to the hunk: the last wrap row of
+                // the row above it, the first one of the row below it.
+                let wrap_row = if display_row < range.start {
+                    view.wrap.to_wrap_row(display_row, u32::MAX)
+                } else {
+                    view.wrap.to_wrap_row(display_row, 0)
                 };
+                let visual_row = blocks.to_visual_row(wrap_row);
+                if visual_row < first_row || visual_row >= last_row {
+                    continue;
+                }
+                let top = pill_top(
+                    wrap_y(wrap_row),
+                    line_height,
+                    px(PILL_HEIGHT * view.settings().scale()),
+                    display_row.cmp(&range.start),
+                );
                 pills.push(layout_pill(
                     view,
                     hunk_ix,
                     display_row,
-                    row_y,
+                    top,
                     compact,
                     pill_right,
-                    line_height,
                     &theme,
                     window,
                 ));
@@ -2276,6 +2410,9 @@ impl Element for EditorElement {
                             .join(" ")
                     }),
                     bar_enabled: bar.as_ref().is_some_and(|bar| bar.enabled),
+                    bar_level: bar.as_ref().map_or(0, |bar| bar.level),
+                    bar_bounds: bar.as_ref().map(|bar| bar.bounds),
+                    bar_glyph: bar.as_ref().is_some_and(|bar| bar.glyph.is_some()),
                     tooltip: tooltip
                         .as_ref()
                         .map(|_| "Turno anterior".to_string())
@@ -2727,7 +2864,6 @@ impl Element for EditorElement {
                         window,
                     );
                 }
-                // The compact pill's glyphs were shaped at its opacity.
                 let paint_label =
                     |line: &ShapedLine, x: Pixels, window: &mut Window, cx: &mut App| {
                         line.paint(

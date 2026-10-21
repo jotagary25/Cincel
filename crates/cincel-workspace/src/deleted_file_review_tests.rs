@@ -436,7 +436,9 @@ fn rejecting_restores_the_file_and_the_tab_becomes_editable(cx: &mut TestAppCont
     let pill = deleted_pill_bounds(&editor, cx);
     mouse_to(cx, point(px(1.), px(1.)));
     assert!(painted(&editor, cx).review.pills.is_empty(), "sin botones");
-    let y = pill.center().y;
+    // The pill sits on the row just below the red rows (spec 11 R4): the
+    // mouse goes onto the last red row, right above it.
+    let y = pill.top() - px(10.);
     mouse_to(cx, point(pill.left() - px(120.), y));
     let shown = painted(&editor, cx).review.pills;
     assert_eq!(shown.len(), 1, "los botones aparecen con el mouse encima");

@@ -266,6 +266,8 @@ pub mod view;
 pub mod wrap_map;
 
 #[cfg(all(test, feature = "test-support"))]
+mod bar_levels_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod block_map_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod comment_box_tests;

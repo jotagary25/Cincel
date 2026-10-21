@@ -380,14 +380,16 @@ fn the_pill_has_three_equal_parts_and_comentar_opens_the_box_below_the_hunk(
 
 #[gpui::test]
 fn the_compact_pill_has_a_third_button_that_comments(cx: &mut TestAppContext) {
-    let long = "x".repeat(400);
-    let text = format!("{long}\n{long}\n{long}\nc\n");
+    let text = "a\nb\nc\nd\n";
     let (view, _handle, mut visual, _host) = open(
         cx,
-        &text,
+        text,
         review(vec![hunk(7, &[], 1..3)]),
         EditorSettings::default(),
     );
+    // Only the width of the text area makes the pill compact (spec 11 R6).
+    visual.simulate_resize(gpui::size(px(300.), px(600.)));
+    visual.run_until_parked();
     set_cursor(&view, &mut visual, DisplayPoint::new(2, 0));
     let pill = frame(&view, &mut visual).review.pills[0];
     assert!(pill.compact);
@@ -406,7 +408,7 @@ fn the_compact_pill_has_a_third_button_that_comments(cx: &mut TestAppContext) {
     );
 }
 
-/// The pill sits on the row above its hunk (no room on the hunk's own row):
+/// The pill sits on the row above its hunk (always, spec 11 R4):
 /// the mouse going up from the hunk to "Comentar" keeps it up, and the
 /// click opens the box.
 #[gpui::test]

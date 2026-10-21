@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
 rust-version = "1.90"
@@ -69,7 +69,7 @@ rfd = "0.17"
 # acp: distribuciones binary/uvx (agregado por cincel-acp, E2)
 flate2 = "1"
 tar = "0.4"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # conexiones (agregado por cincel-connections, E4-B): login en pty, runtime
 # Node privado (tar.xz) e ids de conexión

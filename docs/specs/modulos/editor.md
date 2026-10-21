@@ -97,7 +97,12 @@ Spec: `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md` §6.5.
   rango (la primera fila roja si es de un segmento); clic pliega/despliega,
   globo con los primeros 200 caracteres.
 - **Botones del segmento**: tres partes iguales (`PILL_WIDTH` 280 px;
-  compactos: tres de 24 × 24, 80 px). "Comentar" (`review::comment_hunk`)
+  compactos: tres de 24 × 24, 80 px, solo cuando los 280 px no entran en el
+  área de texto). Desde la ronda 3 (spec 11) van siempre en la fila de
+  pantalla anterior al segmento (si empieza en la fila 0, en la posterior),
+  sin mirar el texto de esa fila, y solo mientras esa fila está a la vista;
+  `place_pill` y el pill translúcido sobre el segmento se eliminaron. La
+  barra flotante tiene tres niveles de contenido por ancho (`BarLayout.level`). "Comentar" (`review::comment_hunk`)
   sigue habilitado mientras el agente escribe; si el segmento ya tiene un
   comentario de su botón, lo abre para editar.
 - **Acciones y teclas** (`default_key_bindings`): `editor::comment_selection`

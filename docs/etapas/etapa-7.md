@@ -2,6 +2,7 @@
 
 Estado: **cerrada** (2026-09-30). Spec: `docs/specs/09-etapa7-conexiones-imagenes-comentarios.md`.
 Ronda 2: **cerrada** (2026-10-01). Spec: `docs/specs/10-etapa7-ronda2.md` (ver "Ronda 2" más abajo).
+Ronda 3: **cerrada** (2026-10-21). Spec: `docs/specs/11-etapa7-ronda3.md` (ver "Ronda 3" más abajo). Cierra la **0.2.2**.
 Esta etapa cierra la versión **0.2.0** de Cincel (la 0.1.0 es la publicada).
 
 Este documento lo escribió el orquestador (E7-J) integrando el trabajo de las
@@ -632,6 +633,133 @@ Tal como la deja la spec 10 §16, para recorrerla con el paquete de `dist/`
 16. Commit, push, etiqueta `v0.2.0` y publicar el borrador (procedimiento de
     la lista de la ronda 1, punto 13, sin cambios). Recordatorio: el borrador
     de la **v0.1.0** también sigue sin publicar.
+
+## Ronda 3 (barra flotante por niveles y pill en un solo lugar)
+
+Estado: **cerrada** (2026-10-21). Spec: `docs/specs/11-etapa7-ronda3.md`.
+Versión **0.2.2**. Dos pedidos del autor tras usar la 0.2.1, los dos en
+`crates/cincel-editor/src/element.rs`, construidos por un solo subagente
+(Opus) y verificados por el orquestador.
+
+### Qué se construyó
+
+- **Barra flotante por niveles** (spec 11 §3, R1–R3). `layout_bar` arma el
+  contenido por nivel (`bar_specs`, `review_bar_specs`), lo mide
+  (`shape_bar`) y elige el nivel más alto que entre en `bounds.width −
+  2·BAR_MARGIN`: nivel 0 el contenido de siempre; nivel 1 sin los atajos
+  escritos (`↑` `↓` solos); nivel 2 solo iconos (`✓` `✗` `↑` `↓` `N/M` `≡`).
+  El origen es `max(bounds.left + BAR_MARGIN, …)`: la barra nunca se corta
+  por la izquierda ni cambia de alto. Los estados "El agente está
+  editando…" y "Sin cambios pendientes…" bajan de nivel junto con la barra
+  de revisión y un nivel más si su propio texto no entra. `BarLayout.level`
+  se lee en `ReviewFrame` (`bar_level`, `bar_bounds`, `bar_glyph`). Tests:
+  `bar_levels_tests.rs` (seis, uno por criterio de §3.3).
+- **Pill en un solo lugar** (spec 11 §4, R4–R7). `pill_row(range,
+  display_rows)`: la fila de pantalla anterior al segmento; si empieza en la
+  fila 0, la posterior; si el archivo entero es el segmento, su primera
+  fila. Se pinta solo con esa fila a la vista; compacto solo cuando los 280
+  px no entran en el área de texto, con opacidad plena. Como el pill (24 px)
+  es más alto que la fila (21 px), `pill_top` lo hace crecer hacia el lado
+  contrario al segmento, así nunca lo pisa. Con ajuste de línea va en la
+  última fila de pantalla de la línea anterior. Se eliminaron `place_pill`,
+  `PillCandidate`, `PILL_TEXT_GAP`, `COMPACT_PILL_OPACITY` y el pill
+  translúcido sobre el segmento. Tests: ocho en `review_tests.rs`, uno por
+  criterio de §4.3 (`the_pill_sits_on_the_row_above_even_over_a_long_line`,
+  `a_hunk_on_the_first_row_gets_the_pill_below_it`,
+  `a_hunk_that_is_the_whole_file_gets_the_pill_on_its_first_row`,
+  `a_pure_deletion_gets_the_pill_on_the_row_above_its_phantom_rows`,
+  `no_pill_covers_the_rows_of_its_hunk`,
+  `a_narrow_text_area_turns_the_pill_compact_on_the_row_above`,
+  `the_pill_leaves_with_the_row_above_when_scrolled_away`,
+  `the_pill_moves_neither_the_gutter_nor_the_text`).
+
+### Decisiones del autor (2026-10-21)
+Achicar la barra por etapas en vez de partirla en dos filas; el pill puede
+tapar código de arriba pero nunca el segmento; en un segmento más alto que
+la pantalla el pill se va con su fila (quedan `Ctrl+↵` / `Ctrl+⌫` y la barra).
+
+### Desviaciones
+- El test del nivel 1 usa un editor de 700 px, no de 560: el sistema de
+  texto del arnés de GPUI mide cada carácter a 0,6 em, con lo que el nivel 1
+  mide 580 px ahí; con Inter en la app real entra a 560. Anotado en la
+  constante `MEDIUM` del test.
+- R1 se aplica a los tres estados de la barra tomando como base el nivel de
+  la barra de revisión (si no, "El agente está editando…" entraba a 380 px y
+  el criterio 6 no se cumplía).
+- Tests existentes ajustados a la fila nueva del pill: dos de cursor/hover
+  en `review_tests.rs`, `clicking_the_pill_emits_accept_and_reject` en
+  `tests.rs`, `the_compact_pill_has_a_third_button_that_comments` en
+  `comment_box_tests.rs` (ventana de 300 px en vez de líneas largas) y
+  `rejecting_restores_the_file_…` en `deleted_file_review_tests.rs` (el pill
+  de un archivo borrado queda debajo de las filas rojas). Cinco tests de la
+  regla vieja reemplazados (nombres en la spec 11 §4.4).
+- Documentos corregidos: `02-visual.md` §6.1 y §6.2, `modulos/editor.md`,
+  `docs/usuario/revision.md`. Las specs y documentos de etapas anteriores
+  (`07-etapa5-productividad.md`, `etapa-3.md`) describen la regla de su
+  momento y quedan como historia.
+- **Disco lleno durante la verificación.** La primera corrida completa murió
+  con el disco raíz al 100 %: `target/debug` había vuelto a 54 GB (28 GB
+  de dependencias, 18 GB de cachés incrementales, 6 GB de copias viejas del
+  ejemplo del chat) y la caché de construcción de Docker de otros proyectos
+  del autor sumaba 52 GB. Se borraron `target/debug/incremental` y
+  `target/debug/examples` (24 GB) y la corrida se repitió con
+  `CARGO_INCREMENTAL=0`, que es lo que usa el CI; queda como práctica para
+  las verificaciones completas.
+- **Avisos de seguridad aparecidos en la verificación** (`cargo deny`, no
+  tienen que ver con la ronda): `rustls` 0.23.45 → 0.23.46
+  (RUSTSEC-2026-0346/0347), `rustls-webpki` 0.103.15 → 0.103.16
+  (RUSTSEC-2026-0382), `webpki-roots` 1.0.9 → 1.0.10 (RUSTSEC-2026-0381) y
+  `zip` 2.4.2 → **9.0.5** (RUSTSEC-2026-0367/0368/0369; es dependencia
+  directa de `cincel-acp` y `cincel-connections` para desempaquetar
+  adaptadores; la API que usamos, `ZipArchive::new` / `by_index` /
+  `enclosed_name`, no cambió y compila sin tocar código; `zip` 9 trae `nix`
+  y `typed-path`, licencias aceptadas por `cargo deny`). `zbus_names`,
+  `zvariant` y `zvariant_derive` (RUSTSEC-2026-0370/0371/0372) quedan
+  marcados como "sin mantenimiento" y anotados con motivo en `deny.toml`:
+  son transitivos de `zbus` (portales XDG en Linux, vía gpui) y no hay
+  versión mantenida hasta que gpui suba `zbus`.
+
+### Verificación (R3-I)
+
+Máquina de referencia (Pop!_OS 24.04, COSMIC Wayland), 2026-10-21, siempre
+con `--features cincel-editor/test-support,cincel-workspace/test-support,
+cincel-chat/test-support` en los crates con GPUI, con `CARGO_INCREMENTAL=0`
+(el disco se llenó a mitad de la primera corrida; ver "Desviaciones"):
+
+| Comando | Resultado |
+|---|---|
+| `cargo fmt --all --check` | ok, limpio |
+| `cargo clippy --workspace --all-targets --features … -- -D warnings` | ok, 0 avisos |
+| `cargo test --workspace --features …` | ok: 1667 pasados, 0 fallos, 6 ignorados (los de tiempo) |
+| `cargo deny check licenses advisories bans sources` | ok, tras subir `rustls`, `rustls-webpki`, `webpki-roots` y `zip` y anotar los tres `zbus_*` sin mantenimiento |
+| `cargo run -p cincel -- --smoke-test .` y control de fugas | ok |
+| `cargo build --release -p cincel && --smoke-test --bench .` | ok |
+| `--bench typing` (`cinco-mil.rs`, 200 teclas, dos corridas) | p50 3,8 / 3,7 ms; p95 6,9 / 7,3 ms; máx. 17,3 / 16,9 ms (mejor que la ronda 2: el `prepaint` del pill ya no busca filas con lugar) |
+| `--bench idle` (60 s) | 0 cuadros pintados, 0,0 % de CPU, 210 MB |
+| `tools/privacy-check.sh` (árbol) | ok (0) |
+| `tools/check-links.sh` | ok |
+| `packaging/build.sh` + `packaging/verify.sh` (Ubuntu 22.04 y 24.04) | ok: `.deb` y `.tar.gz` 0.2.2 en `dist/`, `verify.sh: todo bien` en 22.04 y 24.04 (metadatos AppStream validados en los dos); el único hallazgo de privacidad en los paquetes es la firma de OpenSSL dentro del binario, ya conocida |
+| `pgrep -af "sleep\|cincel"; docker ps` | vacíos de lo nuestro (en Docker solo corría un Postgres del autor, ajeno a Cincel) |
+
+
+### Lista de comprobación manual (autor)
+
+1. Panel del editor ancho: la barra de abajo se ve como siempre, con los
+   atajos.
+2. Angostá el panel de a poco: la barra pierde primero los atajos, después
+   las palabras; nunca se corta ni se parte. Tocá "✓" y "≡" en la versión de
+   iconos: hacen lo mismo que antes.
+3. Con cambios del agente pendientes: los botones Aceptar / Rechazar /
+   Comentar están en la línea de arriba del segmento, aunque esa línea tenga
+   texto largo; nunca sobre el segmento.
+4. Un cambio que empiece en la línea 1 del archivo: los botones están en la
+   línea de abajo del segmento.
+5. Un cambio muy largo: bajá hasta que la línea de arriba salga de la vista;
+   los botones no están; `Ctrl+↵` acepta igual; subí y vuelven.
+6. Panel muy angosto: los botones son tres iconos, nítidos, en la línea de
+   arriba.
+7. `cincel --version` dice `cincel 0.2.2`; instalar el `.deb` y repetir 2 y 3.
+8. Commit, push, etiqueta `v0.2.2`, probar el borrador y publicar.
 
 ## Después de la 0.2.0
 
