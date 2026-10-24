@@ -287,12 +287,22 @@ pub fn validate_prompt_blocks(blocks: &[PromptBlock]) -> Result<(), AcpError> {
     Ok(())
 }
 
+/// Opening tag of the review feedback block ([`wrap_review_feedback`]).
+///
+/// The chat recognises a replayed block by this tag and
+/// [`REVIEW_FEEDBACK_CLOSE`], so the text lives only here
+/// (`docs/specs/12-etapa7-ronda4.md` D1).
+pub const REVIEW_FEEDBACK_OPEN: &str = "<user_review_feedback>";
+
+/// Closing tag of the review feedback block ([`wrap_review_feedback`]).
+pub const REVIEW_FEEDBACK_CLOSE: &str = "</user_review_feedback>";
+
 /// Text wrapper the review panel's feedback is sent back to the agent in
 /// (`docs/specs/modulos/acp.md` §Prompt): `ReviewStore::report_for_agent`,
 /// when it returns text, is prepended as its own block.
 #[must_use]
 pub fn wrap_review_feedback(feedback: &str) -> String {
-    format!("<user_review_feedback>\n{feedback}\n</user_review_feedback>")
+    format!("{REVIEW_FEEDBACK_OPEN}\n{feedback}\n{REVIEW_FEEDBACK_CLOSE}")
 }
 
 /// Map a [`AgentCommand::Prompt`]'s blocks (plus optional review feedback,

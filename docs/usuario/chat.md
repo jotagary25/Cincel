@@ -93,6 +93,13 @@ fila desaparece, y no se guarda con la conversación.
   cuando **enviás un mensaje** (así ves lo que mandaste).
 - Abrir una conversación del historial o empezar una nueva te deja al
   final.
+- En una conversación larga, al mover el ratón sobre ella (o al
+  desplazarla) aparece a la derecha una **barra fina**, igual a la del
+  editor; quieta un segundo, se desvanece sola. Podés **arrastrarla** para
+  subir o bajar rápido, o hacer clic en cualquier punto de la barra para
+  saltar ahí. Arrastrarla hacia arriba tiene el mismo efecto que la rueda: el
+  chat deja de seguir la respuesta y aparece "Ir al final". En una
+  conversación corta no hay barra.
 
 ## Bloques de código largos
 

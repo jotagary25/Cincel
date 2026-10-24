@@ -761,6 +761,137 @@ cincel-chat/test-support` en los crates con GPUI, con `CARGO_INCREMENTAL=0`
 7. `cincel --version` dice `cincel 0.2.2`; instalar el `.deb` y repetir 2 y 3.
 8. Commit, push, etiqueta `v0.2.2`, probar el borrador y publicar.
 
+## Ronda 4 (el adjunto de revisión no se muestra al retomar, y barra de desplazamiento en el chat)
+
+Estado: **construida** (2026-10-22), pendiente de la verificación del
+orquestador. Spec: `docs/specs/12-etapa7-ronda4.md`. Versión **0.2.3** (la
+0.2.2 ya estaba publicada: commit `0671999`, etiqueta `v0.2.2`). Dos
+observaciones del autor, las dos en `crates/cincel-chat` (más dos constantes
+en `crates/cincel-acp`), construidas por un solo subagente.
+
+### Qué se construyó
+
+- **El adjunto de revisión no aparece en el chat** (spec 12 §3, R1–R4).
+  `cincel-acp::protocol` exporta `REVIEW_FEEDBACK_OPEN` y
+  `REVIEW_FEEDBACK_CLOSE` (también desde la raíz del crate), y
+  `wrap_review_feedback` las usa; el texto que se manda al agente no cambia.
+  Módulo nuevo `cincel-chat/src/review_feedback.rs`:
+  `strip_review_feedback(&str) -> Option<String>` (D2), que quita cada bloque
+  completo con los saltos de línea que lo separan del resto y deja intacta
+  una apertura sin cierre; `without_review_feedback`, por la que pasa cada
+  `user_message_chunk` de texto en `ChatPanel::handle_event` antes del filtro
+  de la reproducción, haya reproducción o no (R1, R2); y
+  `strip_from_entries`, que `import_transcript` y `load_conversation` aplican
+  a los mensajes del usuario, eliminando el que queda sin bloques (R3). La
+  conversación limpia se guarda en el siguiente guardado normal. Tests:
+  `replay_feedback_tests.rs` (siete unitarios de D2 y siete con el panel:
+  A1, A2 en uno y en dos fragmentos, R2, A4 y A3 al importar y al cargar).
+- **Barra de desplazamiento del chat** (spec 12 §4, R5–R9). Módulo nuevo
+  `cincel-chat/src/scrollbar.rs`: la lista del transcript va dentro de un
+  `v_flex` relativo con un `canvas` absoluto encima, hermano posterior de la
+  lista, que pinta la pista de 8 px en el borde derecho y el pulgar
+  (proporcional, mínimo 24 px, radio 3, `text.muted` al 80 % sobre `bg.app`
+  al 40 %). Aparece al mover el ratón sobre la conversación y cuando el
+  desplazamiento cambia entre un cuadro y el siguiente (rueda, arrastre, "Ir
+  al final", seguimiento de la respuesta); queda 1000 ms y se desvanece en
+  200 ms, salvo durante un arrastre o con el ratón sobre la pista. Arrastrar
+  el pulgar usa `scrollbar_drag_started` / `pause_following_tail` /
+  `set_offset_from_scrollbar` / `scrollbar_drag_ended`; un clic en la pista
+  centra el pulgar ahí y sigue como arrastre hasta soltar. La pulsación sobre
+  la pista visible se detiene en la fase de captura: no llega a las burbujas
+  ni mueve el foco; el cursor ahí es la flecha. Invisible, no pide cuadros.
+  Tests: `scrollbar_tests.rs` (B1 a B6 y la pista que no se desvanece con el
+  ratón encima), con el reloj simulado del ejecutor de GPUI.
+
+### Decisiones del autor (2026-10-22)
+El adjunto de revisión nunca se pinta ni se guarda, pero el agente lo sigue
+recibiendo igual; las conversaciones viejas se limpian al abrirlas, sin
+reescribirlas en ese momento. La barra del chat es la del editor (mismo
+aspecto y mismos tiempos), encima del contenido, sin quitarle ancho.
+
+### Desviaciones
+- **Versión 0.2.3, no dentro de la 0.2.2**: la 0.2.2 se publicó antes de
+  construir esta ronda. Entrada nueva en `CHANGELOG.md` y `<release>` nuevo en
+  el metainfo; la 0.2.2 queda como estaba. Se subió la versión en los mismos
+  lugares que tocó la ronda 3 (`Cargo.toml`, `README.md`,
+  `.github/ISSUE_TEMPLATE/bug_report.yml`, el comentario de
+  `.github/workflows/release.yml`, `docs/publicacion.md`); `Cargo.lock` lo
+  actualizó cargo. `docs/usuario/instalacion.md` no nombra versiones.
+- **Sin cuadro de retraso** (D3): el `canvas` se prepinta después de la
+  lista, así que lee los desplazamientos del cuadro en curso; no hace falta
+  usar los del anterior.
+- **Constantes repetidas** (D4): el chat sí depende de `cincel-editor` (el
+  compositor es un editor), pero el editor no exporta `SCROLLBAR_HOLD` /
+  `SCROLLBAR_FADE` (su módulo `view` es privado) ni el ancho y el pulgar
+  mínimo (`pub(crate)` y privado). Se repiten en `cincel-chat::scrollbar` con
+  los mismos valores, como pide la spec.
+- **Con el ratón quieto sobre la pista no se desvanece** (R6): el editor sí
+  se desvanece en ese caso; el chat sigue la spec. Si el ratón sale de la
+  ventana directamente desde la pista, la barra queda visible hasta el
+  siguiente movimiento (no llega ningún evento antes).
+- **Ancho fijo de 8 px**: no se multiplica por el zoom del chat, igual que la
+  del editor. La pista usa `bg.app` (el fondo del chat) donde el editor usa
+  su propio fondo.
+- **Abrir otra conversación no muestra la barra**: el último desplazamiento
+  se olvida al cargar, importar o limpiar, para que el salto de una
+  conversación a otra no cuente como desplazamiento. El crecimiento de la
+  respuesta mientras se la sigue sí la muestra (R6).
+- **Contador de cuadros**: `ScrollbarState` cuenta los cuadros de animación
+  que pide la barra (un `Rc<Cell<u64>>`, accesor solo de test
+  `scrollbar_frames_requested`), con lo que el test de B3 comprueba R9 sin
+  depender de otros pedidos de cuadro de la ventana.
+- **Features de los tests del subagente**: `cargo test -p cincel-chat -p
+  cincel-acp --features …,cincel-workspace/test-support,…` falla con "none of
+  the selected packages contains this feature: cincel-workspace/test-support"
+  (ninguno de los dos crates depende de `cincel-workspace`); se corrió con
+  `cincel-editor/test-support,cincel-chat/test-support`. La verificación del
+  workspace usa el juego completo.
+
+### Verificación (R4-I)
+
+Máquina de referencia (Pop!_OS 24.04, COSMIC Wayland), 2026-10-22, con
+`CARGO_INCREMENTAL=0` y, en los crates con GPUI,
+`--features cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support`:
+
+| Comando | Resultado |
+|---|---|
+| `cargo fmt --all --check` | ok, limpio |
+| `cargo clippy --workspace --all-targets --features … -- -D warnings` | ok, 0 avisos |
+| `cargo test --workspace --features …` | ok: 1688 pasados (21 más que la ronda 3: los dos archivos nuevos), 0 fallos, 6 ignorados (los de tiempo) |
+| `cargo deny check licenses advisories bans sources` | ok |
+| `cargo run -p cincel -- --smoke-test .` (sin features: el binario no las tiene) | ok, 6 cuadros |
+| `cargo build --release -p cincel && --smoke-test --bench .` | ok, `cincel 0.2.3` |
+| `--bench typing` (`cinco-mil.rs`, 200 teclas) | **no concluyente hoy**: la máquina estaba cargada (load average 4 a 5: un contenedor `auditor-webapp` y Brave del autor); las corridas se pegan a los 16,6 ms de un cuadro de pantalla (p50 3,7 a 16,6 ms, p95 6,7 a 23 ms). Comparación A/B intercalada tres veces con la 0.2.2 instalada en `/usr/bin`: **idéntica** (0.2.2: p50 4,0 / 16,6 / 16,6; 0.2.3: 16,6 / 16,6 / 16,6), así que no hay regresión atribuible a la ronda. Queda en la lista manual repetirlo con la máquina en reposo. |
+| `--bench idle` (60 s) | 0 cuadros pintados, 0,0 % de CPU, 221 MB (210 en la ronda 3) |
+| `tools/privacy-check.sh` (árbol y paquete) | ok; en el historial de git, las dos direcciones conocidas, informativo |
+| `tools/check-links.sh` | ok |
+| `packaging/build.sh` + `packaging/verify.sh` (Ubuntu 22.04 y 24.04) | ok: `.deb` y `.tar.gz` 0.2.3 en `dist/`, `verify.sh: todo bien`, metadatos AppStream validados |
+| `pgrep -af "sleep\|cincel"; docker ps` | vacíos de lo nuestro (en Docker corrían un Postgres y un contenedor `auditor-webapp` del autor, ajenos a Cincel) |
+
+Añadido a la lista manual por la verificación: repetir `--bench typing` dos
+veces seguidas con la máquina en reposo y comparar con la ronda 3 (p95 7 ms).
+
+
+### Lista de comprobación manual (autor)
+
+1. Retomar la conversación del proyecto donde apareció el adjunto gigante: el
+   bloque `</user_review_feedback>` ya no está, ni al abrir ni al retomar.
+2. Rechazar un cambio del agente, mandarle un mensaje, cerrar Cincel, abrir
+   y retomar: el chat muestra solo tu mensaje; el agente respondió respetando
+   el rechazo.
+3. Conversación larga: mover el ratón sobre el chat muestra una barra fina a
+   la derecha; quieto un segundo, desaparece.
+4. Arrastrar el pulgar hasta arriba lleva al principio; soltarlo y usar la
+   rueda sigue funcionando igual.
+5. Clic en la pista, arriba del pulgar: la vista salta ahí.
+6. Con el agente escribiendo, arrastrar hacia arriba: la respuesta no te
+   arrastra hacia abajo y aparece "Ir al final".
+7. Conversación corta: no hay barra.
+8. Con la máquina en reposo (sin contenedores ni navegador pesado), correr dos
+   veces seguidas `cincel --bench typing <corpus>/medio --bench-file
+   <corpus>/medio/bench/cinco-mil.rs`: p95 de alrededor de 7 ms como en la
+   ronda 3; si queda pegado a 16,6 ms, avisar.
+
 ## Después de la 0.2.0
 
 - **2026-10-05: el workflow "Slow tests" falló al compilar.** En la ronda 1 se

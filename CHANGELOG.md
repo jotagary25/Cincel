@@ -3,6 +3,19 @@
 All notable changes to Cincel are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.3] - 2026-10-22
+
+Dos cambios en el chat: al retomar una conversación ya no aparece como
+mensaje tuyo el adjunto de revisión que Cincel le manda al agente (y se
+limpia el que quedó guardado), y la conversación tiene una barra de
+desplazamiento fina, como la del editor.
+
+### Fixed
+- The replayed `<user_review_feedback>` block is no longer shown as a user message on `session/load` nor stored, and conversations saved with it are cleaned on open.
+
+### Added
+- Vertical scrollbar over the chat transcript, with the editor's look and timing (8 px, appears on mouse move or scroll, fades after 1 s; drag the thumb or click the track).
+
 ## [0.2.2] - 2026-10-21
 
 Dos arreglos de la revisión en el editor: la barra flotante de abajo se

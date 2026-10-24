@@ -630,20 +630,34 @@ impl ChatPanel {
                 this.child(div().p_2().child(self.render_empty_state(&theme, cx)))
             })
             .when(!empty, |this| {
+                // The scrollbar is a layer over the list, after it so it
+                // reads this frame's layout (`docs/specs/12-etapa7-ronda4.md`
+                // §4): the list keeps its whole width.
                 this.child(
-                    list(
-                        self.list.clone(),
-                        cx.processor(|this, index: usize, window, cx| {
-                            // Measured inside the list, under the panel's
-                            // text style, as the code blocks inherit it.
-                            let line =
-                                crate::markdown::code_line_height(window, this.settings().scale);
-                            this.render_list_item(index, line, cx)
-                        }),
-                    )
-                    .flex_1()
-                    .min_h(px(0.))
-                    .w_full(),
+                    v_flex()
+                        .relative()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .w_full()
+                        .child(
+                            list(
+                                self.list.clone(),
+                                cx.processor(|this, index: usize, window, cx| {
+                                    // Measured inside the list, under the
+                                    // panel's text style, as the code blocks
+                                    // inherit it.
+                                    let line = crate::markdown::code_line_height(
+                                        window,
+                                        this.settings().scale,
+                                    );
+                                    this.render_list_item(index, line, cx)
+                                }),
+                            )
+                            .flex_1()
+                            .min_h(px(0.))
+                            .w_full(),
+                        )
+                        .child(self.render_scrollbar(&theme, cx)),
                 )
             })
             .children(jump)

@@ -71,6 +71,13 @@
 //!   [`ChatPanel::start_new_conversation`] / [`ChatPanel::load_conversation`].
 //!   While a `session/load` replays history,
 //!   [`ChatPanel::begin_replay`] drops the updates already on screen.
+//!   The review feedback block the workspace prepends to a prompt
+//!   (`<user_review_feedback>`, tags from `cincel_acp::REVIEW_FEEDBACK_OPEN`
+//!   / `REVIEW_FEEDBACK_CLOSE`) is never shown nor stored: a replayed user
+//!   chunk goes through [`strip_review_feedback`] before that filter, replay
+//!   or not, and [`ChatPanel::import_transcript`] /
+//!   [`ChatPanel::load_conversation`] clean the conversations saved with it
+//!   ([`review_feedback`], `docs/specs/12-etapa7-ronda4.md` §3).
 //! - **Transcript**: [`Entry`] is exactly the list of `chat.md` — `UserMessage`,
 //!   `AgentText` (streaming markdown), `AgentThought`, `ToolCall`, `Plan`,
 //!   `Permission`, `AuthRequired`, `Notice`, `TurnSeparator`. A user message is
@@ -89,6 +96,14 @@
 //!   `ReviewStore` has counted the hunks, and tells the panel which project the
 //!   mentions belong to with [`ChatPanel::set_project_root`] so a `@` shows
 //!   `main.rs · src` instead of `/home/…/src/main.rs`.
+//! - **Scrollbar**: a vertical 8 px bar over the right edge of the transcript
+//!   list, with the editor's look and timing ([`scrollbar`]): it appears when
+//!   the mouse moves over the transcript or its content scrolls, stays
+//!   [`scrollbar::SCROLLBAR_HOLD`] and fades out in
+//!   [`scrollbar::SCROLLBAR_FADE`]; the thumb drags (pausing the tail
+//!   follow, like the wheel) and a click on the track centres it there. It
+//!   takes no width from the list and asks for no frames while invisible
+//!   (`docs/specs/12-etapa7-ronda4.md` §4).
 //! - **Theme and settings**: [`ChatTheme`] and [`ChatSettings`] are plain
 //!   `Default` structs (like `cincel_editor::EditorTheme`), hot-reloaded with
 //!   [`ChatPanel::set_theme`] and [`ChatPanel::set_settings`].
@@ -223,6 +238,8 @@ pub mod panel;
 pub mod panel_media;
 pub mod render;
 pub mod render_media;
+pub mod review_feedback;
+pub mod scrollbar;
 pub mod settings;
 pub mod theme;
 
@@ -247,6 +264,10 @@ mod header_badge_tests;
 mod menu_dismiss_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod message_media_order_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod replay_feedback_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod scrollbar_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod transcript_follow_tests;
 
@@ -281,6 +302,7 @@ pub use model::{
 pub use panel::{ChatPanel, Popover};
 pub use panel_media::{AttachmentSource, AttachmentState, PendingAttachment};
 pub use render::provider_icon;
+pub use review_feedback::strip_review_feedback;
 pub use settings::ChatSettings;
 pub use theme::ChatTheme;
 

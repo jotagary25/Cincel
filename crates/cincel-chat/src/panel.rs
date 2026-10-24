@@ -164,6 +164,8 @@ pub struct ChatPanel {
     /// inline code from `window.text_style()` at layout time, which outside a
     /// list is the window default (16 px) instead of the chat's 13 px.
     pub(crate) list: ListState,
+    /// The transcript's scrollbar (`docs/specs/12-etapa7-ronda4.md` §4).
+    pub(crate) scrollbar: crate::scrollbar::ScrollbarState,
     pub(crate) entries: Vec<Entry>,
     /// The rows of the "Conectar" popover, as the workspace last set them.
     pub(crate) connections: Vec<ChatConnection>,
@@ -358,6 +360,7 @@ impl ChatPanel {
             attachments: Vec::new(),
             next_attachment_id: 0,
             image_support: None,
+            scrollbar: crate::scrollbar::ScrollbarState::default(),
             conversation_dir: None,
             pending_comments: Vec::new(),
             media_cache: RefCell::new(crate::panel_media::MediaCache::default()),
@@ -929,6 +932,7 @@ impl ChatPanel {
         self.popover = Popover::Closed;
         // A new (or newly opened) conversation starts at its end, following.
         self.list.set_follow_mode(FollowMode::Tail);
+        self.scrollbar.reset_offset();
         self.set_input_text("", window, cx);
         cx.notify();
     }
@@ -963,6 +967,11 @@ impl ChatPanel {
         // Builds before 0.2.0 stored the replayed mention links (above) as a
         // lone user message: nothing a user can type produces that shape.
         self.entries.retain(|entry| !is_stray_mention_bubble(entry));
+        // Builds before 0.2.3 stored the replayed review feedback block as a
+        // user message (`docs/specs/12-etapa7-ronda4.md` R3); the clean
+        // transcript is written by the next ordinary save.
+        crate::review_feedback::strip_from_entries(&mut self.entries);
+        self.scrollbar.reset_offset();
         self.rebuild_views(cx);
         self.sync_list();
         // Opening a conversation shows its end and follows it (§9, R6).
@@ -1173,10 +1182,16 @@ impl ChatPanel {
                 self.replaying = false;
             }
             AgentEvent::Update { update, .. } => {
+                // The review feedback block is never shown, replayed or not
+                // (`docs/specs/12-etapa7-ronda4.md` R1, R2); what is left of
+                // the chunk is what the replay filter compares.
+                let Some(update) = crate::review_feedback::without_review_feedback(*update) else {
+                    return;
+                };
                 if self.replaying && self.is_already_shown(&update) {
                     return;
                 }
-                self.apply_update(*update, cx);
+                self.apply_update(update, cx);
             }
             AgentEvent::PermissionRequest {
                 id,
@@ -2334,6 +2349,9 @@ impl ChatPanel {
     /// `session/load`").
     pub fn import_transcript(&mut self, dump: TranscriptDump, cx: &mut Context<Self>) {
         self.entries = dump.entries;
+        // Never shown nor kept (`docs/specs/12-etapa7-ronda4.md` R3).
+        crate::review_feedback::strip_from_entries(&mut self.entries);
+        self.scrollbar.reset_offset();
         self.bubble_views.borrow_mut().clear();
         self.expanded_code_blocks.clear();
         self.rebuild_views(cx);
