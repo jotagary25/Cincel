@@ -124,7 +124,14 @@ Detalle, verificación, desviaciones y lista de comprobación manual en
   (`crate::agents::settings_bridge::SettingsBridge`) nunca toca
   `cincel_connections` directamente: emite eventos que `Agents` decide,
   incluidas las actualizaciones de adaptador y de Node con `CancelToken`
-  cancelable desde el propio botón "Cancelar".
+  cancelable desde el propio botón "Cancelar". La búsqueda de
+  actualizaciones corre en el ejecutor de fondo de GPUI; cada actualización
+  corre en su propio hilo (`cincel-update`), que solo llena un canal: una
+  tarea de GPUI lo vacía cada `UPDATE_POLL_INTERVAL` (50 ms) con un
+  temporizador del ejecutor. Ningún hilo ajeno despierta una tarea de GPUI
+  (el planificador de los tests lo rechaza como no determinista). La limpieza
+  de versiones viejas (`cincel-prune`) sigue en su propio hilo porque no le
+  devuelve nada a GPUI.
 - **Modal de atajos y botón de la barra de estado** (`crate::shortcuts_modal`,
   `F1`): mezcla el keymap en vigor con los bindings Rust de los widgets,
   agrupa por categoría (Generales, Editor, Revisión, Chat, Conexiones), marca

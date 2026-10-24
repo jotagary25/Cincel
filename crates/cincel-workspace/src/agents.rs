@@ -90,6 +90,8 @@ mod chat_images;
 pub(crate) use chat_images::dialog_requests;
 /// The Connections section of the settings tab (§4.4 of spec 07).
 mod settings_bridge;
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) use settings_bridge::UPDATE_POLL_INTERVAL;
 
 /// How often the open conversation is written to disk when it changed
 /// (`docs/etapas/etapa-2.md`, "Transcript persistence").

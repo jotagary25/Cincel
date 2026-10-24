@@ -9,6 +9,13 @@
 //! updates ("Actualizar adaptador", "Actualizar Node") run on their own OS
 //! thread with a [`CancelToken`] that "Cancelar" trips.
 //!
+//! No result of a foreign thread ever wakes a GPUI task directly: the update
+//! check runs on the background executor (a thread pool in production, the
+//! test scheduler's own thread in the tests), and the update thread only
+//! fills a channel that a GPUI task drains on an executor timer
+//! ([`UPDATE_POLL_INTERVAL`]). Waking a task from a thread the test
+//! scheduler does not own makes it fail the test as non-deterministic.
+//!
 //! The ACP registry is asked once per session, the first time the
 //! Connections section is on screen, and again with "Buscar
 //! actualizaciones". Old adapter and runtime versions are pruned at start-up
@@ -17,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use cincel_acp::AgentRegistry;
 use cincel_connections::{
@@ -29,6 +37,11 @@ use crate::settings_view::{
     CatalogState, ConnectionsInfo, InstalledAgent, NodeInfo, SettingsView, SettingsViewEvent,
     UpdateOperation, UpdateOutcome, UpdateTarget,
 };
+
+/// How often the GPUI side drains the messages of the update thread. Short
+/// enough that the progress bar looks live, long enough to stay idle-cheap;
+/// the tests advance the executor clock by it.
+pub(crate) const UPDATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Every agent the section can list, in display order.
 const AGENT_KINDS: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity];
@@ -285,22 +298,16 @@ impl Agents {
             self.on_checked(result, cx);
             return;
         }
-        let (sender, receiver) = async_channel::bounded::<CheckResult>(1);
-        let spawned = std::thread::Builder::new()
-            .name("cincel-check-updates".to_string())
-            .spawn(move || {
-                let _ = sender.send_blocking(check(&connections, &loader, force));
-            });
-        if let Err(error) = spawned {
-            tracing::warn!(%error, "no se pudo buscar actualizaciones");
-            self.settings.catalog = CatalogState::Offline;
-            self.push_settings_view(cx);
-            return;
-        }
+        // The blocking network check runs on the background executor, never
+        // on a thread of its own: its completion then wakes the GPUI task
+        // through the executor itself (deterministic under the test
+        // scheduler, which runs it on the test thread).
+        let checking = cx
+            .background_executor()
+            .spawn(async move { check(&connections, &loader, force) });
         self.settings._check_task = Some(cx.spawn(async move |this, cx| {
-            if let Ok(result) = receiver.recv().await {
-                let _ = this.update(cx, |agents, cx| agents.on_checked(result, cx));
-            }
+            let result = checking.await;
+            let _ = this.update(cx, |agents, cx| agents.on_checked(result, cx));
         }));
     }
 
@@ -389,14 +396,34 @@ impl Agents {
             );
             return;
         }
+        // The update thread blocks on the network and on `npm` (and, in the
+        // tests, on a gate the test releases), so it cannot move to the
+        // background executor. It never wakes this task: it only fills the
+        // channel, and the task drains it on an executor timer. Awaiting
+        // `recv()` here would wake a GPUI task from a foreign thread.
         self.settings._update_task = Some(cx.spawn(async move |this, cx| {
-            while let Ok(message) = receiver.recv().await {
+            loop {
+                cx.background_executor().timer(UPDATE_POLL_INTERVAL).await;
+                let mut closed = false;
+                let mut messages = Vec::new();
+                loop {
+                    match receiver.try_recv() {
+                        Ok(message) => messages.push(message),
+                        Err(async_channel::TryRecvError::Empty) => break,
+                        Err(async_channel::TryRecvError::Closed) => {
+                            closed = true;
+                            break;
+                        }
+                    }
+                }
                 let alive = this
                     .update(cx, |agents, cx| {
-                        agents.on_update_message(generation, message, cx)
+                        for message in messages {
+                            agents.on_update_message(generation, message, cx);
+                        }
                     })
                     .is_ok();
-                if !alive {
+                if closed || !alive {
                     break;
                 }
             }

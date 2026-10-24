@@ -87,7 +87,7 @@
   <content_rating type="oars-1.1" />
 
   <releases>
-    <release version="0.2.3" date="2026-10-22">
+    <release version="0.2.3" date="2026-10-24">
       <url>https://github.com/jotagary25/Cincel/releases/tag/v0.2.3</url>
       <description>
         <p>Resuming a conversation no longer shows the review feedback sent to the agent as a user message, and the chat has a thin scrollbar like the editor's.</p>

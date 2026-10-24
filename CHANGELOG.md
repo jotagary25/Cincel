@@ -3,7 +3,7 @@
 All notable changes to Cincel are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.3] - 2026-10-22
+## [0.2.3] - 2026-10-24
 
 Dos cambios en el chat: al retomar una conversación ya no aparece como
 mensaje tuyo el adjunto de revisión que Cincel le manda al agente (y se
@@ -15,6 +15,9 @@ desplazamiento fina, como la del editor.
 
 ### Added
 - Vertical scrollbar over the chat transcript, with the editor's look and timing (8 px, appears on mouse move or scroll, fades after 1 s; drag the thumb or click the track).
+
+### Security
+- tokio updated to 1.54.1 for RUSTSEC-2026-0386 (`AsyncFd` constructors and I/O safety); yoke-derive moved off a yanked release.
 
 ## [0.2.2] - 2026-10-21
 

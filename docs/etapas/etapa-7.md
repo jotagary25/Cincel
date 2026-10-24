@@ -847,6 +847,55 @@ aspecto y mismos tiempos), encima del contenido, sin quitarle ancho.
   `cincel-editor/test-support,cincel-chat/test-support`. La verificación del
   workspace usa el juego completo.
 
+### Arreglo tras el CI (2026-10-23)
+
+- **Falla**: en el CI del push de la 0.2.3, el job `test` falló en
+  `settings_update_e2e_tests::cancelling_a_node_update_leaves_no_leftovers`
+  con el pánico del planificador de tests de GPUI `Detected activity on
+  thread Some("cincel-check-updates") …, but test scheduler is running on …
+  Your test is not deterministic`. En la corrida anterior y en local había
+  pasado: era una carrera.
+- **Causa**: la búsqueda de actualizaciones (`check_updates`,
+  `agents/settings_bridge.rs`) corría en un hilo propio que enviaba el
+  resultado por un `async_channel` mientras una tarea de GPUI esperaba con
+  `recv().await`. Si la tarea alcanzaba a esperar antes de que el hilo
+  terminara, el envío la despertaba desde ese hilo ajeno, y el planificador
+  de los tests lo rechaza. Casi siempre el catálogo falso respondía antes y
+  pasaba por suerte. Las actualizaciones (`start_update`, hilo
+  `cincel-update`) tenían la misma carrera: cada mensaje de progreso y el
+  final despertaban la tarea desde el hilo de la actualización.
+- **Reproducción**: con una espera temporal de 100 ms al principio de
+  `check()` (y, aparte, de `run_update()`) bajo `cfg(test)`,
+  `updating_node_from_the_settings_tab_completes` falla siempre con el mismo
+  mensaje (hilos `cincel-check-updates` y `cincel-update`). La espera se
+  quitó después.
+- **Arreglo**: la búsqueda corre ahora en el ejecutor de fondo de GPUI
+  (`cx.background_executor().spawn`): en producción es un grupo de hilos,
+  aceptable para una consulta de red puntual, y en los tests corre en el
+  hilo del planificador. La actualización sigue en su propio hilo, porque
+  bloquea en la red y en `npm` (y, en los tests, en la compuerta que el test
+  libera), pero ya no despierta a nadie: solo llena el canal, y la tarea de
+  GPUI lo vacía con `try_recv` cada `UPDATE_POLL_INTERVAL` (50 ms) usando un
+  temporizador del ejecutor. "Actualizando…", "Cancelar", `generation` y
+  `CancelToken` no cambian, y sin `background` todo sigue corriendo en el
+  momento. El único cambio visible en producción es que el progreso puede
+  llegar hasta 50 ms más tarde. La limpieza de versiones (`cincel-prune`)
+  no devuelve nada a GPUI y se dejó como estaba.
+- **Tests**: `wait_for_info` avanza el reloj del ejecutor en
+  `UPDATE_POLL_INTERVAL` en cada vuelta (sin eso el temporizador no vence en
+  los tests). Dos tests de regresión nuevos en
+  `settings_update_e2e_tests.rs`:
+  `a_slow_update_check_reaches_the_tab_without_a_foreign_wake` (el catálogo
+  tarda 200 ms en responder) y
+  `a_held_node_update_finishes_without_a_foreign_wake` (la descarga espera
+  una compuerta que el test libera cuando GPUI ya está esperando, y después
+  termina de verdad). Con el código anterior los dos fallan siempre con el
+  pánico del CI; con el arreglo pasan.
+- **Desviación**: el test de regresión de la búsqueda no usa una compuerta
+  que el test libera, sino una espera fija de 200 ms. Con el arreglo la
+  búsqueda corre en el hilo del test dentro de `run_until_parked`, así que
+  una compuerta liberada después de `run_until_parked` bloquearía el test.
+
 ### Verificación (R4-I)
 
 Máquina de referencia (Pop!_OS 24.04, COSMIC Wayland), 2026-10-22, con
@@ -867,6 +916,20 @@ Máquina de referencia (Pop!_OS 24.04, COSMIC Wayland), 2026-10-22, con
 | `tools/check-links.sh` | ok |
 | `packaging/build.sh` + `packaging/verify.sh` (Ubuntu 22.04 y 24.04) | ok: `.deb` y `.tar.gz` 0.2.3 en `dist/`, `verify.sh: todo bien`, metadatos AppStream validados |
 | `pgrep -af "sleep\|cincel"; docker ps` | vacíos de lo nuestro (en Docker corrían un Postgres y un contenedor `auditor-webapp` del autor, ajenos a Cincel) |
+
+**Re-verificación tras el arreglo del CI (2026-10-24, misma máquina, mismas
+features, `CARGO_INCREMENTAL=0`)**, con `tokio` 1.54.1 y el arreglo de
+`settings_bridge`:
+
+| Comando | Resultado |
+|---|---|
+| `cargo fmt --all --check` / `cargo clippy … -D warnings` | ok / 0 avisos |
+| `cargo test --workspace --features …` | primera corrida: 1 fallo, `cincel_syntax::tests::rust_5000_lines_parses_cold_and_reparses_fast` (presupuesto de tiempo: análisis en frío < 30 ms, reanálisis < 2 ms) con la máquina cargada y el disco al límite; solo, pasa 3 de 3; la corrida completa repetida con `--no-fail-fast`: **1690 pasados, 0 fallos, 6 ignorados** (2 más que antes del arreglo: los tests de regresión de la carrera) |
+| `cargo deny check licenses advisories bans sources` | ok (RUSTSEC-2026-0386 resuelto con `tokio` 1.54.1) |
+| smoke test de depuración y de release | ok, `cincel 0.2.3` |
+| `--bench idle` (60 s) | 0 cuadros pintados, 0,0 % de CPU, 220 MB |
+| `tools/privacy-check.sh` / `tools/check-links.sh` | ok (en el historial, las dos direcciones conocidas) |
+| `packaging/build.sh` + `packaging/verify.sh` | ok en Ubuntu 22.04 y 24.04; paquetes 0.2.3 nuevos en `dist/` |
 
 Añadido a la lista manual por la verificación: repetir `--bench typing` dos
 veces seguidas con la máquina en reposo y comparar con la ronda 3 (p95 7 ms).

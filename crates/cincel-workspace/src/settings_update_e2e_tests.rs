@@ -20,6 +20,14 @@
 //! `settings_view_tests.rs`'s `a_newer_adapter_in_the_registry_is_offered_and_installed`;
 //! this file adds the two cases that were still missing: Node's own update
 //! completing for real, and cancelling either kind mid-flight.
+//!
+//! The update thread never wakes a GPUI task: it fills a channel that
+//! `Agents` drains on an executor timer (`UPDATE_POLL_INTERVAL`), so a test
+//! waiting for an update's result advances the executor clock
+//! ([`wait_for_info`]) instead of only running until parked. The two
+//! regression tests at the end hold back the update check and an update
+//! until the GPUI side is already waiting, the exact interleaving that made
+//! the test scheduler report "Your test is not deterministic" in the CI.
 
 use std::path::Path;
 use std::sync::mpsc;
@@ -33,6 +41,7 @@ use cincel_connections::{
 use cincel_settings::Config;
 use gpui::{Entity, TestAppContext, VisualTestContext};
 
+use crate::agents::UPDATE_POLL_INTERVAL;
 use crate::project::ProjectOptions;
 use crate::settings_view::{SettingsView, SettingsViewEvent, UpdateTarget};
 use crate::test_support::{FakeEnv, isolate_state};
@@ -299,8 +308,8 @@ fn updating_node_from_the_settings_tab_completes(cx: &mut TestAppContext) {
     let engine = node_engine(&env, Box::new(downloader));
     let (_workspace, view, cx) = connections_window(engine.clone(), stable_registry(), cx);
 
-    // The update check runs on a real OS thread (`watch_files: true`), so a
-    // single `run_until_parked` is not enough on a slow, shared machine.
+    // The update check runs on the background executor, deterministic here;
+    // `wait_for_info` is the same helper the install below needs.
     let info = wait_for_info(&view, cx, |info| info.node.update.is_some());
     assert_eq!(info.node.installed.as_deref(), Some(INSTALLED_NODE_VERSION));
     assert_eq!(
@@ -333,8 +342,10 @@ fn updating_node_from_the_settings_tab_completes(cx: &mut TestAppContext) {
 }
 
 /// Polls the connections info until `done` holds, or for ten seconds: the
-/// update check and the installs run on real threads here, and the CI's
-/// shared runners can take a while to schedule them.
+/// installs run on real threads here, and the CI's shared runners can take a
+/// while to schedule them. Each round advances the executor clock by
+/// `UPDATE_POLL_INTERVAL`, which is what lets `Agents` drain the update
+/// thread's channel (and runs everything else until parked).
 fn wait_for_info(
     view: &Entity<SettingsView>,
     cx: &mut VisualTestContext,
@@ -342,7 +353,7 @@ fn wait_for_info(
 ) -> crate::settings_view::ConnectionsInfo {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        cx.run_until_parked();
+        cx.executor().advance_clock(UPDATE_POLL_INTERVAL);
         let info = view.read_with(cx, |view, _| view.connections_info().clone());
         if done(&info) || std::time::Instant::now() >= deadline {
             return info;
@@ -495,5 +506,116 @@ fn cancelling_an_adapter_update_leaves_the_old_version_installed(cx: &mut TestAp
         engine.adapters().installed("claude-acp").as_deref(),
         Some("0.0.1"),
         "la versión instalada no cambió"
+    );
+}
+
+// ------------------------------------------------- determinism (CI 0.2.3)
+
+/// How long [`SlowRegistryLoader`] holds the update check back: far longer
+/// than the GPUI side needs to start waiting for it.
+const SLOW_CHECK: Duration = Duration::from_millis(200);
+
+/// Regression (CI of the 0.2.3 release): the registry answers only after the
+/// GPUI side is already waiting for the check. When the check ran on its own
+/// thread, its answer woke the waiting GPUI task from that thread and the
+/// test scheduler failed the test as non-deterministic; on the background
+/// executor the check runs on the scheduler's own thread.
+#[gpui::test]
+fn a_slow_update_check_reaches_the_tab_without_a_foreign_wake(cx: &mut TestAppContext) {
+    init_test(cx);
+    let env = FakeEnv::new();
+    let downloader = NodeDownloader(NodeIndex::new(NODE_VERSION, &platform_key()));
+    let engine = node_engine(&env, Box::new(downloader));
+    let (workspace, cx) = workspace_window(cx);
+    let agents = workspace.read_with(cx, |workspace, _| workspace.agents().clone());
+    let registry = stable_registry();
+    agents.update(cx, |agents, cx| {
+        agents.set_registry_loader(std::sync::Arc::new(move |_| {
+            std::thread::sleep(SLOW_CHECK);
+            Ok(registry.clone())
+        }));
+        agents.set_connections(engine, cx);
+    });
+    cx.update(|window, cx| window.dispatch_action(Box::new(crate::actions::OpenConnections), cx));
+    cx.run_until_parked();
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.center().read(cx).settings_view().cloned()
+        })
+        .expect("la pestaña de configuración está abierta");
+
+    let info = wait_for_info(&view, cx, |info| {
+        info.catalog == crate::settings_view::CatalogState::Checked
+    });
+    assert_eq!(info.catalog, crate::settings_view::CatalogState::Checked);
+    assert_eq!(info.node.update.as_deref(), Some(NODE_VERSION));
+}
+
+/// [`NodeDownloader`] whose archive body waits for the test to release it,
+/// then serves the release normally: the update finishes for real, but only
+/// once the GPUI side is provably waiting for it.
+struct HeldNodeDownloader {
+    inner: NodeDownloader,
+    /// `Mutex` only to make the type `Sync` (`Downloader` requires it).
+    gate: std::sync::Mutex<mpsc::Receiver<()>>,
+}
+
+impl Downloader for HeldNodeDownloader {
+    fn get_bytes(&self, url: &str) -> cincel_connections::Result<Vec<u8>> {
+        self.inner.get_bytes(url)
+    }
+
+    fn open(&self, url: &str, offset: u64) -> cincel_connections::Result<RangeBody> {
+        self.gate
+            .lock()
+            .expect("gate lock")
+            .recv_timeout(GATE_TIMEOUT)
+            .expect("la prueba tenía que liberar la descarga antes del tiempo límite");
+        self.inner.open(url, offset)
+    }
+}
+
+/// Regression (CI of the 0.2.3 release): the update thread reports its
+/// progress and its end only after the GPUI side is waiting for them. When
+/// the GPUI task awaited the channel, every message woke it from the update
+/// thread and the test scheduler failed the test as non-deterministic; the
+/// task now drains the channel on an executor timer.
+#[gpui::test]
+fn a_held_node_update_finishes_without_a_foreign_wake(cx: &mut TestAppContext) {
+    init_test(cx);
+    let env = FakeEnv::new();
+    let (tx, rx) = mpsc::channel();
+    let downloader = HeldNodeDownloader {
+        inner: NodeDownloader(NodeIndex::new(NODE_VERSION, &platform_key())),
+        gate: std::sync::Mutex::new(rx),
+    };
+    let engine = node_engine(&env, Box::new(downloader));
+    let (_workspace, view, cx) = connections_window(engine.clone(), stable_registry(), cx);
+    let info = wait_for_info(&view, cx, |info| info.node.update.is_some());
+    assert_eq!(info.node.update.as_deref(), Some(NODE_VERSION));
+
+    view.update(cx, |view, cx| {
+        view.request(SettingsViewEvent::UpdateNode, cx)
+    });
+    // The GPUI side is now waiting; only then does the download go on.
+    cx.run_until_parked();
+    assert!(
+        view.read_with(cx, |view, _| view.connections_info().operation.is_some()),
+        "«Actualizando…» tiene que estar en curso mientras la descarga está frenada"
+    );
+    tx.send(())
+        .expect("el hilo de la actualización espera la descarga");
+
+    let info = wait_for_info(&view, cx, |info| {
+        info.operation.is_none() && info.node.installed.as_deref() == Some(NODE_VERSION)
+    });
+    assert!(info.operation.is_none(), "la actualización terminó");
+    assert_eq!(info.node.installed.as_deref(), Some(NODE_VERSION));
+    assert_eq!(
+        engine
+            .runtime()
+            .installed()
+            .map(|installed| installed.version),
+        Some(NODE_VERSION.to_string())
     );
 }
