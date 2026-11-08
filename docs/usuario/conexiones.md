@@ -129,3 +129,16 @@ No hay límite: podés tener, por ejemplo, "Claude · personal" y
 "Claude · trabajo" con cuentas distintas, cada una en su propia carpeta
 aislada. Cambiar entre ellas es elegir la fila correspondiente en
 **Conectar**.
+
+## Las conversaciones no comparten memoria
+
+Cada conversación empieza de cero: lo que se habló en una no aparece en otra.
+Para lograrlo, Cincel apaga en cada arranque del agente la memoria propia de
+Claude (las notas que guarda por su cuenta) y la de Codex (sus memorias y el
+historial persistente). Los archivos `CLAUDE.md` y `AGENTS.md` del proyecto se
+siguen respetando, porque son del usuario y no memoria del agente.
+
+Antigravity es la excepción: guarda su conocimiento del lado de Google y no
+ofrece ningún interruptor para apagarlo, así que Cincel no puede aislarlo.
+Las notas que Claude ya había guardado antes en la carpeta de una conexión no
+se borran solas.

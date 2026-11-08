@@ -87,6 +87,8 @@ mod menu_dismiss_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod modal_scroll_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod new_conversation_review_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod pending_review_close_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod review_binary_exclusion_tests;

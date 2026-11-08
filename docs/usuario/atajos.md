@@ -127,6 +127,8 @@ Y, con el foco en el campo **"Reemplazar…"**:
 | `Ctrl+J` | Unir la línea con la siguiente |
 | `Ctrl+Shift+\`, `Ctrl+|` | Ir al paréntesis o llave que corresponde |
 
+En la primera fila `↑` lleva el cursor al inicio de la fila y en la última `↓` lo lleva al final (también en el cuadro del chat); con `Shift` extienden la selección hasta ahí. Con una fila envuelta cuenta la fila visual.
+
 Algunas de estas teclas hacen algo más según dónde estés. Sin nada
 seleccionado, `Ctrl+C` y `Ctrl+X` copian o cortan la línea entera, y
 `Ctrl+V` la pega como línea nueva arriba de la del cursor. Al escribir `}`,

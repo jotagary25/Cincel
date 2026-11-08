@@ -1036,10 +1036,11 @@ fn sent_comments_disappear_and_never_repeat(cx: &mut TestAppContext) {
 
 // ===================================================================== k
 
-/// k) Switching connection with unsent comments: they stay and leave with
-/// the next message, to the new connection.
+/// k) Switching connection starts a new conversation (spec 13 §3.1): the
+/// unsent comments belonged to the old one and are dropped, so the next
+/// message to the other agent carries none.
 #[gpui::test]
-fn comments_follow_the_next_message_after_switching_connection(cx: &mut TestAppContext) {
+fn switching_connection_drops_the_unsent_comments(cx: &mut TestAppContext) {
     init(cx);
     let fixture = Fixture::new(&[("util.py", UTIL.as_bytes())]);
     let util = fixture.path("util.py");
@@ -1053,9 +1054,10 @@ fn comments_follow_the_next_message_after_switching_connection(cx: &mut TestAppC
 
     let editor = open(&parts, &util, cx);
     comment_line(&editor, 0, "Ordená los imports.", cx);
+    assert_eq!(comment_count(&parts, cx), 1);
     select(&parts, &other.to_string(), cx);
-    assert_eq!(comment_count(&parts, cx), 1, "siguen pendientes");
-    assert_eq!(tags(&parts, cx), vec!["util.py:1".to_string()]);
+    assert_eq!(comment_count(&parts, cx), 0, "son de la conversación vieja");
+    assert!(tags(&parts, cx).is_empty());
     assert_eq!(
         parts.chat.read_with(cx, |chat, _| chat
             .active_connection()
@@ -1064,16 +1066,7 @@ fn comments_follow_the_next_message_after_switching_connection(cx: &mut TestAppC
     );
 
     send_turn(&parts, "a la otra", cx);
-    assert_eq!(
-        fixture.last_feedback().as_deref(),
-        Some(
-            block(&format!(
-                "{SECTION}\n\nComment 1 of 1\nFile: util.py\nLine: 1\nReview state: no change of yours (the user selected these lines)\nCurrent code:\n```py\nimport os\n```\nComment:\nOrdená los imports."
-            ))
-            .as_str()
-        )
-    );
-    assert_eq!(comment_count(&parts, cx), 0);
+    assert_eq!(fixture.last_feedback(), None);
 }
 
 // ===================================================================== l

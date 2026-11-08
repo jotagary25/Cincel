@@ -704,7 +704,7 @@ pub struct EditorView {
     pub(crate) cursor: DisplayPoint,
     pub(crate) selection_anchor: DisplayPoint,
     /// Column the cursor tries to keep while moving up and down.
-    goal_column: Option<u32>,
+    pub(crate) goal_column: Option<u32>,
 
     pub(crate) scroll_top: f32,
     /// Vertical scroll asked for before the first layout, in display rows: the
@@ -2412,7 +2412,18 @@ impl EditorView {
         let (wrap_row, column) = self.point_to_wrap(self.cursor);
         let goal = self.goal_column.unwrap_or(column);
         let target = (wrap_row as i64 + rows).clamp(0, self.wrap_row_count() as i64 - 1) as WrapRow;
-        self.cursor = self.clip_point(self.wrap_to_point(target, goal));
+        // Up on the first visual row and Down on the last go to the edge of
+        // that row (column 0 / its end) and the goal column restarts there.
+        let at_edge = target == wrap_row && rows != 0;
+        let goal = if at_edge {
+            let edge = if rows < 0 { 0 } else { u32::MAX };
+            let point = self.clip_point(self.wrap_to_point(target, edge));
+            self.cursor = point;
+            self.point_to_wrap(point).1
+        } else {
+            self.cursor = self.clip_point(self.wrap_to_point(target, goal));
+            goal
+        };
         if !extend {
             self.selection_anchor = self.cursor;
         }

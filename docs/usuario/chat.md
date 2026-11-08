@@ -47,6 +47,10 @@ Sin ninguna conexión activa, en lugar de todo esto ves el botón
 - Si escribís **`@`**, se abre una lista de archivos de tu proyecto para
   mencionar uno. Con **`/`** se abre la lista de comandos que ofrece el
   agente.
+- En la conversación, cada archivo mencionado se ve como una **ficha** con
+  su nombre. Un clic en la ficha abre el archivo en el editor. Podés
+  seleccionar y copiar el texto del mensaje con las fichas incluidas: cada
+  ficha se copia como `@nombre`.
 - **`Esc`** cancela lo que el agente esté haciendo en ese momento.
 - **`Ctrl+Shift+N`** empieza una conversación nueva; el reloj de arriba abre
   el historial de conversaciones.
@@ -95,7 +99,8 @@ fila desaparece, y no se guarda con la conversación.
   final.
 - En una conversación larga, al mover el ratón sobre ella (o al
   desplazarla) aparece a la derecha una **barra fina**, igual a la del
-  editor; quieta un segundo, se desvanece sola. Podés **arrastrarla** para
+  editor, un poco separada del borde: el borde mismo sigue sirviendo para
+  ensanchar o angostar el panel aunque la barra esté visible; quieta un segundo, se desvanece sola. Podés **arrastrarla** para
   subir o bajar rápido, o hacer clic en cualquier punto de la barra para
   saltar ahí. Arrastrarla hacia arriba tiene el mismo efecto que la rueda: el
   chat deja de seguir la respuesta y aparece "Ir al final". En una

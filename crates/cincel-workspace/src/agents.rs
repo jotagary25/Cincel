@@ -825,6 +825,10 @@ impl Agents {
         self.sync_conversation_dir(cx);
         self.last_saved_conversation = None;
         self.pending_load = None;
+        // The queue of rejected patches and unsent comments belonged to the
+        // old conversation; the new one starts clean.
+        self.review
+            .update(cx, |review, cx| review.discard_pending_feedback(cx));
         if self.connection.is_some() && self.capabilities.is_some() {
             // The process is fine and already initialized; only the session
             // has to start over.

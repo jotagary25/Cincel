@@ -822,10 +822,12 @@ impl ChatPanel {
     ///
     /// The text is **Markdown**, painted by the same renderer as the agent's
     /// answers (lists, bold, inline code, fenced blocks with the code-block
-    /// look). A paragraph that holds a mention is the exception: it is laid
-    /// out as a flow of plain text and inline chips, the chip painted **where
-    /// it was typed** (`docs/etapas/etapa-2.md` § correcciones); every other
-    /// paragraph goes through Markdown ([`user_pieces`]).
+    /// look). A paragraph that holds a mention is the exception: its text is
+    /// taken literally and the chip painted **where it was typed**
+    /// (`docs/etapas/etapa-2.md` § correcciones), all in one selectable
+    /// `TextView` with the chips as inline elements ([`ChipPlugin`],
+    /// `docs/specs/13-etapa7-ronda5.md` D4); every other paragraph goes
+    /// through Markdown ([`user_pieces`]).
     ///
     /// The text wraps at the bubble's width, and a long token with no spaces
     /// breaks mid-word: every piece is `min_w_0`, since the min-content width
@@ -879,52 +881,35 @@ impl ChatPanel {
                         .into_any_element()
                 }
                 UserPiece::Flow(parts) => {
-                    // The chip carries its own margins instead of the row
-                    // carrying a gap, so `@main.rs, ¿qué te parece?` keeps
-                    // the comma glued to the chip the way the author typed it.
-                    let count = parts.len();
-                    let items: Vec<AnyElement> = parts
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(part_ix, part)| match part {
-                            FlowPart::Text(text) => {
-                                let text = text.trim();
-                                (!text.is_empty()).then(|| {
-                                    div()
-                                        .min_w(px(0.))
-                                        .max_w_full()
-                                        .whitespace_normal()
-                                        .child(SharedString::from(text.to_string()))
-                                        .into_any_element()
-                                })
-                            }
-                            FlowPart::File(path) => {
-                                let glued = matches!(
-                                    parts.get(part_ix + 1),
-                                    Some(FlowPart::Text(text))
-                                        if text.trim_start().starts_with(is_closing_punctuation)
-                                );
-                                Some(
-                                    file_chip(
-                                        ("message-chip", index * 4096 + position * 64 + part_ix),
-                                        path,
-                                        root.as_deref(),
-                                        &theme,
-                                        &s,
-                                    )
-                                    .when(part_ix > 0, |this| this.ml_1())
-                                    .when(!glued && part_ix + 1 < count, |this| this.mr_1())
-                                    .into_any_element(),
-                                )
-                            }
-                        })
-                        .collect();
-                    h_flex()
+                    // One selectable text with the chips inside it
+                    // (`docs/specs/13-etapa7-ronda5.md` D4): the text is
+                    // escaped Markdown and each chip a link the plugin turns
+                    // into an inline element, cached like the other pieces.
+                    let (source, files) = flow_markdown(&parts);
+                    let view = self.bubble_view(index, position, 0, &source, cx);
+                    let plugin = ChipPlugin {
+                        files: files.into(),
+                        root: root.clone(),
+                        theme,
+                        settings: s,
+                        panel: cx.entity().downgrade(),
+                        entry: index,
+                        piece: position,
+                    };
+                    div()
+                        .w_full()
                         .min_w(px(0.))
-                        .max_w_full()
-                        .flex_wrap()
-                        .items_center()
-                        .children(items)
+                        .debug_selector(move || format!("user-flow-{index}-{position}"))
+                        .child(
+                            markdown_element_scaled(
+                                &view,
+                                &theme,
+                                s.scale,
+                                self.highlighter(),
+                                self.copy_handler(cx),
+                            )
+                            .plugin(plugin),
+                        )
                         .into_any_element()
                 }
             })
@@ -2566,8 +2551,152 @@ fn file_chip(
         .child(chip_label(path))
 }
 
+/// Name of the custom Markdown node a chip becomes inside a flow paragraph.
+const CHIP_NODE: &str = "cincel-chip";
+/// Link destination prefix that marks a chip in a flow paragraph's source;
+/// the chip's index in the paragraph follows it.
+const CHIP_URL: &str = "cincel-chip:";
+
+/// The Markdown source of a [`UserPiece::Flow`] paragraph and its files, in
+/// order. The text is escaped so it reads literally (as the plain runs it
+/// replaced did) with its line breaks kept; each chip is a link to
+/// `cincel-chip:N` that [`ChipPlugin`] turns into the chip. The spacing is
+/// the old flow's: every text run trimmed, one space between a chip and its
+/// neighbours except before closing punctuation, which stays glued.
+pub(crate) fn flow_markdown(parts: &[FlowPart]) -> (String, Vec<std::path::PathBuf>) {
+    let mut source = String::new();
+    let mut files = Vec::new();
+    // Whether something was written that the next chip must be spaced from.
+    let mut after_chip = false;
+    for part in parts {
+        match part {
+            FlowPart::Text(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if after_chip && !text.starts_with(is_closing_punctuation) {
+                    source.push(' ');
+                }
+                escape_markdown_into(text, &mut source);
+                after_chip = false;
+            }
+            FlowPart::File(path) => {
+                if !source.is_empty() {
+                    source.push(' ');
+                }
+                source.push('[');
+                escape_markdown_into(&chip_label(path), &mut source);
+                source.push_str("](");
+                source.push_str(CHIP_URL);
+                source.push_str(&files.len().to_string());
+                source.push(')');
+                files.push(path.clone());
+                after_chip = true;
+            }
+        }
+    }
+    (source, files)
+}
+
+/// Appends `text` to `out` so that Markdown reads it literally: every ASCII
+/// punctuation character is backslash-escaped (CommonMark allows it for all
+/// of them), each line break becomes a hard break and the indentation of a
+/// line is dropped (Markdown would drop it anyway).
+fn escape_markdown_into(text: &str, out: &mut String) {
+    for (ix, line) in text.split('\n').enumerate() {
+        if ix > 0 {
+            out.push_str("\\\n");
+        }
+        for ch in line.trim_start().trim_end_matches('\r').chars() {
+            if ch.is_ascii_punctuation() {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+    }
+}
+
+/// Turns the `cincel-chip:N` links of a flow paragraph into the file chips
+/// they stand for, as inline elements of the paragraph's `TextView`: the
+/// chip looks as it always did, opens its file on click
+/// ([`crate::ChatEvent::OpenFileAtHunk`]) and is copied as `@name`.
+struct ChipPlugin {
+    files: Arc<[std::path::PathBuf]>,
+    root: Option<std::path::PathBuf>,
+    theme: ChatTheme,
+    settings: ChatSettings,
+    panel: gpui::WeakEntity<ChatPanel>,
+    /// Entry and piece of the paragraph, for unique element ids.
+    entry: usize,
+    piece: usize,
+}
+
+impl gpui_kit::base::MarkdownPlugin for ChipPlugin {
+    fn name(&self) -> &str {
+        CHIP_NODE
+    }
+
+    fn parse(
+        &self,
+        node: &gpui_kit::base::markdown_ast::Node,
+        _cx: &gpui_kit::base::MarkdownParseContext<'_>,
+    ) -> Option<gpui_kit::base::MarkdownNode> {
+        let gpui_kit::base::markdown_ast::Node::Link(link) = node else {
+            return None;
+        };
+        let ix: usize = link.url.strip_prefix(CHIP_URL)?.parse().ok()?;
+        let label = chip_label(self.files.get(ix)?);
+        Some(
+            gpui_kit::base::MarkdownNode::new(CHIP_NODE, ix)
+                .text(label.clone())
+                .markdown(label),
+        )
+    }
+
+    fn render_inline(
+        &self,
+        node: &gpui_kit::base::MarkdownNode,
+        context: &gpui_kit::base::InlineRenderContext,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<gpui_kit::base::InlineElement> {
+        let ix = *node.data::<usize>()?;
+        let path = self.files.get(ix)?.clone();
+        let s = self.settings;
+        // The chip's box is one line of the paragraph tall: its own padding
+        // (`py_0p5`) around a line of small text whose baseline lines up
+        // with the paragraph's.
+        let font_size = s.px(TEXT_SMALL);
+        let padding = context.rem_size() * 0.125;
+        let inner = (context.line_height() - padding * 2.).max(font_size);
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&context.text_style().font());
+        let baseline = padding + text_system.baseline_offset(font_id, font_size, inner);
+        let (entry, piece) = (self.entry, self.piece);
+        let panel = self.panel.clone();
+        let open = path.clone();
+        let chip = file_chip(
+            ("message-chip", entry * 4096 + piece * 64 + ix),
+            &path,
+            self.root.as_deref(),
+            &self.theme,
+            &s,
+        )
+        .debug_selector(move || format!("message-chip-{entry}-{piece}-{ix}"))
+        .line_height(inner)
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            panel
+                .update(cx, |panel, cx| panel.open_file_at_hunk(open.clone(), cx))
+                .ok();
+        });
+        Some(gpui_kit::base::InlineElement::new(chip).with_baseline(baseline))
+    }
+}
+
 /// Punctuation that belongs to the word before it, so a chip followed by it
-/// gets no trailing margin.
+/// gets no space after it.
 fn is_closing_punctuation(ch: char) -> bool {
     matches!(
         ch,

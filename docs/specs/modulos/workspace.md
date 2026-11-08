@@ -272,7 +272,13 @@ Detalle, verificación, desviaciones y lista de comprobación manual en
     Si el mensaje salió, no vuelven aunque el turno falle (igual que los
     parches).
   - *Conexión y conversación*: los comentarios son de la ventana, no de la
-    conexión; cambiar de conexión o empezar otra conversación no los toca.
+    conexión. Empezar una conversación nueva, también al cambiar de conexión
+    (`Agents::begin_conversation`) llama `Review::discard_pending_feedback`:
+    descarta los comentarios sin enviar (con sus marcas del margen y sus
+    etiquetas del chat) y los informes de parches aún no enviados
+    (`reportable` y sus registros por turno), sin tocar los segmentos en
+    revisión ni el estado de los archivos. Retomar una conversación guardada
+    no descarta nada.
   - *Contadores*: `SharedSummary` suma `comments` y `comments_per_file`. La
     barra de estado dice "3 cambios pendientes · 2 comentarios" (o "2
     comentarios", o "1 comentario" solo; `status_label`) con el mismo botón de

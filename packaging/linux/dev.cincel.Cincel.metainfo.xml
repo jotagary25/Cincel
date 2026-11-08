@@ -87,6 +87,12 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.4" date="2026-11-07">
+      <url>https://github.com/jotagary25/Cincel/releases/tag/v0.2.4</url>
+      <description>
+        <p>Las conversaciones arrancan de cero: una conversación nueva no arrastra los parches ni los comentarios de la anterior, y Claude y Codex se lanzan con su memoria persistente apagada. La barra del chat ya no tapa el asa para ensanchar el panel, los párrafos con referencias a archivos se pueden seleccionar y copiar, y Arriba/Abajo en la primera o última línea van al principio o al final.</p>
+      </description>
+    </release>
     <release version="0.2.3" date="2026-10-24">
       <url>https://github.com/jotagary25/Cincel/releases/tag/v0.2.3</url>
       <description>

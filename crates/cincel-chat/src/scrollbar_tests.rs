@@ -18,7 +18,8 @@ use crate::actions::bind_default_keys;
 use crate::model::*;
 use crate::panel::ChatPanel;
 use crate::scrollbar::{
-    SCROLLBAR_FADE, SCROLLBAR_HOLD, SCROLLBAR_MIN_THUMB, SCROLLBAR_WIDTH, ScrollbarGeometry,
+    SCROLLBAR_FADE, SCROLLBAR_HOLD, SCROLLBAR_INSET, SCROLLBAR_MIN_THUMB, SCROLLBAR_WIDTH,
+    ScrollbarGeometry,
 };
 use crate::settings::ChatSettings;
 use crate::theme::ChatTheme;
@@ -213,7 +214,7 @@ fn b1_a_short_transcript_has_no_scrollbar(cx: &mut TestAppContext) {
 }
 
 /// B2: a long transcript shows no bar until the mouse moves over it; then
-/// an 8 px track against the transcript's right edge and a proportional
+/// an 8 px track 6 px in from the transcript's right edge and a proportional
 /// thumb where the scroll is.
 #[gpui::test]
 fn b2_the_mouse_shows_a_proportional_thumb(cx: &mut TestAppContext) {
@@ -237,9 +238,10 @@ fn b2_the_mouse_shows_a_proportional_thumb(cx: &mut TestAppContext) {
         SCROLLBAR_WIDTH,
         0.01
     ));
+    // `docs/specs/13-etapa7-ronda5.md` R5: 6 px in from the edge.
     assert!(close(
         f32::from(bar.track.right()),
-        f32::from(transcript.right()),
+        f32::from(transcript.right()) - SCROLLBAR_INSET,
         0.5
     ));
     assert!(close(

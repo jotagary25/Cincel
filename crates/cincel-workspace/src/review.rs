@@ -695,6 +695,22 @@ impl Review {
         }
     }
 
+    /// A new conversation starts from scratch: drops what was waiting to
+    /// travel with the next prompt (the closed turns' patch reports and the
+    /// unsent comments) without touching the hunks under review, the file
+    /// statuses or the persisted review of the files. Whatever the user
+    /// decides afterwards belongs to the new conversation.
+    pub fn discard_pending_feedback(&mut self, cx: &mut Context<Self>) {
+        // A turn whose file is still pending keeps a record rebased on the
+        // text now, so a later reject is reported against it.
+        let turns = std::mem::take(&mut self.reportable);
+        self.reportable = turns
+            .into_iter()
+            .filter(|turn| self.store.rebase_turn(*turn))
+            .collect();
+        self.discard_unsent_comments(cx);
+    }
+
     /// Starts `turn` and its photo; `waiters` are told when the photo is
     /// ready.
     fn open_turn(&mut self, turn: TurnId, waiters: Vec<photo::Waiter>, cx: &mut Context<Self>) {

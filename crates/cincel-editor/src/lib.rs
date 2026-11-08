@@ -274,6 +274,8 @@ mod comment_box_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod comment_rows_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod edge_rows_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod editing_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod git_gutter_tests;

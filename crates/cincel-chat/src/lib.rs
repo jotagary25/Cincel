@@ -259,6 +259,8 @@ mod connection_rows_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod connections_view_tests;
 #[cfg(all(test, feature = "test-support"))]
+mod flow_selection_tests;
+#[cfg(all(test, feature = "test-support"))]
 mod header_badge_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod menu_dismiss_tests;
@@ -266,6 +268,8 @@ mod menu_dismiss_tests;
 mod message_media_order_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod replay_feedback_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod scrollbar_handle_tests;
 #[cfg(all(test, feature = "test-support"))]
 mod scrollbar_tests;
 #[cfg(all(test, feature = "test-support"))]

@@ -1097,6 +1097,33 @@ impl ReviewStore {
         self.records.remove(&turn);
     }
 
+    /// Drops what `turn` reported so far without touching the files under
+    /// review: a file that left the review loses its record, and one still
+    /// pending keeps a record whose base is its text right now (formatting
+    /// forgotten), so only what the user decides from here on is reported.
+    /// Returns whether any record is left.
+    pub fn rebase_turn(&mut self, turn: TurnId) -> bool {
+        let Some(mut records) = self.records.remove(&turn) else {
+            return false;
+        };
+        records.retain(|path, record| {
+            if record.final_text.is_some() {
+                return false;
+            }
+            let Some(file) = self.files.get(path) else {
+                return false;
+            };
+            record.agent_text = live_text(file);
+            record.formatted = None;
+            true
+        });
+        let kept = !records.is_empty();
+        if kept {
+            self.records.insert(turn, records);
+        }
+        kept
+    }
+
     pub(crate) fn display_path(&self, path: &Path) -> String {
         let relative = self
             .root

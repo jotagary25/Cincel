@@ -1,7 +1,9 @@
 //! The vertical scrollbar over the transcript
 //! (`docs/specs/12-etapa7-ronda4.md` §4, `02-visual.md` §5 "Scroll").
 //!
-//! It mirrors the code editor's: 8 px against the right edge, a thumb of at
+//! It mirrors the code editor's: 8 px wide, [`SCROLLBAR_INSET`] in from the
+//! right edge (`docs/specs/13-etapa7-ronda5.md` D3: the dock's resize handle
+//! owns the last 6 px), a thumb of at
 //! least 24 px with radius 3, `text.muted` at 80 % over a track at 40 % of
 //! the background, fully visible for [`SCROLLBAR_HOLD`] after the mouse moves
 //! over the transcript or its content scrolls, then fading out over
@@ -39,13 +41,18 @@ pub const SCROLLBAR_HOLD: Duration = Duration::from_millis(1000);
 pub const SCROLLBAR_FADE: Duration = Duration::from_millis(200);
 /// Width of the track, in pixels (unscaled, like the editor's).
 pub const SCROLLBAR_WIDTH: f32 = 8.;
+/// Gap between the track and the list's right edge: gpui-base's dock resize
+/// handle takes the strip from −6 to −1 px of the dock's right edge, so the
+/// track sits at `[right − 14, right − 6]` and never covers it.
+pub const SCROLLBAR_INSET: f32 = 6.;
 /// Shortest thumb, in pixels.
 pub const SCROLLBAR_MIN_THUMB: f32 = 24.;
 
 /// Where the scrollbar was laid out in the last frame, and how opaque.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollbarGeometry {
-    /// The 8 px track, as tall as the list.
+    /// The 8 px track, as tall as the list, [`SCROLLBAR_INSET`] in from its
+    /// right edge.
     pub track: Bounds<Pixels>,
     /// The thumb, inside the track.
     pub thumb: Bounds<Pixels>,
@@ -87,7 +94,10 @@ impl ScrollbarState {
 /// content that scrolls `max` pixels and is scrolled `offset` of them.
 fn geometry(bounds: Bounds<Pixels>, max: f32, offset: f32) -> (Bounds<Pixels>, Bounds<Pixels>) {
     let track = Bounds::new(
-        point(bounds.right() - px(SCROLLBAR_WIDTH), bounds.top()),
+        point(
+            bounds.right() - px(SCROLLBAR_INSET + SCROLLBAR_WIDTH),
+            bounds.top(),
+        ),
         size(px(SCROLLBAR_WIDTH), bounds.size.height),
     );
     let visible = f32::from(bounds.size.height);
@@ -185,7 +195,7 @@ impl ChatPanel {
     }
 
     /// The layer over the transcript list: it covers the list (absolute,
-    /// inset 0) and paints only the 8 px strip at its right edge.
+    /// inset 0) and paints only the 8 px track near its right edge.
     pub(crate) fn render_scrollbar(
         &self,
         theme: &ChatTheme,
@@ -281,7 +291,10 @@ fn scrollbar_prepaint(
 
 /// The mouse over the transcript: moving shows the bar, the visible track
 /// takes its own presses (a drag of the thumb, a jump elsewhere) and nothing
-/// else (`docs/specs/12-etapa7-ronda4.md` R6–R9).
+/// else (`docs/specs/12-etapa7-ronda4.md` R6–R9). Presses are taken in the
+/// bubble phase and only when the track's hitbox is the hovered one, so an
+/// occluding element painted over it (the dock's resize handle) wins
+/// (`docs/specs/13-etapa7-ronda5.md` D3, R6).
 fn register_mouse_handlers(
     panel: WeakEntity<ChatPanel>,
     list: ListState,
@@ -290,7 +303,8 @@ fn register_mouse_handlers(
 ) {
     let Prepaint { area, max, bar } = prepaint;
     let geometry = bar.as_ref().map(|(bar, _)| *bar);
-    if let Some((_, track_hitbox)) = &bar {
+    let track_hitbox = bar.map(|(_, hitbox)| hitbox);
+    if let Some(track_hitbox) = &track_hitbox {
         // The arrow over the bar, never the I-beam of the text below.
         window.set_cursor_style(CursorStyle::Arrow, track_hitbox);
     }
@@ -332,15 +346,22 @@ fn register_mouse_handlers(
     window.on_mouse_event({
         let panel = panel.clone();
         let list = list.clone();
-        move |event: &MouseDownEvent, phase: DispatchPhase, _window: &mut Window, cx: &mut App| {
-            if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+        move |event: &MouseDownEvent, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                 return;
             }
-            let Some(bar) = geometry.filter(|bar| bar.track.contains(&event.position)) else {
+            // The hit test, not the bounds: whatever occludes the track
+            // (the resize handle) keeps the press.
+            let Some(bar) = geometry.filter(|_| {
+                track_hitbox
+                    .as_ref()
+                    .is_some_and(|hit| hit.is_hovered(window))
+            }) else {
                 return;
             };
-            // The press is the bar's: no bubble control below reacts and the
-            // keyboard focus stays where it was.
+            // The press is the bar's: the transcript below (text selection,
+            // focus) is painted earlier, so its bubble listeners run after
+            // this one and never see it.
             cx.stop_propagation();
             panel
                 .update(cx, |panel, cx| {

@@ -955,6 +955,125 @@ veces seguidas con la máquina en reposo y comparar con la ronda 3 (p95 7 ms).
    <corpus>/medio/bench/cinco-mil.rs`: p95 de alrededor de 7 ms como en la
    ronda 3; si queda pegado a 16,6 ms, avisar.
 
+## Ronda 5 (conversaciones aisladas, barra y asa, párrafos con referencias, flechas en los bordes)
+
+Spec: `docs/specs/13-etapa7-ronda5.md` (2026-11-07). Cierra como 0.2.4. Origen:
+cinco observaciones del autor sobre la 0.2.3, investigadas antes de la spec:
+una prueba real en GPUI mostró que la selección falla solo en los párrafos
+con referencias `@archivo` (el "primer mensaje" no tenía causa propia), y la
+investigación con fuentes oficiales dio qué memoria persistente tiene cada
+agente y cómo se apaga.
+
+### Qué se construyó
+
+- **A. Conversación nueva arranca de cero** (`cincel-workspace`):
+  `Review::discard_pending_feedback` descarta los informes de los turnos
+  cerrados y los comentarios no enviados; `Agents::begin_conversation` lo
+  llama antes de la sesión nueva. Nuevo `ReviewStore::rebase_turn`: los
+  archivos todavía en revisión quedan con base en el texto actual, así lo que
+  se rechace después sí viaja. Tests A1 a A4 en
+  `new_conversation_review_tests.rs`.
+- **B. Memoria de los agentes apagada** (`cincel-connections`):
+  `AgentKind::memory_env` agrega `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` a Claude
+  y `CODEX_CONFIG` (memorias e historial apagados) a Codex en todos los
+  arranques, login incluido; Antigravity no recibe nada. Tests en
+  `memory_env_tests.rs`. `docs/usuario/conexiones.md`: "Las conversaciones no
+  comparten memoria", con la excepción de Antigravity.
+- **C. Barra del chat y asa** (`cincel-chat`): pista en
+  `[derecha − 14, derecha − 6]` (`SCROLLBAR_INSET`), clic en fase normal
+  decidido por el hitbox de la pista, así el asa que la tapa gana. Tests C1 a
+  C3 en `scrollbar_handle_tests.rs`.
+- **D. Párrafos con referencias seleccionables** (`cincel-chat`): el párrafo
+  es un solo `TextView`; cada ficha es un enlace `cincel-chip:N` que un
+  `MarkdownPlugin` convierte en nodo con texto `@nombre` dibujado como
+  `InlineElement` con el `file_chip` de siempre. Copiar da `@nombre`. Tests
+  D1t a D3t en `flow_selection_tests.rs`.
+- **E. Arriba/abajo en los bordes** (`cincel-editor`): `move_vertically` va
+  a la columna 0 o al final de la fila visual cuando la fila destino es la
+  actual; vale para el editor y el cuadro del chat. Tests en
+  `edge_rows_tests.rs`.
+
+### Decisiones del autor (2026-11-07)
+
+- Cada conversación arranca de cero y aislada, para todos los agentes; no
+  enfocarse solo en Claude.
+- Los puntos 1 y 2 (selección) se investigaron por separado, con una prueba
+  real: misma causa (párrafos con referencias).
+- Antigravity queda documentado como no aislable: Google no documenta ningún
+  interruptor y su conocimiento vive del lado del servidor.
+
+### Desviaciones (anotadas por los subagentes)
+
+- **A**: cambiar de conexión también pasa por `begin_conversation`, así que
+  ahora descarta los comentarios no enviados; el test k de la ronda 2
+  (`comments_follow_the_next_message_after_switching_connection`) pasó a
+  `switching_connection_drops_the_unsent_comments`. Coherente con "aislada",
+  pendiente de confirmación del autor.
+- **D**: `ChatEvent::OpenFile` no existía y la ficha no hacía nada al clic;
+  ahora el clic emite `OpenFileAtHunk` (abre el archivo). La ficha nunca tuvo
+  icono. Un párrafo seleccionado entero copia con un `\n` final (la
+  biblioteca lo agrega a cada bloque).
+- **E**: no hay test con el `EditorView` real del chat (`cincel-editor` no
+  puede depender de `cincel-chat`); se prueba con `EditorChrome::Minimal`.
+  `goal_column` pasó a `pub(crate)` para los tests.
+- **B**: las variables se verifican en tests de entorno; contra los
+  adaptadores reales lo verifica el autor (lista manual).
+
+### Verificación (R5-I)
+
+Máquina de referencia (Pop!_OS 24.04, COSMIC Wayland), 2026-11-07, con
+`CARGO_INCREMENTAL=0` y, en los crates con GPUI,
+`--features cincel-editor/test-support,cincel-workspace/test-support,cincel-chat/test-support`:
+
+| Comando | Resultado |
+|---|---|
+| `cargo fmt --all --check` | ok, limpio |
+| `cargo clippy --workspace --all-targets --features … -- -D warnings` | ok, 0 avisos |
+| `cargo test --workspace --no-fail-fast --features …` | ok: 1710 pasados (20 más que la 0.2.3: los cinco archivos de tests nuevos), 0 fallos, 6 ignorados (los de tiempo) |
+| `cargo deny check licenses advisories bans sources` | ok |
+| `cargo run -p cincel -- --smoke-test .` | ok |
+| `cargo build --release -p cincel && --smoke-test --bench .` | ok, `cincel 0.2.4` |
+| `--bench typing` (`cinco-mil.rs`, 200 teclas) | **no concluyente**: la máquina estaba con load average 7 a 9 por procesos ajenos a Cincel durante toda la corrida. Dos corridas: p50 16,6 / 16,6 ms, p95 22,0 / 17,8 ms. Comparación A/B intercalada tres veces con la 0.2.3 instalada: 0.2.3 p50 6,2 / 5,7 / 7,1 ms y p95 10,2 / 9,9 / 12,9 ms; 0.2.4 p50 16,6 / 6,8 / 7,6 ms y p95 23,2 / 16,4 / 14,1 ms. Las corridas 2 y 3 están dentro del ruido; la primera de la 0.2.4 quedó pegada al cuadro de pantalla como en la 0.2.3. Ningún cambio de la ronda toca el camino de tecleo (chat vacío en el banco; la barra no pide cuadros sin ratón). Queda en la lista manual repetirlo con la máquina en reposo. |
+| `--bench idle` (60 s) | 0 cuadros pintados, 0,0 % de CPU, 220 MB |
+| `tools/privacy-check.sh` / `tools/check-links.sh` | ok (en el historial de git, las dos direcciones conocidas, informativo) |
+| `packaging/build.sh` + `packaging/verify.sh` (Ubuntu 22.04 y 24.04) | ok: `.deb` y `.tar.gz` 0.2.4 en `dist/`, `verify.sh: todo bien`, metadatos AppStream validados |
+| `pgrep -af "sleep\|cincel"; docker ps` | vacíos de lo nuestro |
+
+Añadido a la lista manual: repetir `--bench typing` dos veces con la máquina
+en reposo y comparar con la 0.2.3 instalada (p95 de 10 a 13 ms en estas
+condiciones; de 7 ms en reposo en la ronda 3).
+
+
+### Lista de comprobación manual (autor)
+
+1. Rechazar un cambio del agente, crear una conversación nueva, mandar un
+   mensaje: el agente no recibe ningún parche ni menciona "cambios
+   anteriores".
+2. Lo mismo, pero rechazando un segundo cambio después de crear la nueva:
+   el agente recibe solo ese.
+3. Borrar las notas de memoria que Claude ya guardó, una sola vez:
+   `rm -rf ~/.local/share/cincel/connections/*/projects/*/memory`
+4. Claude: una conversación, cerrar, conversación nueva en el mismo
+   proyecto, preguntarle qué recuerda de la anterior: nada; y no reaparece
+   ninguna carpeta `memory` bajo `~/.local/share/cincel/connections/`.
+5. Codex: lo mismo; no aparece `memories_v2/` ni `history.jsonl` bajo su
+   perfil en `~/.local/share/cincel/connections/`.
+6. Conversación larga: tomar el borde derecho del chat con el ratón y
+   ensanchar: funciona aunque la barra esté visible; arrastrar la barra
+   sigue funcionando.
+7. Mensaje con referencias `@archivo`: seleccionar su texto y copiarlo; el
+   portapapeles trae el texto con `@nombre`; clic en la ficha abre el
+   archivo.
+8. Editor y cuadro del chat, una sola línea, cursor en el medio: Arriba va
+   al principio, Abajo al final; Shift+Abajo selecciona hasta el final. Con
+   varias líneas, igual que antes.
+9. Cambiar de conexión con comentarios sin enviar: se descartan (decidir si
+   es lo esperado).
+10. Con la máquina en reposo, correr dos veces seguidas `cincel --bench typing
+    <corpus>/medio --bench-file <corpus>/medio/bench/cinco-mil.rs` con la
+    0.2.4 y con la 0.2.3: p95 parecido entre las dos; si la 0.2.4 queda
+    pegada a 16,6 ms y la 0.2.3 no, avisar.
+
 ## Después de la 0.2.0
 
 - **2026-10-05: el workflow "Slow tests" falló al compilar.** En la ronda 1 se

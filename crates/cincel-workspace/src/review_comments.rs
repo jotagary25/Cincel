@@ -315,6 +315,26 @@ impl Review {
         removed
     }
 
+    /// Deletes every unsent comment (and what a prompt that may never leave
+    /// took aside): their margin marks and composer tags disappear and
+    /// nothing of them is sent later.
+    pub(super) fn discard_unsent_comments(&mut self, cx: &mut Context<Self>) {
+        self.comments.last_sent.clear();
+        let ids: Vec<CommentId> = self
+            .store
+            .comments(|_| None)
+            .into_iter()
+            .map(|comment| comment.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.store.remove_comment(id);
+        }
+        self.comments_changed(None, cx);
+    }
+
     fn comment_path(&self, id: CommentId) -> Option<PathBuf> {
         self.store
             .comments(|_| None)

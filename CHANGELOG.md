@@ -3,6 +3,24 @@
 All notable changes to Cincel are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.4] - 2026-11-07
+
+Conversaciones aisladas y tres arreglos del chat: una conversación nueva no
+arrastra los parches ni los comentarios de la anterior, Claude y Codex se
+lanzan con su memoria persistente apagada (Antigravity no lo permite y queda
+documentado), la barra del chat ya no tapa el asa del panel, los párrafos con
+referencias se pueden seleccionar, y Arriba/Abajo en los bordes van al
+principio o al final.
+
+### Fixed
+- A new conversation starts with an empty review queue: rejected-hunk patches and unsent comments of the previous conversation are no longer prepended to its first prompt.
+- The chat scrollbar sits 6 px inside the panel edge and no longer steals the dock resize handle's clicks.
+- Paragraphs with `@file` chips are selectable and copy as text with `@name`.
+- Up on the first row moves to the start of the row and Down on the last row to its end, in the editor and in the chat composer.
+
+### Changed
+- Claude Code and Codex are launched with their cross-session memory disabled (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `CODEX_CONFIG` with memories and history off). Antigravity has no documented switch and is documented as not isolated.
+
 ## [0.2.3] - 2026-10-24
 
 Dos cambios en el chat: al retomar una conversación ya no aparece como

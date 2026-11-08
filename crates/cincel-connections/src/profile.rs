@@ -165,6 +165,18 @@ impl AgentKind {
         }
     }
 
+    /// Variables that keep one conversation from learning from another:
+    /// Claude's auto memory off, Codex's memories and history persistence
+    /// off. Antigravity documents no switch, so it gets nothing.
+    #[must_use]
+    pub fn memory_env(self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::Claude => vec![(CLAUDE_DISABLE_AUTO_MEMORY_VAR, "1".to_string())],
+            Self::Codex => vec![(CODEX_CONFIG_VAR, CODEX_NO_MEMORY_CONFIG.to_string())],
+            Self::Antigravity => Vec::new(),
+        }
+    }
+
     /// How the login runs.
     #[must_use]
     pub fn login_method(self) -> LoginMethod {
@@ -191,6 +203,16 @@ pub fn retired_reason(agent_id: &str) -> Option<&'static str> {
         .find(|(id, _)| *id == agent_id)
         .map(|(_, reason)| *reason)
 }
+
+/// Claude Code variable that disables its auto memory.
+pub const CLAUDE_DISABLE_AUTO_MEMORY_VAR: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+
+/// Variable the codex-acp adapter merges into each thread's config.
+pub const CODEX_CONFIG_VAR: &str = "CODEX_CONFIG";
+
+/// Codex config that turns memories and history persistence off. Must stay
+/// valid JSON (checked by the tests).
+pub const CODEX_NO_MEMORY_CONFIG: &str = r#"{"features":{"memories":false},"memories":{"use_memories":false,"generate_memories":false},"history":{"persistence":"none"}}"#;
 
 /// Provider credential variables stripped from every agent process (spec
 /// 06 §2), plus `NO_BROWSER` (never injected nor inherited). A trailing `*`
@@ -276,6 +298,9 @@ impl Profile {
         );
         for name in STRIPPED_VARIABLES {
             env = env.with_unset(*name);
+        }
+        for (name, value) in self.kind.memory_env() {
+            env = env.with_set(name, value);
         }
         if self.kind == AgentKind::Antigravity {
             // The agent calls Python's `webbrowser.open` on every sign-in:
@@ -462,11 +487,11 @@ mod tests {
         let profile = Profile::new(AgentKind::Codex, "/data/connections/abc");
         let env = profile.process_env(Some(Path::new("/data/runtime/node-v24/bin")));
         assert_eq!(
-            env.set,
-            vec![(
+            env.set[0],
+            (
                 "CODEX_HOME".to_string(),
                 "/data/connections/abc".to_string()
-            )]
+            )
         );
         for name in [
             "OPENAI_API_KEY",
@@ -660,3 +685,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "memory_env_tests.rs"]
+mod memory_env_tests;
